@@ -44,6 +44,6 @@ def package "luce-std" {
     }
 
     def native "windows" {
-        list libraries = ["ws2_32"]
+        str[] libraries = ["ws2_32"]
     }
 }
