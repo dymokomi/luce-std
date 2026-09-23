@@ -1,0 +1,230 @@
+#==============================================================================================
+#
+#   handshake - The WebSocket handshake
+#
+#   DESCRIPTION:
+#       The RFC 6455 version-13 opening handshake, without extensions: keys, request and
+#       response checks and encoding.
+#
+#==============================================================================================
+
+## The WebSocket handshake is invalid.
+pub let websocket_invalid: ErrorCode = ErrorCode.package(83)
+## A WebSocket limit was exceeded.
+pub let websocket_limit: ErrorCode = ErrorCode.package(84)
+
+func websocket_entropy(buffer: void*, count: usize) -> i32:
+    os.random_bytes(u8[]((u8*)buffer, count)) catch:
+        return -1
+    return 0
+
+let websocket_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+let websocket_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+func websocket_sextet(byte: u8) -> u8?:
+    for index in 0..<64:
+        if websocket_alphabet.bytes[index] == byte:
+            return (u8)index
+    return none
+
+func websocket_key_valid(key: str) -> bool:
+    if key.length != 24 or key.bytes[22] != '=' or key.bytes[23] != '=':
+        return false
+    for byte in key.bytes[..<22]:
+        if websocket_sextet(byte) == none:
+            return false
+    let last = websocket_sextet(key.bytes[21]) else return false
+    return last & 15 == 0
+
+func websocket_base64(input: const u8[], output: u8[]) -> str!:
+    let required = ((input.length + 2) // 3) * 4
+    if output.length < required:
+        error(io.full, "WebSocket base64 output is too small")
+    var at: usize = 0
+    var written: usize = 0
+    while at < input.length:
+        let left = input.length - at
+        let a = input[at]
+        let b: u8 = input[at + 1] if left > 1 else 0
+        let d: u8 = input[at + 2] if left > 2 else 0
+        output[written] = websocket_alphabet.bytes[a >> 2]
+        output[written + 1] = websocket_alphabet.bytes[((a & 3) << 4) | (b >> 4)]
+        output[written + 2] = websocket_alphabet.bytes[((b & 15) << 2) | (d >> 6)] if left > 1 else '='
+        output[written + 3] = websocket_alphabet.bytes[d & 63] if left > 2 else '='
+        at += 3
+        written += 4
+    return (str)output[..<written]
+
+# mark: The handshake =========================================================================
+
+## Generate a fresh 16-byte nonce and encode its canonical 24-byte request key.
+## output needs 24 bytes. Returned text borrows output and is not NUL-terminated.
+pub func websocket_client_key(output: u8[]) -> str!:
+    if output.length < 24:
+        error(io.full, "WebSocket key output needs 24 bytes")
+    var nonce: u8[16]
+    if websocket_entropy((void*)&nonce[0], nonce.length) != 0:
+        error(failed, "WebSocket nonce randomness is unavailable")
+    return try websocket_base64(nonce, output)
+
+func websocket_rotate(value: u32, bits: u32) -> u32:
+    return (value << bits) | (value >> (32 - bits))
+
+## SHA-1 is used only for the RFC's public handshake transform, never for identity
+## or integrity. The validated 24-byte key plus 36-byte GUID always pads to exactly
+## two blocks; keeping this private avoids presenting a general crypto API.
+pub func websocket_accept_key(key: str, output: u8[]) -> str!:
+    if not websocket_key_valid(key):
+        error(websocket_invalid, "WebSocket key must encode exactly 16 bytes")
+    if output.length < 28:
+        error(io.full, "WebSocket accept output needs 28 bytes")
+    var blocks: u8[128]
+    memory.copy(blocks, key.bytes, 24)
+    memory.copy(blocks[24..], websocket_guid.bytes, 36)
+    blocks[60] = 128
+    blocks[126] = 1
+    blocks[127] = 224
+    var state: u32[5] = [1732584193, 4023233417, 2562383102, 271733878, 3285377520]
+    for block in 0..<2:
+        var words: u32[80]
+        for index in 0..<16:
+            let offset = block * 64 + index * 4
+            words[index] = ((u32)blocks[offset] << 24) | ((u32)blocks[offset + 1] << 16) | ((u32)blocks[offset + 2] << 8) | (u32)blocks[offset + 3]
+        for index in 16..<80:
+            words[index] = websocket_rotate(words[index - 3] ^ words[index - 8] ^ words[index - 14] ^ words[index - 16], 1)
+        var a = state[0]
+        var b = state[1]
+        var d = state[2]
+        var e = state[3]
+        var f = state[4]
+        for index in 0..<80:
+            var function: u32 = 0
+            var constant: u32 = 0
+            if index < 20:
+                function = (b & d) | ((~b) & e)
+                constant = 1518500249
+            elif index < 40:
+                function = b ^ d ^ e
+                constant = 1859775393
+            elif index < 60:
+                function = (b & d) | (b & e) | (d & e)
+                constant = 2400959708
+            else:
+                function = b ^ d ^ e
+                constant = 3395469782
+            let next = websocket_rotate(a, 5) +% function +% f +% constant +% words[index]
+            f = e
+            e = d
+            d = websocket_rotate(b, 30)
+            b = a
+            a = next
+        state[0] = state[0] +% a
+        state[1] = state[1] +% b
+        state[2] = state[2] +% d
+        state[3] = state[3] +% e
+        state[4] = state[4] +% f
+    var digest: u8[20]
+    for index in 0..<5:
+        for byte in 0..<4:
+            digest[index * 4 + byte] = (u8)(state[index] >> ((3 - byte) * 8))
+    return try websocket_base64(digest, output)
+
+## Validate the protocol requirements of a parsed upgrade request. Returns its
+## borrowed key. The caller must still apply its Origin/authentication policy.
+pub func websocket_check_request(head: HttpHead) -> str!:
+    if head.status != 0 or head.method != "GET" or head.version != "HTTP/1.1" or head.field_count("host") != 1:
+        error(websocket_invalid, "WebSocket upgrade requires HTTP/1.1 GET and Host")
+    if not (try head.has_token("connection", "upgrade")) or not (try head.has_token("upgrade", "websocket")):
+        error(websocket_invalid, "missing WebSocket upgrade tokens")
+    if head.field_count("sec-websocket-version") != 1 or head.field("sec-websocket-version") != "13":
+        error(websocket_invalid, "unsupported WebSocket version")
+    if head.field_count("sec-websocket-key") != 1:
+        error(websocket_invalid, "WebSocket upgrade needs one key")
+    try websocket_protocols(head.fields)
+    let key = head.field("sec-websocket-key") else error(websocket_invalid, "missing WebSocket key")
+    if not websocket_key_valid(key):
+        error(websocket_invalid, "invalid WebSocket request key")
+    if head.body_kind == HttpBodyKind.chunked or head.body_kind == HttpBodyKind.until_eof or (head.body_kind == HttpBodyKind.fixed and head.body_length != 0):
+        error(websocket_invalid, "WebSocket upgrade request cannot carry a body")
+    return key
+
+## Validate a server's upgrade against the client's original key and offered
+## comma-separated subprotocols. Returns the selected token, or empty text.
+## Extensions are not implemented and any selected extension is rejected.
+pub func websocket_check_response(head: HttpHead, key: str, offered_protocols: str = "") -> str!:
+    if head.status != 101 or head.version != "HTTP/1.1" or not (try head.has_token("connection", "upgrade")) or not (try head.has_token("upgrade", "websocket")):
+        error(websocket_invalid, "invalid WebSocket upgrade response")
+    var expected: u8[28]
+    let accept_value = try websocket_accept_key(key, expected)
+    if head.field_count("sec-websocket-accept") != 1 or head.field("sec-websocket-accept") != accept_value:
+        error(websocket_invalid, "WebSocket accept does not match the client key")
+    if head.field_count("sec-websocket-extensions") != 0 or head.field_count("sec-websocket-protocol") > 1:
+        error(websocket_invalid, "unsupported WebSocket extension or multiple selected protocols")
+    let selected = head.field("sec-websocket-protocol") else return ""
+    if not http_token(selected):
+        error(websocket_invalid, "invalid selected WebSocket subprotocol")
+    var at: usize = 0
+    while let candidate = http_list_next(offered_protocols, &at):
+        if candidate == selected:
+            return selected
+    error(websocket_invalid, "server selected a WebSocket subprotocol that was not offered")
+
+## Encode the client's version-13 handshake using its saved fresh key. The offered
+## subprotocol list contains case-sensitive tokens. No extensions are requested.
+pub func websocket_encode_request(output: u8[], host: str, target: str, key: str, protocols: str = "") -> const u8[]!:
+    if not websocket_key_valid(key):
+        error(websocket_invalid, "invalid WebSocket request key")
+    var fields: HttpField[5] = [HttpField(name = "Host", value = host), HttpField(name = "Upgrade", value = "websocket"), HttpField(name = "Sec-WebSocket-Version", value = "13"), HttpField(name = "Sec-WebSocket-Key", value = key), HttpField(name = "Sec-WebSocket-Protocol", value = protocols)]
+    var count: usize = 4
+    if protocols.length > 0:
+        var at: usize = 0
+        while let part = http_list_next(protocols, &at):
+            if part.length > 0 and not http_token(part):
+                error(websocket_invalid, "invalid offered WebSocket subprotocol")
+        count = 5
+    try websocket_protocols(fields[..<count])
+    return try http_encode_head(output, HttpHead(method = "GET", target = target, version = "HTTP/1.1", fields = fields[..<count], body_kind = HttpBodyKind.empty, keep_alive = true, connection_upgrade = true))
+
+## Encode a successful upgrade after application approval. A selected protocol
+## must be an exact token offered by the client. Empty means no subprotocol.
+pub func websocket_encode_response(output: u8[], request: HttpHead, protocol: str = "") -> const u8[]!:
+    let key = try websocket_check_request(request)
+    if protocol.length > 0:
+        if not http_token(protocol):
+            error(websocket_invalid, "invalid selected WebSocket subprotocol")
+        var found = false
+        for field in request.fields:
+            if http_equal(field.name, "sec-websocket-protocol"):
+                var at: usize = 0
+                while let candidate = http_list_next(field.value, &at):
+                    if candidate == protocol:
+                        found = true
+        if not found:
+            error(websocket_invalid, "selected WebSocket subprotocol was not offered")
+    var accept_buffer: u8[28]
+    let accept_value = try websocket_accept_key(key, accept_buffer)
+    var fields: HttpField[3] = [HttpField(name = "Upgrade", value = "websocket"), HttpField(name = "Sec-WebSocket-Accept", value = accept_value), HttpField(name = "Sec-WebSocket-Protocol", value = protocol)]
+    let count: usize = 3 if protocol.length > 0 else 2
+    return try http_encode_head(output, HttpHead(method = "GET", version = "HTTP/1.1", status = 101, fields = fields[..<count], body_kind = HttpBodyKind.empty, keep_alive = true, connection_upgrade = true))
+
+## Bound negotiation work as well as bytes. Offers are case-sensitive and unique
+## across repeated fields; no more than 128 subprotocols can be offered.
+func websocket_protocols(fields: const HttpField[]) -> !:
+    var seen: str[128]
+    var count: usize = 0
+    for field in fields:
+        if not http_equal(field.name, "sec-websocket-protocol"):
+            continue
+        var at: usize = 0
+        while let candidate = http_list_next(field.value, &at):
+            if candidate.length == 0:
+                continue  # an empty list element is ignored (RFC 9110 §5.6.1.2)
+            if not http_token(candidate):
+                error(websocket_invalid, "invalid offered WebSocket subprotocol")
+            for previous in seen[..<count]:
+                if candidate == previous:
+                    error(websocket_invalid, "duplicate offered WebSocket subprotocol")
+            if count == seen.length:
+                error(websocket_limit, "too many offered WebSocket subprotocols")
+            seen[count] = candidate
+            count += 1

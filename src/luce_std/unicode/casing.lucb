@@ -1,0 +1,89 @@
+#==============================================================================================
+#
+#   casing - Full Unicode case mapping
+#
+#   DESCRIPTION:
+#       Locale-independent uppercase, lowercase and case folding, including multi-scalar
+#       expansions and the contextual final Greek sigma; no normalization.
+#
+#==============================================================================================
+
+## Full default uppercase mapping, including multi-scalar expansions. This is
+## locale-independent Unicode casing, without normalization or language tailoring.
+pub func to_upper(text: str, max_bytes: usize? = none) -> str!:
+    return try convert_case(text, 0, false, max_bytes)
+
+## Full default lowercase mapping, including contextual final Greek sigma and
+## multi-scalar expansions. Turkish/Azeri/Lithuanian language tailoring is excluded.
+pub func to_lower(text: str, max_bytes: usize? = none) -> str!:
+    return try convert_case(text, 1, false, max_bytes)
+
+## Full Unicode case folding for caseless comparison. Optional turkic selects the
+## T mappings in CaseFolding.txt; this is not locale-aware lowercasing. Folding does
+## not normalize text, so canonically equivalent inputs can still differ in bytes.
+pub func case_fold(text: str, turkic: bool = false, max_bytes: usize? = none) -> str!:
+    return try convert_case(text, 2, turkic, max_bytes)
+
+func convert_case(text: str, kind: u8, turkic: bool, max_bytes: usize?) -> str!:
+    var empty: u8[]
+    let length = try case_pass(text, kind, turkic, empty, false, max_bytes)
+    let capacity = length +? 1 else error(memory.exhausted, "the cased text size overflowed")
+    let output = try alloc u8[capacity]
+    errdefer free(output)
+    let written = try case_pass(text, kind, turkic, output[..<length], true, max_bytes)
+    if written != length:
+        error(utf8.invalid_sequence, "the text changed during Unicode casing")
+    output[length] = 0
+    return (str)output[..<length]
+
+func case_pass(text: str, kind: u8, turkic: bool, output: u8[], writing: bool, max_bytes: usize?) -> usize!:
+    var offset: usize = 0
+    var position: usize = 0
+    var previous_cased = false
+    while offset < text.length:
+        let decoded = utf8.decode(text.bytes, offset) else error(utf8.invalid_sequence, "invalid UTF-8 text")
+        offset += decoded.width
+        let scalar = (u32)decoded.scalar
+        let mapping = case_mapping(text, offset, scalar, kind, turkic, previous_cased)
+        for index in 0..<mapping.length:
+            let value = mapping.at(index)
+            let width = utf8.encoded_length(value) else trap("invalid generated Unicode scalar")
+            let next = position +? width else error(memory.exhausted, "the cased text size overflowed")
+            if let limit = max_bytes:
+                if next > limit:
+                    error(strings.output_too_large, "the cased text exceeds its byte limit")
+            if writing:
+                if next > output.length:
+                    error(utf8.invalid_sequence, "the text changed during Unicode casing")
+                let encoded = utf8.encode(value, output[position..<next]) else trap("a Unicode scalar did not fit its encoded length")
+                discard(encoded)
+            position = next
+        # A character can be both Cased and Case_Ignorable. Context skips it in
+        # that case, matching the default casing rule's Case_Ignorable sequence.
+        if range_value(case_ignorable_ranges, scalar) == 0:
+            previous_cased = range_value(cased_ranges, scalar) != 0
+    return position
+
+func case_mapping(text: str, offset: usize, scalar: u32, kind: u8, turkic: bool, previous_cased: bool) -> Mapping:
+    if kind == 0:
+        return mapped(upper_mappings, scalar) else identity_mapping(scalar)
+    if kind == 1:
+        if scalar == 931 and previous_cased and not following_cased(text, offset):
+            return identity_mapping(962)
+        return mapped(lower_mappings, scalar) else identity_mapping(scalar)
+    if turkic:
+        if let mapping = mapped(turkic_mappings, scalar):
+            return mapping
+    return mapped(fold_mappings, scalar) else identity_mapping(scalar)
+
+func following_cased(text: str, start: usize) -> bool:
+    var offset = start
+    while offset < text.length:
+        # The main pass rejects malformed input; this lookahead only answers a
+        # context question and never consumes or replaces the caller's text.
+        let decoded = utf8.decode(text.bytes, offset) else return false
+        offset += decoded.width
+        let scalar = (u32)decoded.scalar
+        if range_value(case_ignorable_ranges, scalar) == 0:
+            return range_value(cased_ranges, scalar) != 0
+    return false

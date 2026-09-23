@@ -1,0 +1,59 @@
+#==============================================================================================
+#
+#   posix - POSIX argv and environment setup
+#
+#   DESCRIPTION:
+#       Build argv and environment storage before fork; the child only moves descriptors,
+#       changes its working directory and environment pointer, and calls execvp.
+#
+#==============================================================================================
+
+extern var environ: (c.str?)*
+extern func _NSGetEnviron() -> (c.str?)**
+extern func chdir(path: c.str) -> i32
+
+func environment_address() -> (c.str?)**:
+    if platform.macos:
+        return _NSGetEnviron()
+    return &environ
+
+func environment_name(entry: c.str) -> str!:
+    let text = (str)entry
+    for index in 0..<text.length:
+        if text.bytes[index] == '=':
+            if index == 0:
+                break
+            return (str)text.bytes[..<index]
+    error(failed, "an environment override must be NAME=value with a nonempty name")
+
+func environment_posix(overrides: const c.str[], inherited: (c.str?)*) -> (c.str?)[]!:
+    for index in 0..<overrides.length:
+        let name = try environment_name(overrides[index])
+        for prior in 0..<index:
+            if name == try environment_name(overrides[prior]):
+                error(failed, "an environment override repeats a name")
+    var count: usize = 0
+    while inherited[count] != none:
+        count += 1
+    let capacity = count +? overrides.length else error(failed, "the environment is too large")
+    let size = capacity +? 1 else error(failed, "the environment is too large")
+    let result = try alloc (c.str?)[size]
+    errdefer free(result)
+    var used: usize = 0
+    for index in 0..<count:
+        let value = inherited[index] else trap("the environment changed during process creation")
+        let name = environment_name(value) catch:
+            recover ""
+        var replaced = false
+        for override in overrides:
+            if name == try environment_name(override):
+                replaced = true
+                break
+        if not replaced:
+            result[used] = value
+            used += 1
+    for override in overrides:
+        result[used] = override
+        used += 1
+    result[used] = none
+    return result

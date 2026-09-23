@@ -1,0 +1,49 @@
+#prisma 4.0
+def package "luce-std" {
+    str owner = "dymokomi"
+    str version = "0.1.0"
+    str kind = "package"
+    str language = "luce-base"
+    str description = "Luce's standard library: files and directories, paths, processes, networking, math, UTF-8 and Unicode, and crash reports. The language runtime ships with the compiler; everything else a program imports lives here."
+    str readme = "README.md"
+
+    def export "utf8" {
+        str module = "luce_std.utf8"
+    }
+
+    def export "unicode" {
+        str module = "luce_std.unicode"
+    }
+
+    def export "paths" {
+        str module = "luce_std.paths"
+    }
+
+    def export "math" {
+        str module = "luce_std.math"
+    }
+
+    def export "math32" {
+        str module = "luce_std.math32"
+    }
+
+    def export "net" {
+        str module = "luce_std.net"
+    }
+
+    def export "files" {
+        str module = "luce_std.files"
+    }
+
+    def export "crash" {
+        str module = "luce_std.crash"
+    }
+
+    def export "process" {
+        str module = "luce_std.process"
+    }
+
+    def native "windows" {
+        list libraries = ["ws2_32"]
+    }
+}

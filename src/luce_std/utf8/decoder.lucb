@@ -1,0 +1,97 @@
+#==============================================================================================
+#
+#   decoder - Incremental strict UTF-8 decoder
+#
+#   DESCRIPTION:
+#       An allocation-free decoder with inline state: push bytes in order, then finish at EOF.
+#       Malformed or truncated input latches a failure until reset.
+#
+#==============================================================================================
+
+## Incremental strict UTF-8 decoder with inline state and no allocation. A zero
+## value is ready for input. Keep one decoder per stream; calls require exclusive
+## access. Chunk boundaries have no meaning: push every byte in order, then call
+## finish at EOF. Malformed input and a truncated final scalar latch a failure;
+## subsequent push/finish calls fail until reset explicitly starts a new stream.
+pub struct Decoder:
+    var scalar: u32
+    var remaining: u8
+    var minimum: u8
+    var maximum: u8
+    var failure: u8
+
+    ## Consume one byte, returning a scalar only when its complete encoding has
+    ## arrived. None means a valid but incomplete prefix. Reject invalid lead or
+    ## continuation bytes immediately, including prefixes that can only encode
+    ## an overlong value, surrogate, or value above U+10FFFF. The failing byte is
+    ## consumed; no replacement scalar is emitted and input is never replayed.
+    pub mutating func push(byte: u8) -> char?!:
+        try self.check_failure()
+        if self.remaining == 0:
+            if byte < 128:
+                return char(byte)
+            self.minimum = 128
+            self.maximum = 191
+            if byte >= 194 and byte <= 223:
+                self.scalar = (u32)(byte & 31)
+                self.remaining = 1
+            elif byte >= 224 and byte <= 239:
+                self.scalar = (u32)(byte & 15)
+                self.remaining = 2
+                if byte == 224:
+                    self.minimum = 160
+                elif byte == 237:
+                    self.maximum = 159
+            elif byte >= 240 and byte <= 244:
+                self.scalar = (u32)(byte & 7)
+                self.remaining = 3
+                if byte == 240:
+                    self.minimum = 144
+                elif byte == 244:
+                    self.maximum = 143
+            else:
+                self.failure = 1
+                error(invalid_sequence, "invalid UTF-8 leading byte")
+            return none
+        if byte < self.minimum or byte > self.maximum:
+            self.failure = 1
+            error(invalid_sequence, "invalid UTF-8 continuation byte")
+        self.scalar = (self.scalar << 6) | (u32)(byte & 63)
+        self.remaining -= 1
+        self.minimum = 128
+        self.maximum = 191
+        if self.remaining == 0:
+            return char(self.scalar)
+        return none
+
+    ## Validate EOF. Empty streams and complete scalars succeed; an unfinished
+    ## scalar reports incomplete_sequence. Success is idempotent and does not
+    ## seal the decoder: more bytes may follow when the caller resumes a stream.
+    pub mutating func finish() -> !:
+        try self.check_failure()
+        if self.remaining != 0:
+            self.failure = 2
+            error(incomplete_sequence, "the UTF-8 stream ends within a scalar")
+
+    ## Whether a valid prefix is waiting for continuation bytes. False after a
+    ## failure, even when the rejected sequence had an unfinished prefix.
+    pub func is_pending() -> bool:
+        return self.failure == 0 and self.remaining != 0
+
+    ## Whether malformed input or incomplete EOF has latched a failure.
+    pub func is_failed() -> bool:
+        return self.failure != 0
+
+    ## Discard any partial scalar and latched error; begin an independent stream.
+    pub mutating func reset():
+        self.scalar = 0
+        self.remaining = 0
+        self.minimum = 0
+        self.maximum = 0
+        self.failure = 0
+
+    func check_failure() -> !:
+        if self.failure == 1:
+            error(invalid_sequence, "the UTF-8 decoder has rejected malformed input")
+        if self.failure == 2:
+            error(incomplete_sequence, "the UTF-8 decoder has rejected incomplete input")

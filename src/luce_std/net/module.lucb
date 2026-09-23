@@ -1,0 +1,154 @@
+#==============================================================================================
+#
+#   net - TCP/UDP sockets, HTTP and WebSocket
+#
+#   DESCRIPTION:
+#       TCP/UDP sockets, readiness, deadline I/O, and HTTP/WebSocket codecs.
+#
+#==============================================================================================
+
+import c
+import atomic
+import platform
+import memory
+import io
+import strings
+import luce_std.utf8 as utf8
+import sync
+import os
+from io import Reader, Writer
+# mark: Socket system calls ===================================================================
+
+extern func socket(domain: i32, kind: i32, protocol: i32) -> platform.SocketDescriptor
+extern func bind(descriptor: platform.SocketDescriptor, address: const void*, length: u32) -> i32
+extern func listen(descriptor: platform.SocketDescriptor, backlog: i32) -> i32
+extern func accept(descriptor: platform.SocketDescriptor, address: void*?, length: u32*?) -> platform.SocketDescriptor
+extern func accept4(descriptor: platform.SocketDescriptor, address: void*?, length: u32*?, flags: i32) -> platform.SocketDescriptor
+extern func fcntl(descriptor: platform.SocketDescriptor, command: i32, ...) -> i32
+extern func connect(descriptor: platform.SocketDescriptor, address: const void*, length: u32) -> i32
+extern func posix_send as "send"(descriptor: platform.SocketDescriptor, data: const void*, length: usize, flags: i32) -> isize
+extern func posix_recv as "recv"(descriptor: platform.SocketDescriptor, buffer: void*, length: usize, flags: i32) -> isize
+extern func posix_sendto as "sendto"(descriptor: platform.SocketDescriptor, data: const void*, length: usize, flags: i32, address: const void*, address_length: u32) -> isize
+extern func receive_message_macos as "recvmsg"(descriptor: platform.SocketDescriptor, message: MacMessage*, flags: i32) -> isize
+extern func receive_message_linux as "recvmsg"(descriptor: platform.SocketDescriptor, message: LinuxMessage*, flags: i32) -> isize
+extern func posix_close as "close"(descriptor: platform.SocketDescriptor) -> i32
+extern func getsockopt(descriptor: platform.SocketDescriptor, level: i32, option: i32, value: void*, length: u32*) -> i32
+extern func setsockopt(descriptor: platform.SocketDescriptor, level: i32, option: i32, value: const void*, length: u32) -> i32
+extern func getsockname(descriptor: platform.SocketDescriptor, address: void*, length: u32*) -> i32
+extern func getpeername(descriptor: platform.SocketDescriptor, address: void*, length: u32*) -> i32
+extern func shutdown(descriptor: platform.SocketDescriptor, direction: i32) -> i32
+extern func getaddrinfo(host: c.str, service: c.str?, hints: const AddressInfo*?, result: AddressInfo*?*) -> i32
+extern func freeaddrinfo(info: AddressInfo*)
+
+## `sockaddr_in`: 16 bytes everywhere; macOS splits the first two into a length and a
+## one-byte family, Linux keeps a two-byte family. `family_word` reads and writes it.
+extern struct NativeIpv4Address:
+    head: u16
+    port: u16
+    address: u32
+    zero: u8[8]
+
+## sockaddr_in6 is 28 bytes on both native hosts. Flow information is left zero;
+## the scope index is a host-order u32, while the port is network-order u16.
+extern struct NativeIpv6Address:
+    head: u16
+    port: u16
+    flow: u32
+    address: u8[16]
+    scope: u32
+
+## Enough aligned storage for either supported IP sockaddr representation.
+extern union NativeAddress:
+    ipv4: NativeIpv4Address
+    ipv6: NativeIpv6Address
+
+extern struct ReceiveVector:
+    data: u8*?
+    length: usize
+
+## Host msghdr layouts: macOS uses int for the vector count and socklen_t for
+## control length; glibc uses size_t for both. Their flags offsets differ.
+extern struct MacMessage:
+    address: void*
+    address_length: u32
+    vectors: ReceiveVector*
+    vector_count: i32
+    control: void*?
+    control_length: u32
+    flags: i32
+
+extern struct LinuxMessage:
+    address: void*
+    address_length: u32
+    vectors: ReceiveVector*
+    vector_count: usize
+    control: void*?
+    control_length: usize
+    flags: i32
+
+## The first two bytes of `sockaddr_in` as one little-endian word: on macOS the length
+## byte comes first and the family byte second, on Linux the family fills both.
+func family_word(family: i32, length: u8) -> u16:
+    if platform.macos:
+        return (u16)length | ((u16)family << 8)
+    return (u16)family
+
+## `addrinfo`: macOS puts the canonical name before the address, Linux after it.
+extern struct AddressInfo:
+    flags: i32
+    family: i32
+    kind: i32
+    protocol: i32
+    address_length: u32
+    fifth: void*?
+    sixth: void*?
+    next: AddressInfo*?
+
+func info_address(info: const AddressInfo*) -> void*?:
+    return info.sixth if platform.macos or platform.windows else info.fifth
+
+let inet: i32 = 2
+let inet6: i32 = 23 if platform.windows else (30 if platform.macos else 10)
+let stream: i32 = 1
+let datagram: i32 = 2
+let socket_close_on_exec: i32 = 524288
+let get_descriptor_flags: i32 = 1
+let set_descriptor_flags: i32 = 2
+let descriptor_close_on_exec: i32 = 1
+## `SOL_SOCKET` and `SO_REUSEADDR`: 65535 and 4 on macOS, 1 and 2 on Linux.
+let socket_level: i32 = 65535 if platform.macos or platform.windows else 1
+let reuse_address_option: i32 = 4 if platform.macos or platform.windows else 2
+## A write to a socket the peer closed answers an error, never the process's death:
+## macOS marks the socket (`SO_NOSIGPIPE`, 4130), Linux marks the send (`MSG_NOSIGNAL`,
+## 16384).
+let ipv6_level: i32 = 41
+let ipv6_only_option: i32 = 27 if platform.macos or platform.windows else 26
+let no_sigpipe_option: i32 = 4130
+let send_flags: i32 = 0 if platform.macos or platform.windows else 16384
+
+let socket_interrupted: i32 = 10004 if platform.windows else c.interrupted
+
+func socket_errno() -> i32:
+    if platform.windows:
+        return WSAGetLastError()
+    return c.errno()
+
+func close(descriptor: platform.SocketDescriptor) -> i32:
+    if platform.windows:
+        return closesocket(descriptor)
+    return posix_close(descriptor)
+
+func send(descriptor: platform.SocketDescriptor, data: const void*, length: usize, flags: i32) -> isize:
+    if platform.windows:
+        return (isize)windows_send(descriptor, data, (i32)length, flags)
+    return posix_send(descriptor, data, length, flags)
+
+func recv(descriptor: platform.SocketDescriptor, data: void*, length: usize, flags: i32) -> isize:
+    if platform.windows:
+        return (isize)windows_recv(descriptor, data, (i32)length, flags)
+    return posix_recv(descriptor, data, length, flags)
+
+func sendto(descriptor: platform.SocketDescriptor, data: const void*, length: usize, flags: i32, address: const void*, address_length: u32) -> isize:
+    if platform.windows:
+        return (isize)windows_sendto(descriptor, data, (i32)length, flags, address, address_length)
+    return posix_sendto(descriptor, data, length, flags, address, address_length)

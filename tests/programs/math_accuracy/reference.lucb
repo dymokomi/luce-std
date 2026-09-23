@@ -1,0 +1,115 @@
+## Evaluate checked-in independent vectors without linking a reference library.
+import c
+import files
+import math
+import math32
+import memory
+
+func evaluate64(operation: u32, x_bits: u64, y_bits: u64, z_bits: u64) -> u64:
+    let x = f64.bits((u64)x_bits)
+    let y = f64.bits((u64)y_bits)
+    let z = f64.bits((u64)z_bits)
+    match operation:
+        0: return (u64)math.floor(x).bits()
+        1: return (u64)math.ceil(x).bits()
+        2: return (u64)math.round(x).bits()
+        3: return (u64)math.trunc(x).bits()
+        4: return (u64)math.sqrt(x).bits()
+        5: return (u64)math.cbrt(x).bits()
+        6: return (u64)math.hypot(x, y).bits()
+        7: return (u64)math.mod(x, y).bits()
+        8: return (u64)math.pow(x, y).bits()
+        9: return (u64)math.exp(x).bits()
+        10: return (u64)math.exp2(x).bits()
+        11: return (u64)math.log(x).bits()
+        12: return (u64)math.log2(x).bits()
+        13: return (u64)math.log10(x).bits()
+        14: return (u64)math.log1p(x).bits()
+        15: return (u64)math.expm1(x).bits()
+        16: return (u64)math.fma(x, y, z).bits()
+        17: return (u64)math.sin(x).bits()
+        18: return (u64)math.cos(x).bits()
+        19: return (u64)math.tan(x).bits()
+        20: return (u64)math.asin(x).bits()
+        21: return (u64)math.acos(x).bits()
+        22: return (u64)math.atan(x).bits()
+        23: return (u64)math.atan2(x, y).bits()
+        24: return (u64)math.sinh(x).bits()
+        25: return (u64)math.cosh(x).bits()
+        26: return (u64)math.tanh(x).bits()
+        27: return (u64)math.remainder(x, y).bits()
+        _: trap("unknown math reference operation")
+
+func evaluate32(operation: u32, x_bits: u64, y_bits: u64, z_bits: u64) -> u64:
+    let x = f32.bits((u32)x_bits)
+    let y = f32.bits((u32)y_bits)
+    let z = f32.bits((u32)z_bits)
+    match operation:
+        0: return (u64)math32.floor(x).bits()
+        1: return (u64)math32.ceil(x).bits()
+        2: return (u64)math32.round(x).bits()
+        3: return (u64)math32.trunc(x).bits()
+        4: return (u64)math32.sqrt(x).bits()
+        5: return (u64)math32.cbrt(x).bits()
+        6: return (u64)math32.hypot(x, y).bits()
+        7: return (u64)math32.mod(x, y).bits()
+        8: return (u64)math32.pow(x, y).bits()
+        9: return (u64)math32.exp(x).bits()
+        10: return (u64)math32.exp2(x).bits()
+        11: return (u64)math32.log(x).bits()
+        12: return (u64)math32.log2(x).bits()
+        13: return (u64)math32.log10(x).bits()
+        14: return (u64)math32.log1p(x).bits()
+        15: return (u64)math32.expm1(x).bits()
+        16: return (u64)math32.fma(x, y, z).bits()
+        17: return (u64)math32.sin(x).bits()
+        18: return (u64)math32.cos(x).bits()
+        19: return (u64)math32.tan(x).bits()
+        20: return (u64)math32.asin(x).bits()
+        21: return (u64)math32.acos(x).bits()
+        22: return (u64)math32.atan(x).bits()
+        23: return (u64)math32.atan2(x, y).bits()
+        24: return (u64)math32.sinh(x).bits()
+        25: return (u64)math32.cosh(x).bits()
+        26: return (u64)math32.tanh(x).bits()
+        27: return (u64)math32.remainder(x, y).bits()
+        _: trap("unknown math reference operation")
+
+func acceptable(actual: u64, expected: u64, width: u32, limit: u64) -> bool:
+    let sign: u64 = 2147483648 if width == 32 else 9223372036854775808
+    let infinity: u64 = 2139095040 if width == 32 else 9218868437227405312
+    let expected_magnitude = expected & (sign - 1)
+    let actual_magnitude = actual & (sign - 1)
+    if expected_magnitude > infinity:
+        return actual_magnitude > infinity
+    if expected_magnitude == infinity or expected_magnitude == 0:
+        return actual == expected
+    if actual_magnitude >= infinity:
+        return false
+    let actual_order = sign - actual_magnitude if (actual & sign) != 0 else sign + actual_magnitude
+    let expected_order = sign - expected_magnitude if (expected & sign) != 0 else sign + expected_magnitude
+    let distance = actual_order - expected_order if actual_order >= expected_order else expected_order - actual_order
+    return distance <= limit
+
+pub func main(arguments: c.str[]) -> i32!:
+    let corpus = try files.read(arguments[1])
+    defer free(corpus)
+    assert(corpus.length % 48 == 0)
+    var position: usize = 0
+    while position < corpus.length:
+        let operation = memory.read[u32](corpus.data + position)
+        let width = memory.read[u32](corpus.data + position + 4)
+        let x = memory.read[u64](corpus.data + position + 8)
+        let y = memory.read[u64](corpus.data + position + 16)
+        let z = memory.read[u64](corpus.data + position + 24)
+        let expected = memory.read[u64](corpus.data + position + 32)
+        let limit = memory.read[u64](corpus.data + position + 40)
+        assert(width == 32 or width == 64)
+        let actual = evaluate32(operation, x, y, z) if width == 32 else evaluate64(operation, x, y, z)
+        if not acceptable(actual, expected, width, limit):
+            print(f"math reference row {position // 48}: operation {operation} width {width}, actual bits {actual}, expected {expected}, budget {limit}")
+            trap("math result differs from the independent reference")
+        position += 48
+    assert(position // 48 > 4000)
+    print("ok broad math accuracy reference corpus")
+    return 0

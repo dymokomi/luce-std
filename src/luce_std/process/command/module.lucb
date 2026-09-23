@@ -1,0 +1,188 @@
+#==============================================================================================
+#
+#   command - A background child process with captured output
+#
+#   DESCRIPTION:
+#       A command owns a background worker and its child process tree. Only byte storage crosses
+#       the worker boundary; ARC objects stay on their owning thread.
+#
+#==============================================================================================
+
+import interop
+import thread
+import strings
+import luce_std.utf8 as utf8
+
+struct CommandState:
+    var cancelled: @bool
+    var done: @bool
+    var changed: @u64
+    var lock: sync.Mutex
+    var output: u8[]
+    var used: usize
+    var limit: usize
+    var program: str
+    var directory: str
+    var arguments: c.str[]
+    var argument_count: usize
+    var environment: c.str[]
+    var environment_count: usize
+    var code: i64
+    var failure: str
+
+func command_text(text: str) -> str!:
+    if not utf8.valid(text.bytes):
+        error(failed, "a command argument must be UTF-8")
+    for byte in text.bytes:
+        if byte == 0:
+            error(failed, "a command argument cannot contain NUL")
+    with memory.heap:
+        return try strings.copy(text)
+
+# mark: The command ===========================================================================
+
+## Launch without invoking a shell. `arguments` excludes the program name.
+## Output merges stdout/stderr in observation order, bounded by output_limit.
+## close cancels and joins; poll with is_finished without blocking the UI.
+pub struct Command:
+    var storage: CommandState*?
+    var worker: thread.Handle?
+
+    ## Start `program` with `arguments` in a background worker, capturing output up to `output_limit`.
+    pub func init(program: str, arguments: const str[], directory: str = "", output_limit: usize = 1048576, environment: const str[]? = none) -> !:
+        if program.length == 0 or output_limit < 1 or output_limit > 16777216:
+            error(failed, "a command needs a program and an output limit in 1..16 MiB")
+        let state = try new CommandState(limit = output_limit, code = -1) in memory.heap
+        errdefer command_dispose(state)
+        state.program = try command_text(program)
+        state.directory = try command_text(directory)
+        state.arguments = try alloc c.str[arguments.length] in memory.heap
+        for index in 0..<arguments.length:
+            state.arguments[index] = (c.str)(try command_text(arguments[index]))
+            state.argument_count += 1
+        if let overrides = environment:
+            state.environment = try alloc c.str[overrides.length] in memory.heap
+            for index in 0..<overrides.length:
+                state.environment[index] = (c.str)(try command_text(overrides[index]))
+                state.environment_count += 1
+        let worker = try thread.spawn(command_entry, state, name = "command")
+        self.storage = state
+        self.worker = worker
+
+    func state() -> CommandState*:
+        return self.storage else trap("the command is closed")
+
+    ## Whether the child has exited.
+    pub func is_finished() -> bool:
+        return self.state().done.load(.acquire)
+
+    ## A counter that advances as captured output and status change.
+    pub func revision() -> i64:
+        return (i64)self.state().changed.load(.acquire)
+
+    ## The child's exit code, or `none` while it is still running.
+    pub func exit_code() -> i64?:
+        if not self.is_finished():
+            return none
+        return self.state().code
+
+    ## A stable UTF-8 snapshot. Invalid bytes and NUL are shown as replacement
+    ## characters; split multibyte output is repaired by the next full snapshot.
+    pub func output() -> interop.Owned[str]!:
+        self.state().lock.lock()
+        defer self.state().lock.unlock()
+        with memory.heap:
+            var text = try strings.Builder.create(self.state().used)
+            defer text.destroy()
+            var offset: usize = 0
+            let bytes = self.state().output[..<self.state().used]
+            while offset < bytes.length:
+                if let scalar = utf8.decode(bytes, offset):
+                    if (u32)scalar.scalar == 0:
+                        try text.put("�")
+                    else:
+                        discard(try text.write(bytes[offset..<offset + scalar.width]))
+                    offset += scalar.width
+                else:
+                    try text.put("�")
+                    offset += 1
+            return try interop.copy_text(text.view())
+
+    ## The captured standard error, as owned text.
+    pub func error_message() -> interop.Owned[str]!:
+        if not self.is_finished():
+            return try interop.copy_text("")
+        return try interop.copy_text(self.state().failure)
+
+    ## Request cancellation of the child process tree.
+    pub func cancel():
+        if let state = self.storage:
+            state.cancelled.store(true, .release)
+
+    ## Wait for the worker, reap the child, and release resources.
+    pub mutating func close():
+        let worker = self.worker else return
+        self.cancel()
+        worker.join() catch failure:
+            trap("a command worker could not be joined")
+        self.worker = none
+        let state = self.storage else return
+        self.storage = none
+        command_dispose(state)
+
+## The interop type of a Command.
+pub let command_type: interop.Type[Command] = interop.Type[Command]("Command", Command.close, closeable = true)
+
+func command_dispose(state: CommandState*):
+    with memory.heap:
+        if state.program.length > 0:
+            strings.release(state.program)
+        # Empty copied strings still own the trailing NUL.
+        if (usize)state.directory.bytes.data != 0:
+            strings.release(state.directory)
+        for argument in state.arguments[..<state.argument_count]:
+            strings.release((str)argument)
+        if (usize)state.arguments.data != 0:
+            free(state.arguments)
+        for override in state.environment[..<state.environment_count]:
+            strings.release((str)override)
+        if (usize)state.environment.data != 0:
+            free(state.environment)
+        if state.output.length > 0:
+            free(state.output)
+        if state.failure.length > 0:
+            strings.release(state.failure)
+        free(state)
+
+func command_entry(raw: void*?):
+    let state = (CommandState*)(raw else return)
+    let outcome = run_controlled((c.str)state.program, state.arguments, (c.str)state.directory, state.environment if state.environment_count > 0 else none, state) catch failure:
+        state.failure = strings.copy(failure.message) catch ignored: recover ""
+        state.done.store(true, .release)
+        return
+    state.code = (i64)outcome.0
+    release(outcome.1)
+    release(outcome.2)
+    state.done.store(true, .release)
+
+func command_append(state: CommandState*, bytes: const u8[]) -> !:
+    state.lock.lock()
+    defer state.lock.unlock()
+    if bytes.length > state.limit - state.used:
+        error(failed, "the command exceeded its output limit")
+    let size = state.used + bytes.length
+    if size > state.output.length:
+        let capacity = math_min_size(state.limit, math_max_size(size, math_max_size(4096, state.output.length * 2)))
+        if state.output.length == 0:
+            state.output = try alloc u8[capacity]
+        else:
+            state.output = try memory.grow(state.output, capacity)
+    memory.copy(state.output[state.used..], bytes, bytes.length)
+    state.used = size
+    discard(state.changed.add(1, .release))
+
+func math_min_size(a: usize, b: usize) -> usize:
+    return a if a < b else b
+
+func math_max_size(a: usize, b: usize) -> usize:
+    return a if a > b else b

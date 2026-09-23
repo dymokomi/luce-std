@@ -1,0 +1,64 @@
+import c
+import memory
+import net
+
+extern func reference_released() -> i32
+
+pub func main(arguments: c.str[]) -> i32!:
+    let v4 = net.SocketAddress.parse("127.0.0.42:1234") else trap("IPv4 endpoint parse")
+    let v6 = net.SocketAddress.parse("[2001:db8::1%17]:1234") else trap("IPv6 endpoint parse")
+    var all = try net.resolve_all("mixed.invalid", 1234)
+    assert(reference_released() == 1)
+    let values = all.view()
+    assert(values.length == 3)
+    assert(values[0].equals(v6) and values[1].equals(v4) and values[2].equals(v6))
+    let retained = values[0]
+    all.destroy()
+    all.destroy()
+    assert(all.view().length == 0 and retained.equals(v6))
+    var only4 = try net.resolve_all("mixed.invalid", 1234, net.IpVersion.ipv4)
+    assert(only4.view().length == 1 and only4.view()[0].equals(v4))
+    only4.destroy()
+    var only6 = try net.resolve_all("mixed.invalid", 1234, net.IpVersion.ipv6)
+    assert(only6.view().length == 2 and only6.view()[0].equals(v6) and only6.view()[1].equals(v6))
+    only6.destroy()
+    assert((try net.resolve("mixed.invalid", 1234)).equals(v6))
+    assert((try net.resolve("mixed.invalid", 1234, net.IpVersion.ipv4)).equals(v4))
+    assert(reference_released() == 5)
+
+    # Allocation failure must release the complete OS chain, with no partial owner.
+    var no_space: u8[1]
+    var rejecting = memory.FixedBuffer.over(no_space[..<0])
+    var empty: net.ResolvedAddresses
+    var failed = false
+    with rejecting:
+        var result = net.resolve_all("mixed.invalid", 1234) catch failure:
+            assert(failure.code == memory.exhausted)
+            failed = true
+            recover empty
+        result.destroy()
+    assert(failed and reference_released() == 6)
+
+    # Destruction under a different allocator must return the original allocation.
+    var storage: u8[512]
+    var owner = memory.FixedBuffer.over(storage)
+    var collection: net.ResolvedAddresses
+    with owner:
+        collection = try net.resolve_all("mixed.invalid", 1234)
+    assert(collection.view().length == 3 and reference_released() == 7)
+    let original = (usize)collection.view().data
+    let extent = collection.view().length * sizeof(net.SocketAddress)
+    with rejecting:
+        collection.destroy()
+        collection.destroy()
+    let reclaimed = owner.allocate(extent, 4) else trap("resolver storage was not returned")
+    assert((usize)reclaimed.data == original)
+    failed = false
+    var missing = net.resolve_all("empty.invalid", 1234) catch failure:
+        assert(failure.code == net.unknown_host)
+        failed = true
+        recover empty
+    missing.destroy()
+    assert(failed and reference_released() == 8)
+    print("ok complete resolver results")
+    return 0

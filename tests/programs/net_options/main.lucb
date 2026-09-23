@@ -1,0 +1,147 @@
+import c
+import io
+import net
+
+extern func reference_wait_readable(fd: i32)
+extern func reference_option(fd: i32, option: i32) -> i32
+extern func reference_flags(fd: i32) -> i32
+extern func reference_nonblocking_flag() -> i32
+extern func reference_failed_descriptor_closed() -> i32
+extern func fault_arm(kind: i32)
+extern func fault_hits() -> i32
+
+pub func main(arguments: c.str[]) -> i32!:
+    var listener = try net.Listener.bind(net.SocketAddress.loopback(0))
+    defer listener.destroy()
+    let fd = listener.descriptor() else trap("listener descriptor")
+    let original = reference_flags(fd)
+    let flag = reference_nonblocking_flag()
+    try listener.set_nonblocking(true)
+    assert((try listener.is_nonblocking()) and reference_flags(fd) == (original | flag))
+    var refused = false
+    var absent = listener.accept() catch failure:
+        assert(failure.code == io.would_block)
+        refused = true
+        recover net.Connection()
+    absent.destroy()
+    assert(refused)
+    try listener.set_receive_buffer(32768)
+    try listener.set_send_buffer(32768)
+    assert((try listener.receive_buffer()) == reference_option(fd, 1))
+    assert((try listener.send_buffer()) == reference_option(fd, 2))
+    var client = try net.Connection.connect(try listener.address())
+    defer client.destroy()
+    reference_wait_readable(fd)
+    var server = try listener.accept()
+    defer server.destroy()
+    assert(not (try server.is_nonblocking()))
+    var second_client = try net.Connection.connect(try listener.address())
+    defer second_client.destroy()
+    reference_wait_readable(fd)
+    var second_server = try listener.accept(true)
+    defer second_server.destroy()
+    assert(try second_server.is_nonblocking())
+    try listener.set_nonblocking(false)
+    assert(not (try listener.is_nonblocking()) and reference_flags(fd) == original)
+
+    let client_fd = client.descriptor() else trap("connection descriptor")
+    try client.set_no_delay(true)
+    assert((try client.no_delay()) and reference_option(client_fd, 3) != 0)
+    try client.set_no_delay(false)
+    assert(not (try client.no_delay()) and reference_option(client_fd, 3) == 0)
+    try client.set_keepalive(true)
+    assert((try client.keepalive()) and reference_option(client_fd, 4) != 0)
+    try client.set_keepalive(false)
+    assert(not (try client.keepalive()) and reference_option(client_fd, 4) == 0)
+    try client.set_receive_buffer(32768)
+    try client.set_send_buffer(32768)
+    assert((try client.receive_buffer()) == reference_option(client_fd, 1))
+    assert((try client.send_buffer()) == reference_option(client_fd, 2))
+    try client.set_nonblocking(true)
+    assert(try client.is_nonblocking())
+    var bytes: u8[4]
+    refused = false
+    discard(client.read(bytes) catch failure:
+        assert(failure.code == io.would_block)
+        refused = true
+        recover 0)
+    assert(refused)
+    try client.set_nonblocking(false)
+    try io.write_all(&server, "data".bytes)
+    try io.read_exact(&client, bytes)
+    assert((str)bytes == "data")
+
+    var packet = try net.Datagram.bind(net.SocketAddress.loopback(0))
+    defer packet.destroy()
+    let packet_fd = packet.descriptor() else trap("datagram descriptor")
+    try packet.set_nonblocking(true)
+    assert(try packet.is_nonblocking())
+    refused = false
+    discard(packet.receive_from(bytes) catch failure:
+        assert(failure.code == io.would_block)
+        refused = true
+        recover (0, net.SocketAddress()))
+    assert(refused)
+    try packet.set_nonblocking(false)
+    assert(not (try packet.is_nonblocking()))
+    try packet.set_receive_buffer(32768)
+    try packet.set_send_buffer(32768)
+    assert((try packet.receive_buffer()) == reference_option(packet_fd, 1))
+    assert((try packet.send_buffer()) == reference_option(packet_fd, 2))
+    refused = false
+    packet.set_send_buffer(0) catch failure:
+        assert(failure.code == net.invalid_options)
+        refused = true
+    assert(refused)
+
+    # The query resets its value-length field after interruption and rejects a
+    # successful syscall that returns an incompatible option layout.
+    fault_arm(1)
+    assert((try packet.receive_buffer()) == reference_option(packet_fd, 1))
+    assert(fault_hits() == 1)
+    fault_arm(2)
+    refused = false
+    discard(packet.receive_buffer() catch failure:
+        assert(failure.code == net.failed)
+        refused = true
+        recover 0)
+    assert(refused and fault_hits() == 1)
+    fault_arm(3)
+    try packet.set_send_buffer(32768)
+    assert(fault_hits() == 1)
+    fault_arm(4)
+    refused = false
+    packet.set_send_buffer(32768) catch failure:
+        assert(failure.code == net.invalid_options)
+        refused = true
+    assert(refused and fault_hits() == 1)
+    fault_arm(5)
+    assert(not (try packet.is_nonblocking()) and fault_hits() == 1)
+    fault_arm(6)
+    try packet.set_nonblocking(true)
+    assert((try packet.is_nonblocking()) and fault_hits() == 1)
+    fault_arm(8)
+    refused = false
+    packet.set_nonblocking(false) catch failure:
+        assert(failure.code == net.failed)
+        refused = true
+    assert(refused and fault_hits() == 1 and (try packet.is_nonblocking()))
+    var third_client = try net.Connection.connect(try listener.address())
+    defer third_client.destroy()
+    reference_wait_readable(fd)
+    fault_arm(7)
+    refused = false
+    var failed_accept = listener.accept() catch failure:
+        assert(failure.code == net.failed)
+        refused = true
+        recover net.Connection()
+    failed_accept.destroy()
+    assert(refused and fault_hits() == 1 and reference_failed_descriptor_closed() == 1)
+    packet.destroy()
+    refused = false
+    packet.set_nonblocking(true) catch failure:
+        assert(failure.code == net.closed)
+        refused = true
+    assert(refused)
+    print("ok socket options")
+    return 0

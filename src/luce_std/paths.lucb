@@ -1,0 +1,203 @@
+#==============================================================================================
+#
+#   paths - Lexical filesystem paths
+#
+#   DESCRIPTION:
+#       Lexical filesystem paths. Both slash styles separate components on Windows; on POSIX a
+#       backslash is an ordinary filename byte. No operation touches the disk.
+#
+#==============================================================================================
+
+import strings
+import platform
+import core
+
+## Whether `byte` separates path components on the target.
+# mark: Paths =================================================================================
+
+## Whether `byte` separates path components on this target.
+pub func separator(byte: u8) -> bool:
+    return byte == '/' or (platform.windows and byte == 92)
+
+func last_separator(path: str) -> usize?:
+    var index = path.length
+    while index > 0:
+        index -= 1
+        if separator(path.bytes[index]):
+            return index
+    return none
+
+func drive_prefix(path: str) -> bool:
+    if not platform.windows or path.length < 2 or path.bytes[1] != ':':
+        return false
+    let drive = path.bytes[0]
+    return (drive >= 'A' and drive <= 'Z') or (drive >= 'a' and drive <= 'z')
+
+## The volume and root prefix, preserved verbatim. A drive-relative `C:foo` has
+## root `C:`; a UNC share is indivisible, including its optional trailing separator.
+pub func root(path: str) -> str:
+    if drive_prefix(path):
+        let count: usize = 3 if path.length > 2 and separator(path.bytes[2]) else 2
+        return (str)path.bytes[..<count]
+    if path.length == 0 or not separator(path.bytes[0]):
+        return ""
+    if not platform.windows or path.length < 2 or not separator(path.bytes[1]):
+        return (str)path.bytes[..<1]
+    var start: usize = 2
+    # Extended DOS and UNC namespaces retain the prefix at the OS boundary.
+    if path.length >= 4 and (path.bytes[2] == '?' or path.bytes[2] == '.') and separator(path.bytes[3]):
+        start = 4
+        if path.length >= 8 and ((str)path.bytes[4..<7] == "UNC" or (str)path.bytes[4..<7] == "unc") and separator(path.bytes[7]):
+            start = 8
+        else:
+            while start < path.length and not separator(path.bytes[start]):
+                start += 1
+            return (str)path.bytes[..<(start + 1 if start < path.length else start)]
+    # The server and share name together identify a UNC volume.
+    var components: usize = 0
+    while start < path.length:
+        if separator(path.bytes[start]):
+            components += 1
+            if components == 2:
+                return (str)path.bytes[..<start + 1]
+        start += 1
+    return path
+
+## Rooted paths may still depend on the current drive (`\foo`) or that drive's
+## current directory (`C:foo`). Only `is_absolute` promises independence from cwd.
+pub func is_rooted(path: str) -> bool:
+    return root(path).length > 0
+
+## Whether `path` begins at a filesystem root.
+pub func is_absolute(path: str) -> bool:
+    if drive_prefix(path):
+        return path.length >= 3 and separator(path.bytes[2])
+    if path.length == 0 or not separator(path.bytes[0]):
+        return false
+    if not platform.windows:
+        return true
+    if path.length < 2 or not separator(path.bytes[1]):
+        return false
+    # Require a nonempty server and share (or a device namespace component).
+    var index: usize = 2
+    while index < path.length and not separator(path.bytes[index]):
+        index += 1
+    return index > 2 and index + 1 < path.length and not separator(path.bytes[index + 1])
+
+## Everything up to the last separator, or `.` when there is none.
+pub func directory(path: str) -> str:
+    let prefix = root(path)
+    let cut = last_separator(path) else return prefix if prefix.length > 0 else "."
+    if cut < prefix.length:
+        return prefix
+    return (str)path.bytes[..<cut]
+
+## The last component.
+pub func base(path: str) -> str:
+    let prefix = root(path)
+    if prefix.length == path.length:
+        return ""
+    let cut = last_separator(path) else return (str)path.bytes[prefix.length..]
+    return (str)path.bytes[cut + 1..]
+
+## The extension with its dot, or the empty text.
+pub func extension(path: str) -> str:
+    let name = base(path)
+    let dot = strings.last(name, '.') else return ""
+    if dot == 0:
+        return ""
+    return (str)name.bytes[dot..]
+
+## The last component without its extension.
+pub func stem(path: str) -> str:
+    let name = base(path)
+    let ext = extension(name)
+    return (str)name.bytes[..<name.length - ext.length]
+
+## Join with a separator only when needed; an absolute right path wins. This is
+## lexical joining, without normalization or filesystem access. The result is a
+## NUL-terminated current-allocator allocation, released with strings.release.
+pub func join(left: str, right: str) -> str!:
+    if is_absolute(right) or drive_prefix(right) or left.length == 0:
+        return try strings.copy(right)
+    if platform.windows and is_rooted(right):
+        let prefix = root(left)
+        var end = prefix.length
+        while end > 0 and separator(prefix.bytes[end - 1]):
+            end -= 1
+        let rooted_pieces: str[2] = [(str)prefix.bytes[..<end], right]
+        return try strings.join(rooted_pieces, "")
+    let drive_only = drive_prefix(left) and left.length == 2
+    let delimiter = "" if separator(left.bytes[left.length - 1]) or drive_only else "/"
+    let pieces: str[2] = [left, right]
+    return try strings.join(pieces, delimiter)
+
+## The join rule, appended to a caller's buffer. Shared by `join_into`.
+func join_write(b: core.FormatBuffer*, left: str, right: str):
+    if is_absolute(right) or drive_prefix(right) or left.length == 0:
+        discard(core.format_put(b, right.bytes.data, right.length))
+        return
+    if platform.windows and is_rooted(right):
+        let prefix = root(left)
+        var end = prefix.length
+        while end > 0 and separator(prefix.bytes[end - 1]):
+            end -= 1
+        discard(core.format_put(b, prefix.bytes.data, end))
+        discard(core.format_put(b, right.bytes.data, right.length))
+        return
+    let drive_only = drive_prefix(left) and left.length == 2
+    discard(core.format_put(b, left.bytes.data, left.length))
+    if not (separator(left.bytes[left.length - 1]) or drive_only):
+        discard(core.format_put(b, "/".bytes.data, 1))
+    discard(core.format_put(b, right.bytes.data, right.length))
+
+## Join into `buffer` without allocating, returning a view of it, or "" when it does
+## not fit. Same rule as `join`, but the caller owns the storage — a stack array or an
+## arena — so there is nothing to release and the result lives as long as `buffer`. It is
+## NUL-terminated when there is room, so it may be used as a `c.str`.
+pub func join_into(buffer: u8[], left: str, right: str) -> str:
+    var b = core.FormatBuffer(data = buffer.data, capacity = buffer.length, used = 0)
+    join_write(&b, left, right)
+    return core.format_finish(&b)
+
+## Lexically remove dot components, redundant separators and cancellable parent
+## components. This does not resolve symbolic links; use filesystem resolution
+## when identity matters. Roots cannot be crossed. Relative leading parents and
+## Windows drive-relative prefixes are retained. Release with strings.release.
+pub func normalize(path: str) -> str!:
+    let prefix = root(path)
+    let buffer = try alloc u8[path.length + 2]
+    defer free(buffer)
+    let starts = try alloc usize[path.length + 1]
+    defer free(starts)
+    var used = prefix.length
+    for index in 0..<used: buffer[index] = prefix.bytes[index]
+    var count: usize = 0
+    var at = prefix.length
+    let bounded = prefix.length > 0 and not (drive_prefix(path) and prefix.length == 2)
+    while at < path.length:
+        while at < path.length and separator(path.bytes[at]): at += 1
+        let begin = at
+        while at < path.length and not separator(path.bytes[at]): at += 1
+        let component = (str)path.bytes[begin..<at]
+        if component.length == 0 or component == ".": continue
+        if component == "..":
+            if count > 0:
+                var previous = starts[count - 1]
+                if previous < used and separator(buffer[previous]): previous += 1
+                if (str)buffer[previous..<used] != "..":
+                    used = starts[count - 1]
+                    count -= 1
+                    continue
+            elif bounded:
+                continue
+        starts[count] = used
+        count += 1
+        if used > 0 and not separator(buffer[used - 1]) and not (used == 2 and drive_prefix(path)):
+            buffer[used] = 47
+            used += 1
+        for byte in component.bytes:
+            buffer[used] = byte
+            used += 1
+    if used == 0: return try strings.copy(".")
+    return try strings.copy((str)buffer[..<used])

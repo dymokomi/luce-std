@@ -1,0 +1,335 @@
+#==============================================================================================
+#
+#   math - The mathematical functions of the standard library
+#
+#   DESCRIPTION:
+#       `import math` for `math.sqrt(x)`, `from math import sqrt` for `sqrt(x)` (§16.6). The float
+#       functions are the C library's, declared here with the types Base gives them; the integer
+#       functions are Base.
+#
+#==============================================================================================
+extern func c_floor as "floor"(x: f64) -> f64
+extern func c_ceil as "ceil"(x: f64) -> f64
+extern func c_round as "round"(x: f64) -> f64
+extern func c_trunc as "trunc"(x: f64) -> f64
+extern func c_sqrt as "sqrt"(x: f64) -> f64
+extern func c_cbrt as "cbrt"(x: f64) -> f64
+extern func c_hypot as "hypot"(x: f64, y: f64) -> f64
+extern func c_fmod as "fmod"(x: f64, y: f64) -> f64
+extern func c_pow as "pow"(x: f64, y: f64) -> f64
+extern func c_exp as "exp"(x: f64) -> f64
+extern func c_exp2 as "exp2"(x: f64) -> f64
+extern func c_log as "log"(x: f64) -> f64
+extern func c_log2 as "log2"(x: f64) -> f64
+extern func c_log10 as "log10"(x: f64) -> f64
+extern func c_sin as "sin"(x: f64) -> f64
+extern func c_cos as "cos"(x: f64) -> f64
+extern func c_tan as "tan"(x: f64) -> f64
+extern func c_asin as "asin"(x: f64) -> f64
+extern func c_acos as "acos"(x: f64) -> f64
+extern func c_atan as "atan"(x: f64) -> f64
+extern func c_atan2 as "atan2"(y: f64, x: f64) -> f64
+extern func c_sinh as "sinh"(x: f64) -> f64
+extern func c_cosh as "cosh"(x: f64) -> f64
+extern func c_tanh as "tanh"(x: f64) -> f64
+extern func c_log1p as "log1p"(x: f64) -> f64
+extern func c_expm1 as "expm1"(x: f64) -> f64
+extern func c_fma as "fma"(x: f64, y: f64, z: f64) -> f64
+extern func c_nextafter as "nextafter"(x: f64, toward: f64) -> f64
+extern func c_frexp as "frexp"(x: f64, out exponent: i32) -> f64
+extern func c_scalbn as "scalbn"(x: f64, exponent: i32) -> f64
+extern func c_modf as "modf"(x: f64, out integral: f64) -> f64
+extern func c_remainder as "remainder"(x: f64, y: f64) -> f64
+## The ratio of a circle's circumference to its diameter.
+pub let pi: f64 = 3.141592653589793
+## A full turn in radians, two pi.
+pub let tau: f64 = 6.283185307179586
+## Euler's number.
+pub let e: f64 = 2.718281828459045
+## Built from bits so that no constant expression needs to overflow.
+pub let infinity: f64 = f64.bits(9218868437227405312)
+## A quiet not-a-number; unequal to everything, itself included.
+pub let nan: f64 = f64.bits(9221120237041090560)
+
+let sign_mask: u64 = 0x8000000000000000
+let magnitude_mask: u64 = 0x7fffffffffffffff
+let exponent_mask: u64 = 0x7ff0000000000000
+
+# mark: Real functions ========================================================================
+
+## Rounding: `floor` toward negative infinity, `ceil` toward positive, `round` to the
+## nearest with halves away from zero, `trunc` toward zero.
+pub func floor(x: f64) -> f64:
+    return c_floor(x)
+
+## The smallest integer value not less than `x`.
+pub func ceil(x: f64) -> f64:
+    return c_ceil(x)
+
+## `x` rounded to the nearest integer, halves away from zero.
+pub func round(x: f64) -> f64:
+    return c_round(x)
+
+## `x` with its fractional part removed, toward zero.
+pub func trunc(x: f64) -> f64:
+    return c_trunc(x)
+
+## The square root of `x`.
+pub func sqrt(x: f64) -> f64:
+    return c_sqrt(x)
+
+## The cube root of `x`.
+pub func cbrt(x: f64) -> f64:
+    return c_cbrt(x)
+
+## `sqrt(x * x + y * y)` without overflow in the squares.
+pub func hypot(x: f64, y: f64) -> f64:
+    return c_hypot(x, y)
+
+## The remainder of `x / y` with the sign of `x`, as C's `fmod`.
+pub func mod(x: f64, y: f64) -> f64:
+    return c_fmod(x, y)
+
+## `x` raised to the power `y`.
+pub func pow(x: f64, y: f64) -> f64:
+    return c_pow(x, y)
+
+## `e` raised to the power `x`.
+pub func exp(x: f64) -> f64:
+    return c_exp(x)
+
+## `2` raised to the power `x`.
+pub func exp2(x: f64) -> f64:
+    return c_exp2(x)
+
+## The natural logarithm of `x`.
+pub func log(x: f64) -> f64:
+    return c_log(x)
+
+## The base-2 logarithm of `x`.
+pub func log2(x: f64) -> f64:
+    return c_log2(x)
+
+## The base-10 logarithm of `x`.
+pub func log10(x: f64) -> f64:
+    return c_log10(x)
+
+## Natural logarithm of `1 + x`, retaining accuracy when adding `x` to one would
+## round it away. At -1 the result is negative infinity; below -1 it is NaN.
+pub func log1p(x: f64) -> f64:
+    return c_log1p(x)
+
+## `exp(x) - 1` without cancellation near zero. Signed zero is preserved.
+pub func expm1(x: f64) -> f64:
+    # The exact limit is representable in every rounding mode. Some host libm
+    # implementations instead round a finite-input approximation toward -1.
+    if x.bits() == (sign_mask | exponent_mask):
+        return -1.0
+    return c_expm1(x)
+
+## Multiply `x * y` and add `z` with one final rounding, rather than rounding the
+## product first. Uses the host's floating-point rounding mode.
+pub func fma(x: f64, y: f64, z: f64) -> f64:
+    return c_fma(x, y, z)
+
+## The adjacent representable value toward `toward`; equal arguments return
+## `toward`, including its zero sign. A NaN argument produces NaN.
+pub func nextafter(x: f64, toward: f64) -> f64:
+    return c_nextafter(x, toward)
+
+## The adjacent representable value toward positive infinity. Positive infinity
+## stays infinite; either zero becomes the smallest positive subnormal.
+pub func next_up(x: f64) -> f64:
+    return c_nextafter(x, infinity)
+
+## The adjacent representable value toward negative infinity. Negative infinity
+## stays infinite; either zero becomes the smallest negative subnormal.
+pub func next_down(x: f64) -> f64:
+    return c_nextafter(x, copysign(infinity, -1.0))
+
+## Split `x` into `(fraction, exponent)` such that `x = fraction * 2**exponent`.
+## A finite nonzero fraction has magnitude in [0.5, 1). Zero, infinity and NaN
+## are returned unchanged with exponent zero, avoiding an unspecified C exponent.
+pub func frexp(x: f64) -> (f64, i32):
+    if x == 0.0 or not is_finite(x):
+        return (x, 0)
+    return c_frexp(x)
+
+## Scale by an integer power of two, without forming that power as an intermediate
+## float. Overflow/underflow follow the host rounding mode; signed zero survives.
+pub func scalbn(x: f64, exponent: i32) -> f64:
+    return c_scalbn(x, exponent)
+
+## `(fractional, integral)` parts, both with the sign of `x`; the integral part
+## truncates toward zero. Infinity has a signed-zero fraction; NaN gives two NaNs.
+pub func modf(x: f64) -> (f64, f64):
+    return c_modf(x)
+
+## `x - n*y` for the nearest integer `n` to `x/y`, with ties choosing even `n`.
+## This differs from `mod`, which truncates the quotient. Zero has the sign of `x`;
+## a zero divisor or infinite dividend produces NaN.
+pub func remainder(x: f64, y: f64) -> f64:
+    let result = c_remainder(x, y)
+    # Some host implementations lose the dividend's zero sign under directed
+    # rounding. Restore it by bits without changing a nonzero or NaN result.
+    return copysign(result, x) if (result.bits() & magnitude_mask) == 0 else result
+
+## The sine of `x` radians.
+pub func sin(x: f64) -> f64:
+    return c_sin(x)
+
+## The cosine of `x` radians.
+pub func cos(x: f64) -> f64:
+    return c_cos(x)
+
+## The tangent of `x` radians.
+pub func tan(x: f64) -> f64:
+    return c_tan(x)
+
+## The arcsine of `x`, in radians.
+pub func asin(x: f64) -> f64:
+    return c_asin(x)
+
+## The arccosine of `x`, in radians.
+pub func acos(x: f64) -> f64:
+    return c_acos(x)
+
+## The arctangent of `x`, in radians.
+pub func atan(x: f64) -> f64:
+    return c_atan(x)
+
+## The angle of the point `(x, y)`, in all four quadrants.
+pub func atan2(y: f64, x: f64) -> f64:
+    return c_atan2(y, x)
+
+## The hyperbolic sine of `x`.
+pub func sinh(x: f64) -> f64:
+    return c_sinh(x)
+
+## The hyperbolic cosine of `x`.
+pub func cosh(x: f64) -> f64:
+    return c_cosh(x)
+
+## The hyperbolic tangent of `x`.
+pub func tanh(x: f64) -> f64:
+    return c_tanh(x)
+
+## True for quiet and signaling NaNs, independent of sign and payload.
+pub func is_nan(x: f64) -> bool:
+    return (x.bits() & magnitude_mask) > exponent_mask
+
+## True for zeros, subnormals and normal finite values. Classification inspects the
+## representation and performs no floating-point arithmetic on a signaling NaN.
+pub func is_finite(x: f64) -> bool:
+    return (x.bits() & exponent_mask) != exponent_mask
+
+## True only for positive or negative infinity.
+pub func is_infinite(x: f64) -> bool:
+    return (x.bits() & magnitude_mask) == exponent_mask
+
+## Whether the sign bit is set, including negative zero and signed NaNs.
+pub func signbit(x: f64) -> bool:
+    return (x.bits() & sign_mask) != 0
+
+## Clear the sign bit: negative zero becomes positive zero. NaN payload bits survive.
+pub func abs(x: f64) -> f64:
+    return f64.bits(x.bits() & magnitude_mask)
+
+## The magnitude and payload of `magnitude` with the sign bit of `sign_source`.
+pub func copysign(magnitude: f64, sign_source: f64) -> f64:
+    return f64.bits((magnitude.bits() & magnitude_mask) | (sign_source.bits() & sign_mask))
+
+## `-1.0` or `1.0` for nonzero numbers; zero and NaN are returned unchanged.
+pub func sign(x: f64) -> f64:
+    if is_nan(x):
+        return x
+    if x < 0.0:
+        return -1.0
+    if x > 0.0:
+        return 1.0
+    return x
+
+## Minimum with NaN propagation (left NaN wins if both are NaNs). Negative zero
+## wins over positive zero; a selected NaN retains its original bits.
+pub func min(a: f64, b: f64) -> f64:
+    if is_nan(a):
+        return a
+    if is_nan(b):
+        return b
+    if a == 0.0 and b == 0.0:
+        return f64.bits(a.bits() | b.bits())
+    return a if a < b else b
+
+## Maximum with NaN propagation (left NaN wins if both are NaNs). Positive zero
+## wins over negative zero; a selected NaN retains its original bits.
+pub func max(a: f64, b: f64) -> f64:
+    if is_nan(a):
+        return a
+    if is_nan(b):
+        return b
+    if a == 0.0 and b == 0.0:
+        return f64.bits(a.bits() & b.bits())
+    return a if a > b else b
+
+## Restrict `x` to inclusive ordered bounds. Reversed or NaN bounds trap. An input
+## NaN or an input equal to a bound is returned unchanged, including its zero sign.
+pub func clamp(x: f64, low: f64, high: f64) -> f64:
+    assert(low <= high)
+    if is_nan(x):
+        return x
+    return low if x < low else (high if x > high else x)
+
+## The integer functions. `//` and `%` truncate toward zero as C does (§7.2); these two
+## floor, so `div_floor(-7, 2)` is `-4` and `mod_floor(-7, 2)` is `1`.
+pub func div_floor(a: i64, b: i64) -> i64:
+    let q = a // b
+    if (a % b != 0) and ((a < 0) != (b < 0)):
+        return q - 1
+    return q
+
+## The remainder of `a / b` with the divisor's sign (floored division).
+pub func mod_floor(a: i64, b: i64) -> i64:
+    if b == -1:
+        return 0
+    let r = a % b
+    if r != 0 and ((r < 0) != (b < 0)):
+        return r + b
+    return r
+
+## The absolute value of `a`; the minimum i64 wraps to itself.
+pub func iabs(a: i64) -> i64:
+    return 0 - a if a < 0 else a
+
+## Absolute value, or none for the minimum i64 whose positive magnitude cannot fit.
+pub func checked_iabs(a: i64) -> i64?:
+    if a < 0:
+        return 0 -? a
+    return a
+
+## Floor division, or none for a zero divisor or a quotient outside i64.
+pub func checked_div_floor(a: i64, b: i64) -> i64?:
+    if b == 0 or (a == -9223372036854775808 and b == -1):
+        return none
+    return div_floor(a, b)
+
+## Remainder with the divisor's sign, or none for a zero divisor. The minimum i64
+## modulo -1 is zero even though its quotient cannot be represented.
+pub func checked_mod_floor(a: i64, b: i64) -> i64?:
+    if b == 0:
+        return none
+    if b == -1:
+        return 0
+    return mod_floor(a, b)
+
+## The smaller of `a` and `b`.
+pub func imin(a: i64, b: i64) -> i64:
+    return a if a < b else b
+
+## The larger of `a` and `b`.
+pub func imax(a: i64, b: i64) -> i64:
+    return a if a > b else b
+
+## Restrict `x` to inclusive ordered bounds. Reversed bounds trap.
+pub func iclamp(x: i64, low: i64, high: i64) -> i64:
+    assert(low <= high)
+    return low if x < low else (high if x > high else x)

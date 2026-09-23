@@ -1,0 +1,90 @@
+import c
+import files
+import io
+import strings
+
+pub func main(arguments: c.str[]) -> i32!:
+    let directory = arguments[1]
+    let original = arguments[2]
+    let hard = arguments[3]
+    let link = arguments[4]
+    let dangling = arguments[5]
+    let renamed = arguments[6]
+    let link_alias = arguments[7]
+    try files.create_directory(directory)
+    var rejected = false
+    files.create_directory(directory) catch failure:
+        assert(failure.code == files.already_exists)
+        rejected = true
+    assert(rejected)
+    try files.write(original, "original".bytes)
+    var held = try files.File.open(original)
+    defer held.destroy()
+    try files.create_hard_link(original, hard)
+    try files.create_symlink("data", link)
+    try files.create_hard_link(link, link_alias)
+    let target = try files.read_symlink(link_alias, 4)
+    defer strings.release(target)
+    assert(target == "data", "hard-link creation followed the source symlink")
+    assert(try files.exists_checked(link))
+    try files.create_symlink("missing", dangling)
+    assert(not (try files.exists_checked(dangling)))
+    rejected = false
+    files.create_symlink("new-target", dangling) catch failure:
+        assert(failure.code == files.already_exists)
+        rejected = true
+    assert(rejected)
+    rejected = false
+    discard(files.read_symlink(dangling, 3) catch failure:
+        assert(failure.code == files.too_large)
+        rejected = true
+        recover "")
+    assert(rejected)
+    let missing = try files.read_symlink(dangling, 7)
+    defer strings.release(missing)
+    assert(missing == "missing")
+    var published = false
+    try files.write_atomic(dangling, "atomic".bytes, published = &published)
+    assert(published)
+    let published_contents = try files.read(dangling)
+    defer free(published_contents)
+    assert((str)published_contents == "atomic")
+    try files.write_atomic(dangling, "".bytes)
+    let empty_contents = try files.read(dangling)
+    defer free(empty_contents)
+    assert(empty_contents.length == 0)
+    rejected = false
+    files.remove_directory(directory) catch failure:
+        assert(failure.code == files.not_empty or failure.code == files.already_exists)
+        rejected = true
+    assert(rejected)
+    rejected = false
+    files.remove_directory(link) catch failure:
+        assert(failure.code == files.not_directory)
+        rejected = true
+    assert(rejected)
+    try files.write(renamed, "replaced".bytes)
+    try files.rename(original, renamed)
+    assert(not (try files.exists_checked(original)))
+    assert(not (try files.exists_checked(link)))
+    let contents = try files.read(renamed)
+    defer free(contents)
+    assert((str)contents == "original")
+    try files.remove_file(hard)
+    try files.remove_file(renamed)
+    var bytes: u8[8]
+    try io.read_exact(&held, bytes)
+    assert((str)bytes == "original", "unlink invalidated an open handle")
+    try held.close()
+    try files.remove_file(link)
+    try files.remove_file(link_alias)
+    try files.remove_file(dangling)
+    rejected = false
+    files.remove_file(original) catch failure:
+        assert(failure.code == files.missing)
+        rejected = true
+    assert(rejected)
+    try files.remove_directory(directory)
+    assert(not (try files.exists_checked(directory)))
+    print("ok file mutations and link semantics")
+    return 0

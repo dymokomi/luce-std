@@ -1,0 +1,165 @@
+import sync
+import c
+import io
+import memory
+import net
+import thread
+
+extern func reference_begin(kind: i32)
+extern func reference_end() -> i32
+extern func reference_cancel_callback(callback: func(void*) -> unit, context: void*)
+extern func reference_delay()
+
+func cancel_now(context: void*):
+    let cancellation = (sync.Cancellation*)context
+    cancellation.request()
+
+func cancel_later(context: void*):
+    reference_delay()
+    cancel_now(context)
+
+func no_events(ready: net.Readiness) -> bool:
+    return not ready.readable and not ready.writable and not ready.hangup and not ready.failure and not ready.invalid
+
+pub func main(arguments: c.str[]) -> i32!:
+    var packet = try net.Datagram.bind(net.SocketAddress.loopback(0))
+    defer packet.destroy()
+    try packet.set_nonblocking(true)
+    let fd = packet.descriptor() else trap("datagram descriptor")
+    var poller = try net.Poller.create(2)
+    defer poller.destroy()
+    assert(poller.capacity() == 2)
+    try poller.watch(0, fd)
+    assert((try poller.wait(try net.Deadline.after(0))) == 0)
+    assert(no_events(try poller.readiness(0)) and no_events(try poller.readiness(1)))
+
+    reference_begin(1)
+    let interrupted_deadline = try net.Deadline.after(100000000)
+    assert((try poller.wait(interrupted_deadline)) == 1)
+    assert((try poller.readiness(0)).readable and not (try poller.readiness(0)).failure)
+    assert(reference_end() == 2)
+    reference_begin(2)
+    assert((try poller.wait(try net.Deadline.after(100000000))) == 0)
+    assert(no_events(try poller.readiness(0)) and reference_end() == 2)
+    reference_begin(3)
+    var rejected = false
+    discard(poller.wait(net.Deadline.at(1)) catch failure:
+        assert(failure.code == net.failed)
+        rejected = true
+        recover 0)
+    assert(rejected and no_events(try poller.readiness(0)) and reference_end() == 0)
+    var cancellation: sync.Cancellation
+    reference_cancel_callback(cancel_now, &cancellation)
+    reference_begin(4)
+    rejected = false
+    discard(poller.wait(cancellation = &cancellation) catch failure:
+        assert(failure.code == net.cancelled)
+        rejected = true
+        recover 0)
+    assert(rejected and cancellation.is_requested() and no_events(try poller.readiness(0)))
+    assert(reference_end() == 1)
+    reference_begin(5)
+    rejected = false
+    discard(poller.wait() catch failure:
+        assert(failure.code == net.failed)
+        rejected = true
+        recover 0)
+    assert(rejected and no_events(try poller.readiness(0)) and reference_end() == 1)
+
+    var sender = try net.Datagram.bind(net.SocketAddress.loopback(0))
+    defer sender.destroy()
+    try sender.send_to("ready".bytes, try packet.address())
+    let ready = try packet.wait(deadline = try net.Deadline.after(1000000000))
+    assert(ready.readable and not ready.invalid)
+    rejected = false
+    poller.watch(1, fd) catch failure:
+        assert(failure.code == net.invalid_options)
+        rejected = true
+    assert(rejected and no_events(try poller.readiness(1)))
+    let sender_fd = sender.descriptor() else trap("sender descriptor")
+    try poller.watch(1, sender_fd, net.WaitInterest.write)
+    assert((try poller.wait(net.Deadline.at(0))) == 2)
+    assert((try poller.readiness(0)).readable and (try poller.readiness(1)).writable)
+    var data: u8[8]
+    let (count, peer) = try packet.receive_from(data)
+    assert(count == 5 and (str)data[..<count] == "ready")
+    discard(peer)
+    rejected = false
+    discard(packet.wait(deadline = net.Deadline.at(0)) catch failure:
+        assert(failure.code == net.timed_out)
+        rejected = true
+        recover net.Readiness())
+    assert(rejected)
+    try poller.disable(1)
+    packet.destroy()
+    assert((try poller.wait(net.Deadline.at(0))) == 1)
+    assert((try poller.readiness(0)).invalid)
+    try poller.disable(0)
+    var concurrent: sync.Cancellation
+    let worker = try thread.spawn(cancel_later, &concurrent)
+    rejected = false
+    discard(poller.wait(cancellation = &concurrent) catch failure:
+        assert(failure.code == net.cancelled)
+        rejected = true
+        recover 0)
+    try worker.join()
+    assert(rejected and concurrent.is_requested())
+
+    var listener = try net.Listener.bind(net.SocketAddress.loopback(0))
+    defer listener.destroy()
+    var client = try net.Connection.connect(try listener.address())
+    defer client.destroy()
+    assert((try listener.wait(deadline = try net.Deadline.after(1000000000))).readable)
+    var server = try listener.accept(true)
+    defer server.destroy()
+    assert((try client.wait(net.WaitInterest.write, try net.Deadline.after(1000000000))).writable)
+    try io.write_all(&client, "tail".bytes)
+    try client.shutdown(net.ShutdownDirection.write)
+    assert((try server.wait(deadline = try net.Deadline.after(1000000000))).readable)
+    try io.read_exact(&server, data[..<4])
+    assert((str)data[..<4] == "tail")
+    discard(try server.wait(deadline = try net.Deadline.after(1000000000)))
+    assert((try server.read(data)) == 0)
+
+    rejected = false
+    discard(net.Deadline.after(18446744073709551615) catch failure:
+        assert(failure.code == net.invalid_options)
+        rejected = true
+        recover net.Deadline())
+    assert(rejected)
+    rejected = false
+    poller.watch(2, fd) catch failure:
+        assert(failure.code == net.invalid_options)
+        rejected = true
+    assert(rejected)
+
+    # The retained allocator owns exactly the original extent after context changes.
+    var storage: u64[8]
+    var owner = memory.FixedBuffer.over(u8[]((u8*)&storage[0], 64))
+    var owned: net.Poller
+    with owner:
+        owned = try net.Poller.create(8)
+    owned.destroy()
+    owned.destroy()
+    assert(owner.allocate(64, 4) != none)
+    var empty: u8[]
+    var refusing = memory.FixedBuffer.over(empty)
+    rejected = false
+    with refusing:
+        var unavailable = net.Poller.create(1) catch failure:
+            assert(failure.code == memory.exhausted)
+            rejected = true
+            recover net.Poller()
+        unavailable.destroy()
+    assert(rejected)
+    with refusing:
+        assert((try poller.wait(net.Deadline.at(0))) == 0)
+    poller.destroy()
+    rejected = false
+    discard(poller.wait() catch failure:
+        assert(failure.code == net.closed)
+        rejected = true
+        recover 0)
+    assert(rejected)
+    print("ok readiness deadlines and cancellation")
+    return 0

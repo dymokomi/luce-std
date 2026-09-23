@@ -1,0 +1,58 @@
+#==============================================================================================
+#
+#   options - Typed socket options
+#
+#   DESCRIPTION:
+#       Host option numbers stay private; public methods expose typed socket policies.
+#
+#==============================================================================================
+
+let nonblocking_flag: i32 = 4 if platform.macos else 2048
+let receive_buffer_option: i32 = 4098 if platform.macos or platform.windows else 8
+let send_buffer_option: i32 = 4097 if platform.macos or platform.windows else 7
+let keepalive_option: i32 = 8 if platform.macos or platform.windows else 9
+
+func socket_status_flags(descriptor: platform.SocketDescriptor) -> i32!:
+    var flags = fcntl(descriptor, 3)
+    while flags < 0 and socket_errno() == socket_interrupted:
+        flags = fcntl(descriptor, 3)
+    if flags < 0:
+        error(socket_error(socket_errno()), "socket status flags could not be queried")
+    return flags
+
+func set_nonblocking(descriptor: platform.SocketDescriptor, enabled: bool) -> !:
+    if platform.windows:
+        var flag: u32 = 1 if enabled else 0
+        if ioctlsocket(descriptor, -2147195266, &flag) != 0:
+            error(socket_error(socket_errno()), "socket nonblocking mode could not be changed")
+        return
+    let before = try socket_status_flags(descriptor)
+    let after = before | nonblocking_flag if enabled else before & ~nonblocking_flag
+    if after == before:
+        return
+    var result = fcntl(descriptor, 4, after)
+    while result < 0 and socket_errno() == socket_interrupted:
+        result = fcntl(descriptor, 4, after)
+    if result < 0:
+        error(socket_error(socket_errno()), "socket nonblocking mode could not be changed")
+
+func get_socket_integer(descriptor: platform.SocketDescriptor, level: i32, option: i32) -> i32!:
+    var value: i32 = 0
+    var length: u32 = 4
+    var result = getsockopt(descriptor, level, option, &value, &length)
+    while result < 0 and socket_errno() == socket_interrupted:
+        length = 4
+        result = getsockopt(descriptor, level, option, &value, &length)
+    if result != 0:
+        error(socket_error(socket_errno()), "the socket option could not be queried")
+    # Winsock providers may return BOOLEAN socket controls as one byte.
+    if platform.windows and length == 1 and ((level == socket_level and option == keepalive_option) or (level == 6 and option == 1)):
+        return value & 255
+    if length != 4:
+        error(failed, "the socket option has an invalid result layout")
+    return value
+
+func set_socket_buffer(descriptor: platform.SocketDescriptor, option: i32, bytes: i32) -> !:
+    if bytes <= 0:
+        error(invalid_options, "a socket buffer size must be positive")
+    try set_socket_integer(descriptor, socket_level, option, bytes)

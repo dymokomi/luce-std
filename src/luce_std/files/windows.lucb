@@ -1,0 +1,305 @@
+#==============================================================================================
+#
+#   windows - Windows filesystem backend
+#
+#   DESCRIPTION:
+#       The Windows implementation of the filesystem operations, mapping UTF-8 paths to the
+#       UTF-16 Win32 API. Selected by `platform.windows`.
+#
+#==============================================================================================
+
+from windows_abi import MultiByteToWideChar, WideCharToMultiByte, GetLastError, CloseHandle, CreateFileW
+# mark: Windows filesystem calls ==============================================================
+
+## UTF-8 paths at the language boundary, UTF-16 at the Windows filesystem boundary.
+extern func GetFileInformationByHandle(handle: void*, info: WinInformation*) -> i32
+extern func GetFileInformationByHandleEx(handle: void*, kind: i32, info: void*, size: u32) -> i32
+extern func GetFinalPathNameByHandleW(handle: void*, output: u16*, capacity: u32, flags: u32) -> u32
+extern func GetFileType(handle: void*) -> u32
+extern func FindFirstFileW(path: u16*, data: WinFind*) -> void*
+extern func FindNextFileW(search: void*, data: WinFind*) -> i32
+extern func FindClose(search: void*) -> i32
+extern func MoveFileExW(source: u16*, destination: u16*, flags: u32) -> i32
+extern func win_open as "_wopen"(path: u16*, flags: i32, ...) -> i32
+extern func win_access as "_waccess"(path: u16*, mode: i32) -> i32
+extern func win_mkdir as "_wmkdir"(path: u16*) -> i32
+extern func win_rmdir as "_wrmdir"(path: u16*) -> i32
+extern func win_unlink as "_wunlink"(path: u16*) -> i32
+extern func win_handle as "_get_osfhandle"(descriptor: i32) -> isize
+extern func win_descriptor as "_open_osfhandle"(handle: isize, flags: i32) -> i32
+extern func SetFileInformationByHandle(handle: void*, kind: i32, info: void*, size: u32) -> i32
+extern func SetFileTime(handle: void*, created: const u64*?, accessed: const u64*, modified: const u64*) -> i32
+extern func CreateHardLinkW(destination: u16*, source: u16*, security: void*?) -> i32
+extern func CreateSymbolicLinkW(path: u16*, target: u16*, flags: u32) -> u8
+extern func DeviceIoControl(handle: void*, code: u32, input: void*?, input_size: u32, output: void*, output_size: u32, returned: u32*, overlapped: void*?) -> i32
+
+func windows_create_symlink(target: c.str, path: c.str, directory: bool?) -> !:
+    var target_is_directory = false
+    if let hint = directory:
+        target_is_directory = hint
+    else:
+        let resolved = try paths.join(paths.directory((str)path), (str)target)
+        defer strings.release(resolved)
+        let info = metadata((c.str)resolved) catch failure:
+            if failure.code != missing:
+                error(failure.code, failure.message)
+            recover Metadata()
+        target_is_directory = info.kind == FileKind.directory
+    let link_name = try wide_path(path)
+    defer free(link_name)
+    let target_name = try wide_path(target)
+    defer free(target_name)
+    if CreateSymbolicLinkW(link_name.data, target_name.data, 2 | (1 if target_is_directory else 0)) == 0:
+        error(windows_error(GetLastError()), "the symbolic link could not be created")
+
+func windows_read_symlink(path: c.str, limit: usize) -> str!:
+    let handle = try windows_path_handle(path, false)
+    defer discard(CloseHandle(handle))
+    var storage: u64[2048]
+    var received: u32 = 0
+    if DeviceIoControl(handle, 589992, none, 0, &storage[0], 16384, &received, none) == 0:
+        error(windows_error(GetLastError()), "the symbolic link could not be read")
+    let words = (u16*)&storage[0]
+    let tag = ((u32*)&storage[0])[0]
+    let start: usize = 20 if tag == 0xA000000C else 16
+    if (tag != 0xA000000C and tag != 0xA0000003) or received < start:
+        error(invalid_options, "the entry is not a symbolic link or junction")
+    let offset = (usize)words[6]
+    let length = (usize)words[7]
+    if offset % 2 != 0 or length % 2 != 0 or start + offset + length > (usize)received:
+        error(failed, "the symbolic link contains invalid reparse data")
+    if length == 0:
+        return try strings.copy("")
+    let text = &words[(start + offset) // 2]
+    let count = WideCharToMultiByte(65001, 128, text, (i32)(length // 2), (u8*)0, 0, none, none)
+    if count <= 0:
+        error(invalid_options, "the symbolic link target is invalid UTF-16")
+    if (usize)count > limit:
+        error(too_large, "the link target exceeds the requested limit")
+    let result = try alloc u8[(usize)count + 1]
+    if WideCharToMultiByte(65001, 128, text, (i32)(length // 2), result.data, count, none, none) != count:
+        free(result)
+        error(failed, "the symbolic link target could not be encoded")
+    result[(usize)count] = 0
+    return (str)result[..<(usize)count]
+
+## Windows mode bits describe the read-only attribute, not an NTFS access-control
+## list. Any requested write bit clears read-only; other bits do not change ACLs.
+func windows_permissions(descriptor: i32, permissions: u32) -> !:
+    let handle = (void*)win_handle(descriptor)
+    var info: WinBasic
+    if GetFileInformationByHandleEx(handle, 0, &info, (u32)sizeof(WinBasic)) == 0:
+        error(windows_error(GetLastError()), "file attributes could not be read")
+    var update: WinBasic
+    update.attributes = info.attributes | 1 if (permissions & 146) == 0 else info.attributes & ~u32(1)
+    if update.attributes == 0: update.attributes = 128
+    if SetFileInformationByHandle(handle, 0, &update, (u32)sizeof(WinBasic)) == 0:
+        error(windows_error(GetLastError()), "file attributes could not be changed")
+
+func windows_ticks(time: FileTime) -> u64!:
+    let seconds = time.seconds +? 11644473600 else error(invalid_options, "timestamp is outside the Windows range")
+    if seconds < 0:
+        error(invalid_options, "timestamp predates the Windows epoch")
+    let ticks = (u64)seconds *? 10000000 else error(invalid_options, "timestamp is outside the Windows range")
+    let result = ticks +? (u64)(time.nanoseconds // 100) else error(invalid_options, "timestamp is outside the Windows range")
+    if result >= 0x7FFFFFFFFFFFFFFF:
+        error(invalid_options, "timestamp is outside the Windows range")
+    return result
+
+func windows_set_times(descriptor: i32, accessed: FileTime, modified: FileTime) -> !:
+    let access_ticks = try windows_ticks(accessed)
+    let modified_ticks = try windows_ticks(modified)
+    if SetFileTime((void*)win_handle(descriptor), none, &access_ticks, &modified_ticks) == 0:
+        error(windows_error(GetLastError()), "file timestamps could not be changed")
+
+extern struct WinInformation:
+    attributes: u32
+    created: u32[2]
+    accessed: u32[2]
+    written: u32[2]
+    volume: u32
+    size_high: u32
+    size_low: u32
+    links: u32
+    index_high: u32
+    index_low: u32
+
+extern struct WinBasic:
+    created: i64
+    accessed: i64
+    written: i64
+    changed: i64
+    attributes: u32
+
+extern struct WinStandard:
+    allocation: i64
+    size: i64
+    links: u32
+    delete_pending: u8
+    directory: u8
+
+extern struct WinFind:
+    attributes: u32
+    created: u32[2]
+    accessed: u32[2]
+    modified: u32[2]
+    size_high: u32
+    size_low: u32
+    reserved: u32[2]
+    name: u16[260]
+    alternate: u16[14]
+
+struct WinDirectory:
+    var descriptor: i32
+    var search: void*?
+    var ended: bool
+    var data: WinFind
+    var name: u8[1041]
+
+func wide_path(path: c.str) -> u16[]!:
+    let result = try windows_text.wide(path, invalid_options)
+    for index in 0..<result.length:
+        if result[index] == 47:
+            result[index] = 92
+    return result
+
+func windows_error(number: u32) -> ErrorCode:
+    if number == 2 or number == 3: return missing
+    if number == 5 or number == 1314: return permission_denied
+    if number == 80 or number == 183: return already_exists
+    if number == 112: return no_space
+    if number == 145: return not_empty
+    if number == 206: return name_too_long
+    if number == 17: return cross_device
+    if number == 267: return not_directory
+    return failed
+
+func windows_open(path: c.str, flags: i32, permissions: u32, follow: bool = true, nonblocking: bool = false) -> i32!:
+    let text = try wide_path(path)
+    defer free(text)
+    let desired_access: u32 = 3221225472 if (flags & 3) == 2 else (1073741824 if (flags & 3) == 1 else 2147483648)
+    let disposition: u32 = (1 if (flags & exclusive_flag) != 0 else 4) if (flags & create) != 0 else 3
+    let attributes: u32 = (1 if (permissions & 146) == 0 else 128) | (0 if follow else 2097152)
+    let handle = CreateFileW(text.data, desired_access, 7, none, disposition, attributes, none)
+    if (usize)handle == ~(usize)0:
+        error(windows_error(GetLastError()), "the file could not be opened")
+    if nonblocking and GetFileType(handle) != 1:
+        discard(CloseHandle(handle))
+        error(invalid_options, "nonblocking Windows file opening requires a disk file")
+    var info: WinInformation
+    if not follow:
+        if GetFileInformationByHandle(handle, &info) == 0:
+            let number = GetLastError()
+            discard(CloseHandle(handle))
+            error(windows_error(number), "the opened file could not be inspected")
+        if (info.attributes & 1024) != 0:
+            discard(CloseHandle(handle))
+            error(symlink_loop, "a final symbolic link is not allowed")
+    let descriptor = win_descriptor((isize)handle, flags & (32768 | 128 | 8 | 3))
+    if descriptor < 0:
+        let number = c.errno()
+        discard(CloseHandle(handle))
+        error(classify_error(number), "the file descriptor could not be created")
+    if (flags & truncate) != 0 and ftruncate(descriptor, 0) != 0:
+        let number = c.errno()
+        discard(close(descriptor))
+        error(classify_error(number), "the file could not be truncated")
+    return descriptor
+
+func windows_path_handle(path: c.str, follow: bool, directory: bool = false) -> void*!:
+    let text = try wide_path(path)
+    defer free(text)
+    let handle = CreateFileW(text.data, 0, 7, none, 3, 33554432 | (0 if follow else 2097152), none)
+    if (usize)handle == ~(usize)0:
+        error(windows_error(GetLastError()), "the file path could not be opened")
+    if directory:
+        var info: WinInformation
+        if GetFileInformationByHandle(handle, &info) == 0 or (info.attributes & 16) == 0 or (not follow and (info.attributes & 1024) != 0):
+            discard(CloseHandle(handle))
+            error(not_directory, "the path is not an allowed directory")
+    return handle
+
+func windows_time(ticks: i64) -> FileTime:
+    let seconds = ticks // 10000000 - 11644473600
+    return FileTime(seconds = seconds, nanoseconds = (u32)(ticks % 10000000) * 100)
+
+func windows_metadata(handle: void*, follow: bool) -> Metadata!:
+    var info: WinInformation
+    var basic: WinBasic
+    var standard: WinStandard
+    if GetFileInformationByHandle(handle, &info) == 0 or GetFileInformationByHandleEx(handle, 0, &basic, (u32)sizeof(WinBasic)) == 0 or GetFileInformationByHandleEx(handle, 1, &standard, (u32)sizeof(WinStandard)) == 0:
+        error(windows_error(GetLastError()), "file metadata could not be read")
+    var kind = FileKind.directory if (info.attributes & 16) != 0 else FileKind.regular
+    if not follow and (info.attributes & 1024) != 0:
+        kind = FileKind.symlink
+    let size = (i64)(((u64)info.size_high << 32) | (u64)info.size_low)
+    return Metadata(kind = kind, permissions = (292 if (info.attributes & 1) != 0 else 438) | (73 if kind == FileKind.directory else 0),
+                    size = size, device = (u64)info.volume, inode = ((u64)info.index_high << 32) | (u64)info.index_low,
+                    links = (u64)info.links, user = 0, group = 0, blocks_512 = standard.allocation // 512,
+                    accessed = windows_time(basic.accessed), modified = windows_time(basic.written), changed = windows_time(basic.changed), created = windows_time(basic.created))
+
+func windows_relative(parent: i32, path: c.str) -> str!:
+    if parent == current_directory_fd or paths.is_absolute((str)path):
+        return try strings.copy((str)path)
+    let wide = try alloc u16[32768]
+    defer free(wide)
+    let count = GetFinalPathNameByHandleW((void*)win_handle(parent), wide.data, (u32)wide.length, 0)
+    if count == 0 or count >= wide.length:
+        error(windows_error(GetLastError()), "the open directory path could not be read")
+    let bytes = try alloc u8[(usize)count * 4 + 1]
+    defer free(bytes)
+    let length = WideCharToMultiByte(65001, 128, wide.data, (i32)count, bytes.data, (i32)(bytes.length - 1), none, none)
+    if length == 0:
+        error(failed, "the open directory path could not be encoded")
+    let joined = try paths.join((str)bytes[..<(usize)length], (str)path)
+    defer strings.release(joined)
+    # GetFinalPathName returns the extended namespace, which does not itself
+    # collapse dot components. Normalize the joined path before opening it.
+    return try paths.normalize(joined)
+
+func windows_directory_open(parent: i32, path: c.str, follow: bool) -> Directory!:
+    let joined = try windows_relative(parent, path)
+    defer strings.release(joined)
+    let handle = try windows_path_handle((c.str)joined, follow, true)
+    let descriptor = win_descriptor((isize)handle, 128)
+    if descriptor < 0:
+        discard(CloseHandle(handle))
+        error(failed, "the directory descriptor could not be created")
+    let state = new WinDirectory(descriptor = descriptor) in memory.heap catch failure:
+        discard(close(descriptor))
+        error(failure.code, failure.message)
+    return Directory(handle = (void*)state)
+
+func windows_next(state: WinDirectory*) -> str?!:
+    if state.ended:
+        return none
+    if let search = state.search:
+        if FindNextFileW(search, &state.data) == 0:
+            if GetLastError() != 18:
+                error(windows_error(GetLastError()), "the directory could not be enumerated")
+            state.ended = true
+            return none
+    else:
+        let joined = try windows_relative(state.descriptor, "*")
+        defer strings.release(joined)
+        let pattern = try wide_path((c.str)joined)
+        defer free(pattern)
+        let search = FindFirstFileW(pattern.data, &state.data)
+        if (usize)search == ~(usize)0:
+            if GetLastError() == 2:
+                state.ended = true
+                return none
+            error(windows_error(GetLastError()), "the directory could not be enumerated")
+        state.search = search
+    let count = WideCharToMultiByte(65001, 128, &state.data.name[0], -1, &state.name[0], (i32)state.name.length, none, none)
+    if count <= 0:
+        error(failed, "a directory entry could not be encoded as UTF-8")
+    return (str)state.name[..<(usize)(count - 1)]
+
+func windows_directory_close(state: WinDirectory*) -> !:
+    if let search = state.search:
+        discard(FindClose(search))
+    let result = close(state.descriptor)
+    free(state) in memory.heap
+    if result != 0:
+        error(failed, "the directory could not be closed")

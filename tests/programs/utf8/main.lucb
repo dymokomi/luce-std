@@ -1,0 +1,58 @@
+import c
+import files
+import utf8
+
+func scalar_cases(reference: const u8[]):
+    var scalar: u32 = 0
+    var offset: usize = 0
+    var buffer: u8[5]
+    while scalar <= 1114111:
+        for i in 0..<buffer.length:
+            buffer[i] = 85
+        if scalar >= 55296 and scalar <= 57343:
+            assert(utf8.encode(scalar, buffer) == none)
+            assert(buffer[0] == 85 and buffer[4] == 85)
+        else:
+            let width = utf8.encoded_length(scalar) else trap("valid scalar rejected")
+            assert(utf8.encode(scalar, buffer[..<width - 1]) == none)
+            for byte in buffer:
+                assert(byte == 85, "a refused encoding changed the destination")
+            assert(utf8.encode(scalar, buffer) == width)
+            assert(buffer[width] == 85)
+            for i in 0..<width:
+                assert(buffer[i] == reference[offset + i], "encoding differs from Python")
+            let decoded = utf8.decode(reference, offset) else trap("valid reference rejected")
+            assert((u32)decoded.scalar == scalar and decoded.width == width)
+            offset += width
+        scalar += 1
+    assert(offset == reference.length)
+    assert(utf8.decode(reference, offset) == none)
+    assert(utf8.decode(reference, 18446744073709551615) == none)
+    assert(utf8.encode(1114112, buffer) == none)
+    assert(utf8.encode(4294967295, buffer) == none)
+
+## Each record is length, first invalid offset (255 means valid), then raw bytes.
+func malformed_cases(corpus: const u8[]):
+    var offset: usize = 0
+    while offset < corpus.length:
+        let length = (usize)corpus[offset]
+        let expected = (usize)corpus[offset + 1]
+        offset += 2
+        let data = corpus[offset..<offset + length]
+        let invalid = utf8.invalid_offset(data)
+        assert(utf8.valid(data) == (expected == 255))
+        if expected == 255:
+            assert(invalid == none)
+        else:
+            assert(invalid == expected, "invalid UTF-8 offset differs from Python")
+        offset += length
+
+pub func main(arguments: c.str[]) -> i32!:
+    let reference = try files.read(arguments[1])
+    defer free(reference)
+    scalar_cases(reference)
+    let corpus = try files.read(arguments[2])
+    defer free(corpus)
+    malformed_cases(corpus)
+    print("ok utf8: every scalar and malformed corpus")
+    return 0

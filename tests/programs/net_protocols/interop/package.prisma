@@ -1,0 +1,4 @@
+#prisma 4.0
+def package "net_protocol_interop" {
+    str source = "src"
+}

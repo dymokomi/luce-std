@@ -1,0 +1,74 @@
+import c
+import files
+import memory
+import strings
+import unicode
+import utf8
+
+func convert(text: str, kind: u32, limit: usize? = none) -> str!:
+    match kind:
+        0: return try unicode.to_upper(text, limit)
+        1: return try unicode.to_lower(text, limit)
+        2: return try unicode.case_fold(text, false, limit)
+        3: return try unicode.case_fold(text, true, limit)
+        _: trap("invalid casing test operation")
+
+pub func main(arguments: c.str[]) -> i32!:
+    assert(unicode.version == "17.0.0")
+    let corpus = try files.read(arguments[1])
+    defer free(corpus)
+    let properties = try files.read(arguments[2])
+    defer free(properties)
+    var position: usize = 0
+    var count: usize = 0
+    while position < corpus.length:
+        let kind = memory.read[u32](corpus.data + position)
+        let input_length = (usize)memory.read[u32](corpus.data + position + 4)
+        let output_length = (usize)memory.read[u32](corpus.data + position + 8)
+        position += 12
+        let input = (str)corpus[position..<position + input_length]
+        position += input_length
+        let expected = (str)corpus[position..<position + output_length]
+        position += output_length
+        let actual = try convert(input, kind, expected.length)
+        if actual != expected:
+            print(f"casing record {count}, operation {kind}")
+            trap("Unicode casing differs from the reference")
+        assert(actual.bytes.data[actual.length] == 0)
+        unicode.release(actual)
+        if output_length > 0:
+            var rejected = false
+            discard(convert(input, kind, output_length - 1) catch failure:
+                assert(failure.code == strings.output_too_large)
+                rejected = true
+                recover "")
+            assert(rejected)
+        count += 1
+    assert(count > 20000)
+    position = 0
+    while position < properties.length:
+        let scalar = memory.read[u32](properties.data + position)
+        let whitespace = memory.read[u32](properties.data + position + 4)
+        let combining = memory.read[u32](properties.data + position + 8)
+        assert(unicode.is_whitespace(scalar) == (whitespace != 0))
+        assert((u32)unicode.combining_class(scalar) == combining)
+        position += 12
+    var malformed: u8[4] = [65, 237, 160, 128]
+    var empty: u8[]
+    var refusing = memory.FixedBuffer.over(empty)
+    with refusing:
+        for kind in 0..<4:
+            var rejected = false
+            discard(convert((str)malformed, (u32)kind) catch failure:
+                assert(failure.code == utf8.invalid_sequence)
+                rejected = true
+                recover "")
+            assert(rejected)
+            rejected = false
+            discard(convert("abc", (u32)kind) catch failure:
+                assert(failure.code == memory.exhausted)
+                rejected = true
+                recover "")
+            assert(rejected)
+    print("ok Unicode casing and scalar properties")
+    return 0

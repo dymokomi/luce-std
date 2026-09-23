@@ -1,0 +1,31 @@
+#==============================================================================================
+#
+#   unicode - Unicode 17.0.0 text operations
+#
+#   DESCRIPTION:
+#       Unicode 17.0.0 text operations over strict UTF-8. Data is pinned and generated
+#       from the vendored Unicode Character Database; no process locale is consulted.
+#       Inputs remain borrowed and must stay unchanged during a call. Returned text is
+#       owned, NUL-terminated and released with unicode.release in the same allocator.
+#       Malformed UTF-8 reports utf8.invalid_sequence. Output limits count bytes and
+#       report strings.output_too_large; allocation/size failure is memory.exhausted.
+#
+#==============================================================================================
+
+import memory
+import strings
+import luce_std.utf8 as utf8
+## The Unicode version this module's data is generated from.
+pub let version: str = "17.0.0"
+
+## Release text returned by this module, using its original current allocator.
+pub func release(text: str):
+    strings.release(text)
+
+## Unicode White_Space property; false for unassigned or invalid scalar values.
+pub func is_whitespace(scalar: u32) -> bool:
+    return range_value(whitespace_ranges, scalar) != 0
+
+## Canonical combining class, zero for starters and unassigned/invalid values.
+pub func combining_class(scalar: u32) -> u8:
+    return (u8)range_value(combining_ranges, scalar)

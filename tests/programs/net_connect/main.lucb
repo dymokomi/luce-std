@@ -1,0 +1,60 @@
+import sync
+import c
+import net
+
+extern func reference_begin(kind: i32)
+extern func reference_end() -> i32
+extern func reference_cancel_callback(callback: func(void*) -> unit, context: void*)
+
+func cancel_now(context: void*):
+    let cancellation = (sync.Cancellation*)context
+    cancellation.request()
+
+pub func main(arguments: c.str[]) -> i32!:
+    let target = net.SocketAddress.loopback(1234)
+    for kind in 1..<9:
+        if kind == 5:
+            continue
+        reference_begin((i32)kind)
+        var cancellation: sync.Cancellation
+        reference_cancel_callback(cancel_now, &cancellation)
+        let deadline = try net.Deadline.after(100000000) if kind == 1 or kind == 8 else net.Deadline()
+        let signal: sync.Cancellation*? = &cancellation if kind == 2 else none
+        var rejected = false
+        var result = net.Connection.connect(target, deadline, signal) catch failure:
+            let expected = net.timed_out if kind == 1 or kind == 8 else (net.cancelled if kind == 2 else (net.connection_refused if kind == 3 else (net.permission_denied if kind == 4 else net.failed)))
+            assert(failure.code == expected)
+            rejected = true
+            recover net.Connection()
+        result.destroy()
+        assert(rejected and reference_end() == 1)
+    var cancelled: sync.Cancellation
+    cancelled.request()
+    reference_begin(9)
+    var rejected = false
+    var result = net.Connection.connect(target, cancellation = &cancelled) catch failure:
+        assert(failure.code == net.cancelled)
+        rejected = true
+        recover net.Connection()
+    result.destroy()
+    assert(rejected and reference_end() == 0)
+    reference_begin(10)
+    rejected = false
+    result = net.Connection.connect(target, net.Deadline.at(0)) catch failure:
+        assert(failure.code == net.timed_out)
+        rejected = true
+        recover net.Connection()
+    result.destroy()
+    assert(rejected and reference_end() == 0)
+
+    var listener = try net.Listener.bind(net.SocketAddress.loopback(0))
+    defer listener.destroy()
+    var connected = try net.Connection.connect(try listener.address(), try net.Deadline.after(1000000000), nonblocking = true)
+    defer connected.destroy()
+    assert(try connected.is_nonblocking())
+    discard(try listener.wait(deadline = try net.Deadline.after(1000000000)))
+    var accepted = try listener.accept()
+    defer accepted.destroy()
+    assert(not (try accepted.is_nonblocking()))
+    print("ok connection deadlines and cleanup")
+    return 0

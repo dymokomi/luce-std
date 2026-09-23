@@ -1,0 +1,99 @@
+#==============================================================================================
+#
+#   types - HTTP head types and limits
+#
+#   DESCRIPTION:
+#       The types of an HTTP/1.1 head (RFC 9112): fields, limits, body framing. Storage is
+#       caller-owned.
+#
+#==============================================================================================
+
+## The HTTP message is malformed.
+pub let http_invalid: ErrorCode = ErrorCode.package(80)
+## An HTTP limit was exceeded.
+pub let http_limit: ErrorCode = ErrorCode.package(81)
+## An HTTP feature is not supported.
+pub let http_unsupported: ErrorCode = ErrorCode.package(82)
+
+## How a message body is framed.
+pub enum HttpBodyKind as u8:
+    empty = 0
+    fixed = 1
+    chunked = 2
+    until_eof = 3
+    tunnel = 4
+
+## Configurable limits for parsing a head.
+pub struct HttpLimits:
+    ## Maximum bytes in the head.
+    pub var head_bytes: usize = 32768
+    ## Maximum bytes in one line.
+    pub var line_bytes: usize = 8192
+    ## Maximum number of header fields.
+    pub var fields: usize = 100
+    ## Maximum body size in bytes.
+    pub var body_bytes: u64 = 1073741824
+
+## A field preserves its original spelling and byte value, including obs-text.
+## These borrowed str views are not promises of UTF-8; interpret values by field.
+pub struct HttpField:
+    ## The field name.
+    pub var name: str
+    ## The field value.
+    pub var value: str
+
+## Request or response metadata. Text borrows the input head; fields borrows the
+## supplied field array. Neither backing store may change while this view is used.
+## body_length is meaningful for fixed framing. A response's method is the request
+## method supplied to its parser, needed for HEAD and successful CONNECT semantics.
+pub struct HttpHead:
+    ## The request method.
+    pub var method: str
+    ## The request target.
+    pub var target: str
+    ## The HTTP version.
+    pub var version: str
+    ## The response status code.
+    pub var status: u16
+    ## The header fields.
+    pub var fields: const HttpField[]
+    ## How the body is framed.
+    pub var body_kind: HttpBodyKind
+    ## The body length, when known.
+    pub var body_length: u64
+    ## Whether the connection is kept alive.
+    pub var keep_alive: bool
+    ## Whether the request expects a 100-continue.
+    pub var expect_continue: bool
+    ## Whether the connection requests an upgrade.
+    pub var connection_upgrade: bool
+
+    ## First occurrence; use fields to retain duplicates for field-specific rules.
+    pub func field(name: str) -> str?:
+        for item in self.fields:
+            if http_equal(item.name, name):
+                return item.value
+        return none
+
+    ## The number of fields named `name`.
+    pub func field_count(name: str) -> usize:
+        var count: usize = 0
+        for item in self.fields:
+            if http_equal(item.name, name):
+                count += 1
+        return count
+
+    ## Token-list lookup across every occurrence. Invalid list members are errors.
+    pub func has_token(name: str, token: str) -> bool!:
+        var found = false
+        for item in self.fields:
+            if http_equal(item.name, name):
+                var cursor: usize = 0
+                while let part = http_list_next(item.value, &cursor):
+                    if part.length == 0:
+                        continue
+                    if not http_token(part):
+                        error(http_invalid, "invalid HTTP token list")
+                    if http_equal(part, token):
+                        found = true
+        return found

@@ -1,0 +1,111 @@
+#==============================================================================================
+#
+#   resolver - Host name resolution
+#
+#   DESCRIPTION:
+#       Resolve a host and port to socket endpoints, one or all, preserving resolver order.
+#
+#==============================================================================================
+
+## An owned collection of resolved endpoints. Values preserve host resolver order,
+## including duplicates. Copying the collection does not duplicate ownership.
+## The allocator used by resolve_all must outlive this collection.
+pub struct ResolvedAddresses:
+    var data: SocketAddress[]
+    var owner: memory.Allocator?
+
+    ## Borrow the endpoints until destroy. Individual SocketAddress values may be
+    ## copied and retained independently. Zero and destroyed collections are empty.
+    pub func view() -> const SocketAddress[]:
+        return self.data
+
+    ## Release through the original allocator, regardless of the current context.
+    ## Repeated destruction is safe; previously borrowed views become invalid.
+    pub mutating func destroy():
+        if self.data.length > 0:
+            let owner = self.owner else trap("resolved addresses lost their allocator")
+            free(self.data) in owner
+        var empty: SocketAddress[]
+        self.data = empty
+        self.owner = none
+
+## The first usable IPv4 or IPv6 stream endpoint in host resolver order. An
+## explicit version restricts results. Resolution can block in the OS. Every
+## resolver node is released, including on malformed or unusable results.
+pub func resolve(host: c.str, port: u16, version: IpVersion? = none) -> SocketAddress!:
+    var query = try ResolverQuery.open(host, version)
+    defer query.destroy()
+    var current = query.head
+    while let entry = current:
+        if let address = resolved_endpoint(entry, port, query.family):
+            return address
+        current = entry.next
+    error(unknown_host, "the host has no usable stream address for the requested IP version")
+
+## All usable stream endpoints from one OS lookup, filtered by optional version.
+## This blocks in the resolver and does not attempt connections or reorder results.
+## No usable result reports unknown_host. Allocation failure releases the complete
+## OS result; successful storage belongs to the returned collection's destroy.
+pub func resolve_all(host: c.str, port: u16, version: IpVersion? = none) -> ResolvedAddresses!:
+    var query = try ResolverQuery.open(host, version)
+    defer query.destroy()
+    # Count before allocating: the immutable resolver chain lets us allocate once
+    # at its exact extent, without retaining OS pointers in the public result.
+    var count: usize = 0
+    var current = query.head
+    while let entry = current:
+        if resolved_endpoint(entry, port, query.family) != none:
+            count = count +? 1 else error(memory.exhausted, "the resolver result is too large")
+        current = entry.next
+    if count == 0:
+        error(unknown_host, "the host has no usable stream address for the requested IP version")
+    let owner = memory.allocator
+    let data = try alloc SocketAddress[count]
+    var used: usize = 0
+    current = query.head
+    while let entry = current:
+        if let address = resolved_endpoint(entry, port, query.family):
+            data[used] = address
+            used += 1
+        current = entry.next
+    return ResolvedAddresses(data = data, owner = owner)
+
+## Keep libc ownership in one scope shared by both public resolution APIs.
+struct ResolverQuery:
+    var head: AddressInfo*?
+    var family: i32
+
+    static func open(host: c.str, version: IpVersion?) -> ResolverQuery!:
+        if platform.windows:
+            try windows_socket_startup()
+        var family: i32 = 0
+        if let requested = version:
+            if requested != IpVersion.ipv4 and requested != IpVersion.ipv6:
+                error(invalid_options, "unknown resolver IP version")
+            family = inet if requested == IpVersion.ipv4 else inet6
+        var hints = AddressInfo(family = family, kind = stream)
+        var found: AddressInfo*? = none
+        let result = getaddrinfo(host, none, &hints, &found)
+        if result != 0:
+            error(resolver_error(result), "the host could not be resolved")
+        let head = found else error(unknown_host, "unknown host")
+        return ResolverQuery(head = head, family = family)
+
+    mutating func destroy():
+        if let head = self.head:
+            self.head = none
+            freeaddrinfo(head)
+
+func resolved_endpoint(entry: const AddressInfo*, port: u16, family: i32) -> SocketAddress?:
+    let known = entry.family == inet or entry.family == inet6
+    if not known or entry.kind != stream or (family != 0 and entry.family != family):
+        return none
+    let raw = info_address(entry) else return none
+    var address = decode_address(raw, entry.address_length) catch failure:
+        discard(failure)
+        return none
+    let matches = (entry.family == inet and address.ip.kind == IpVersion.ipv4) or (entry.family == inet6 and address.ip.kind == IpVersion.ipv6)
+    if not matches:
+        return none
+    address.port = port
+    return address

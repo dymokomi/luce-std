@@ -1,0 +1,76 @@
+#==============================================================================================
+#
+#   termination - Process-termination requests
+#
+#   DESCRIPTION:
+#       A handler that records when the process is asked to terminate (a signal or console
+#       close), so the program can shut down cleanly.
+#
+#==============================================================================================
+
+import sync
+
+var termination_lock: sync.Mutex
+var termination_owners: @u64
+var termination_generation: @u64
+var termination_closing: @bool
+
+## Copyable observation of termination requests since subscription. Poll this
+## from ordinary application threads; native handlers perform no application work.
+pub struct TerminationStatus:
+    var generation: u64
+
+    ## Whether termination has been requested.
+    pub func requested() -> bool:
+        return termination_generation.load(.acquire) != self.generation
+
+## Opt-in ownership of SIGINT/SIGTERM or Windows console notifications. Borrow
+## this owner; copying does not acquire another subscription. Close it only after
+## the work observing its status has drained and released its resources.
+## The last close restores native handlers. Windows console close/logoff/shutdown
+## handlers wait for all owners to close, bounded to four seconds; the OS may
+## impose a shorter deadline. Ctrl-C/Ctrl-Break only request cancellation.
+pub struct Termination:
+    var observation: TerminationStatus
+    var active: bool
+
+    ## Install the termination handler.
+    pub func init() -> !:
+        termination_lock.lock()
+        defer termination_lock.unlock()
+        if termination_closing.load(.acquire):
+            error(failed, "the process is already closing")
+        self.observation = TerminationStatus(generation = termination_generation.load(.acquire))
+        let count = termination_owners.load(.relaxed)
+        termination_owners.store(count + 1, .release)
+        if count == 0:
+            termination_install() catch failure:
+                termination_owners.store(0, .release)
+                error(failure.code, failure.message)
+        self.active = true
+
+    ## The current termination status.
+    pub func status() -> TerminationStatus:
+        return self.observation
+
+    ## Remove the handler.
+    pub mutating func close():
+        if not self.active:
+            return
+        termination_lock.lock()
+        defer termination_lock.unlock()
+        self.active = false
+        if termination_owners.sub(1, .acq_rel) == 1:
+            termination_restore()
+
+func termination_install() -> !:
+    if platform.windows:
+        try termination_windows_install()
+    else:
+        try termination_posix_install()
+
+func termination_restore():
+    if platform.windows:
+        termination_windows_restore()
+    else:
+        termination_posix_restore()

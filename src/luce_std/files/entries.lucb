@@ -1,0 +1,163 @@
+#==============================================================================================
+#
+#   entries - Path existence and entry operations
+#
+#   DESCRIPTION:
+#       Existence checks, directory creation and removal, rename, hard and symbolic links,
+#       and reading a symlink's target.
+#
+#==============================================================================================
+
+## Whether the path currently resolves to an existing object, following symlinks.
+## This convenience form returns false on lookup errors; use exists_checked when
+## permission or I/O failures must be distinguished from absence. It never opens a
+## file, so checking a FIFO cannot block waiting for a writer.
+pub func exists(path: c.str) -> bool:
+    return exists_checked(path) catch failure:
+        discard(failure)
+        recover false
+
+## Checked existence lookup. Missing components, non-directory parent components
+## and dangling symlinks return false. Other failures retain their error category.
+pub func exists_checked(path: c.str) -> bool!:
+    if platform.windows:
+        let text = try wide_path(path)
+        defer free(text)
+        if win_access(text.data, 0) == 0:
+            return true
+        let number = c.errno()
+        if number == 2 or number == 20:
+            return false
+        error(classify_error(number), "the path could not be inspected")
+    var result = access(path, 0)
+    while result < 0 and c.errno() == c.interrupted:
+        result = access(path, 0)
+    if result == 0:
+        return true
+    let number = c.errno()
+    if number == 2 or number == 20:
+        return false
+    error(classify_error(number), "the path could not be inspected")
+
+# mark: Creating, removing and linking ========================================================
+
+## Create one directory; parents must already exist. An existing final entry is
+## already_exists, including a symlink. Permissions are filtered by the process
+## umask. No recursive creation, permission repair, or implicit retry occurs.
+pub func create_directory(path: c.str, permissions: u32 = 493) -> !:
+    if permissions > 4095:
+        error(invalid_options, "directory permissions must fit the Unix mode bits")
+    if platform.windows:
+        let text = try wide_path(path)
+        defer free(text)
+        if win_mkdir(text.data) != 0:
+            error(classify_error(c.errno()), "the directory could not be created")
+        return
+    let result = mkdir_macos(path, (u16)permissions) if platform.macos else mkdir_linux(path, permissions)
+    if result != 0:
+        error(classify_error(c.errno()), "the directory could not be created")
+
+## Remove one non-directory entry. A final symlink is removed without touching
+## its target. Open handles and other hard links keep the object alive. Parents
+## are resolved normally; a missing entry is an error, not successful removal.
+pub func remove_file(path: c.str) -> !:
+    if platform.windows:
+        let text = try wide_path(path)
+        defer free(text)
+        if win_unlink(text.data) != 0:
+            error(classify_error(c.errno()), "the file entry could not be removed")
+        return
+    if unlink(path) != 0:
+        error(classify_error(c.errno()), "the file entry could not be removed")
+
+## Remove an empty directory; do not recurse or follow a final symlink. A
+## nonempty directory reports not_empty (or already_exists if the OS uses EEXIST).
+pub func remove_directory(path: c.str) -> !:
+    if platform.windows:
+        let text = try wide_path(path)
+        defer free(text)
+        if win_rmdir(text.data) != 0:
+            error(classify_error(c.errno()), "the directory could not be removed")
+        return
+    if rmdir(path) != 0:
+        error(classify_error(c.errno()), "the directory could not be removed")
+
+## Rename an entry, atomically replacing an existing compatible destination on
+## the same filesystem. Final symlinks are entries, not followed targets. Open
+## handles keep referring to their objects. This does not copy across devices
+## or request durable storage unless synchronize=true on Windows. With
+## replace=false, atomically refuse an existing
+## destination; unsupported exclusive renames fail without an unsafe fallback.
+## On a remote
+## filesystem a reported failure may follow a completed server-side mutation.
+pub func rename(source: c.str, destination: c.str, replace: bool = true, synchronize: bool = false) -> !:
+    if platform.windows:
+        let from_path = try wide_path(source)
+        defer free(from_path)
+        let to = try wide_path(destination)
+        defer free(to)
+        let flags: u32 = (1 if replace else 0) | (8 if synchronize else 0)
+        if MoveFileExW(from_path.data, to.data, flags) == 0:
+            error(windows_error(GetLastError()), "the entry could not be renamed")
+        return
+    var result: i32 = 0
+    if replace:
+        result = c_rename(source, destination)
+    elif platform.macos:
+        result = rename_exclusive_macos(source, destination, 4)
+    else:
+        result = rename_exclusive_linux(current_directory_fd, source, current_directory_fd, destination, 1)
+    if result != 0:
+        error(classify_error(c.errno()), "the entry could not be renamed")
+
+## Create a symlink containing target's bytes; the target need not exist. A
+## relative target is resolved from the link's parent when later followed.
+## Creation refuses an existing link_path, including a dangling symlink.
+## Windows requires the target kind at creation. Omit directory to infer an
+## existing target's kind; specify true for a dangling directory link. Unix
+## symlinks do not encode this distinction and ignore the hint.
+pub func create_symlink(target: c.str, link_path: c.str, directory: bool? = none) -> !:
+    if platform.windows:
+        try windows_create_symlink(target, link_path, directory)
+        return
+    if symlink(target, link_path) != 0:
+        error(classify_error(c.errno()), "the symbolic link could not be created")
+
+## Create another name for the source entry on the same filesystem, refusing an
+## existing destination. A final source symlink is linked itself, not followed.
+## Directories cannot be linked. Intermediate path components resolve normally.
+pub func create_hard_link(source: c.str, destination: c.str) -> !:
+    if platform.windows:
+        let from_path = try wide_path(source)
+        defer free(from_path)
+        let to = try wide_path(destination)
+        defer free(to)
+        if CreateHardLinkW(to.data, from_path.data, none) == 0:
+            error(windows_error(GetLastError()), "the hard link could not be created")
+        return
+    if linkat(current_directory_fd, source, current_directory_fd, destination, 0) != 0:
+        error(classify_error(c.errno()), "the hard link could not be created")
+
+## Read a final symlink's raw target bytes without following it. Return a
+## NUL-terminated current-allocator allocation released with strings.release.
+## At most limit bytes are accepted; excess reports too_large, never truncates.
+## One extra byte detects excess without trusting metadata. Interrupted reads
+## retry; concurrent replacement may therefore change the observed link target.
+pub func read_symlink(path: c.str, limit: usize = 4096) -> str!:
+    if platform.windows:
+        return try windows_read_symlink(path, limit)
+    let capacity = limit +? 1 else error(memory.exhausted, "the link target limit overflows")
+    let buffer = try alloc u8[capacity]
+    defer free(buffer)
+    var count = readlink(path, buffer.data, buffer.length)
+    while count < 0 and c.errno() == c.interrupted:
+        count = readlink(path, buffer.data, buffer.length)
+    if count < 0:
+        error(classify_error(c.errno()), "the symbolic link could not be read")
+    if (usize)count > limit:
+        error(too_large, "the link target exceeds the requested limit")
+    let length = (usize)count
+    let exact = try alloc u8[length + 1]
+    memory.copy(exact, buffer, length)
+    exact[length] = 0
+    return (str)exact[..<length]

@@ -1,0 +1,161 @@
+#==============================================================================================
+#
+#   temporary - Temporary files and atomic writes
+#
+#   DESCRIPTION:
+#       A temporary file with an owned pathname, and write_atomic, which writes through a
+#       temporary sibling and renames it over the destination.
+#
+#==============================================================================================
+
+# mark: The temporary file ====================================================================
+
+## A temporary file and its owned pathname. The zero value is closed. Copying does
+## not duplicate ownership. Borrow the object for I/O and serialize its use.
+## The pathname allocator is retained, so cleanup may occur outside its with block.
+pub struct TemporaryFile: io.Reader, io.Writer:
+    var file: File
+    var name: str
+    var owner: memory.Allocator?
+
+    ## Create an exclusive close-on-exec file in directory, with permissions
+    ## filtered by umask. The OS supplies 128 random filename bits per attempt;
+    ## collisions retry up to 128 times. Entropy acquisition may block. No
+    ## existing entry is opened or overwritten, and failure retains no allocation.
+    pub static func create(directory: c.str, permissions: u32 = 384) -> TemporaryFile!:
+        let candidate = try paths.join((str)directory, ".luce-00000000000000000000000000000000")
+        errdefer strings.release(candidate)
+        let digits = "0123456789abcdef"
+        let data = (u8*)candidate.bytes.data
+        let suffix = candidate.length - 32
+        var attempt: usize = 0
+        while attempt < 128:
+            var random: u8[16]
+            os.random_bytes(random) catch:
+                error(failed, "temporary filename randomness is unavailable")
+            for i in 0..<random.length:
+                data[suffix + i * 2] = digits.bytes[random[i] >> 4]
+                data[suffix + i * 2 + 1] = digits.bytes[random[i] & 15]
+            let file = File.open((c.str)candidate, OpenMode.create_new_read_write, permissions) catch failure:
+                if failure.code == already_exists:
+                    attempt += 1
+                    continue
+                error(failure.code, failure.message)
+            return TemporaryFile(file = file, name = candidate, owner = memory.allocator)
+        error(already_exists, "no unused temporary filename was found")
+
+    ## Borrowed NUL-terminated pathname, valid until publication or cleanup.
+    pub func path() -> str:
+        return self.name
+
+    ## Read into `buffer`; the bytes read.
+    pub mutating func read(buffer: u8[]) -> usize!:
+        return try self.file.read(buffer)
+
+    ## Write `data`; the bytes written.
+    pub mutating func write(data: const u8[]) -> usize!:
+        return try self.file.write(data)
+
+    ## Move the read/write offset and report the new one.
+    pub mutating func seek(offset: i64, origin: SeekOrigin = SeekOrigin.start) -> i64!:
+        return try self.file.seek(offset, origin)
+
+    ## Flush the file's data to the device.
+    pub mutating func sync() -> !:
+        try self.file.sync()
+
+    ## Close successfully, then rename over destination. A close failure does
+    ## not publish. A rename failure leaves the temporary pathname owned here
+    ## for retry or discard. With replace=false, an existing destination is
+    ## atomically refused. Success consumes ownership and invalidates path().
+    ## With synchronize=true, flush the temporary data before publication and
+    ## request write-through rename semantics on Windows. Other callers must sync
+    ## data and the destination directory themselves when those guarantees matter.
+    pub mutating func publish(destination: c.str, replace: bool = true, synchronize: bool = false) -> !:
+        if self.name.length == 0:
+            error(io.closed, "the temporary file has no owned pathname")
+        try self.file.close()
+        try rename((c.str)self.name, destination, replace, synchronize)
+        self.release_name()
+
+    mutating func release_name():
+        if self.name.length > 0:
+            let owner = self.owner else trap("a temporary pathname lost its allocator")
+            with owner:
+                strings.release(self.name)
+            self.name = ""
+            self.owner = none
+
+    mutating func remove_name() -> !:
+        if self.name.length == 0:
+            return
+        remove_file((c.str)self.name) catch failure:
+            if failure.code != missing:
+                error(failure.code, failure.message)
+        self.release_name()
+
+    ## Close and remove the temporary entry. Report the first failure; still
+    ## attempt removal after a close failure. A failed removal retains path()
+    ## for retry. Repeated successful discard calls are safe.
+    pub mutating func dispose() -> !:
+        self.file.close() catch failure:
+            self.remove_name() catch cleanup:
+                discard(cleanup)
+            error(failure.code, failure.message)
+        try self.remove_name()
+
+    ## Best-effort cleanup, releasing pathname memory even if the OS refuses
+    ## removal. Such a refusal can leave a file behind; use discard to observe it.
+    pub mutating func destroy():
+        self.dispose() catch failure:
+            discard(failure)
+        self.release_name()
+
+# mark: Atomic writes =========================================================================
+
+## Write through a temporary sibling, then atomically rename it over path. The
+## replacement receives permissions filtered by umask; existing ownership, mode
+## and extended metadata are not preserved. A final symlink is replaced itself.
+## Parent directories must remain stable throughout the operation.
+## With synchronize, fsync the file before publication and its parent afterward;
+## this also requires read access to the parent directory. Optional published is
+## reset on entry and set immediately after successful rename, before directory
+## sync/close. A later failure can therefore report published=true. It must not
+## overlap input or allocator state. Temporary cleanup on failure is best effort.
+pub func write_atomic(path: c.str, data: const u8[], permissions: u32 = 420, synchronize: bool = false, published: bool*? = none) -> !:
+    if let flag = published:
+        *flag = false
+    var replacement = try Replacement.prepare(path, permissions, synchronize)
+    defer replacement.destroy()
+    try io.write_all(&replacement.temporary, data)
+    try replacement.finish(path, true, published)
+
+## Shared ownership and publication ordering for atomic writes and file copies.
+struct Replacement:
+    var parent: File
+    var temporary: TemporaryFile
+    var synchronize: bool
+
+    static func prepare(path: c.str, permissions: u32, synchronize: bool) -> Replacement!:
+        let parent_name = try strings.copy(paths.directory((str)path))
+        defer strings.release(parent_name)
+        var parent: File
+        errdefer parent.destroy()
+        if synchronize and not platform.windows:
+            parent = try File.open((c.str)parent_name)
+        let temporary = try TemporaryFile.create((c.str)parent_name, permissions)
+        return Replacement(parent = parent, temporary = temporary, synchronize = synchronize)
+
+    mutating func finish(path: c.str, replace: bool, published: bool*?) -> !:
+        if self.synchronize:
+            try self.temporary.sync()
+        try self.temporary.publish(path, replace, self.synchronize)
+        if let flag = published:
+            *flag = true
+        if self.synchronize and not platform.windows:
+            try self.parent.sync()
+            try self.parent.close()
+
+    mutating func destroy():
+        self.temporary.destroy()
+        self.parent.destroy()

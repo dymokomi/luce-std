@@ -1,0 +1,46 @@
+## The `process` module against its archive: `run` spawns a child, waits for it, and
+## answers its exit status with the captured standard output and error, each owned text
+## released through `process.release`. The child programs -- `echo` and `sh` -- resolve
+## through PATH on every POSIX host these tests run on. Capturing output allocates, so
+## each test sets an allocator.
+import c
+import memory
+import process
+
+test "run captures a child's standard output and a zero exit status":
+    with memory.heap:
+        let arguments: c.str[2] = ["-n", "hello there"]
+        let (status, out, err) = try process.run("echo", arguments)
+        defer process.release(out)
+        defer process.release(err)
+        assert(status == 0)
+        assert((str)out == "hello there")
+        assert(err.length == 0)
+
+test "run reports a non-zero exit status and leaves output empty":
+    with memory.heap:
+        let arguments: c.str[2] = ["-c", "exit 3"]
+        let (status, out, err) = try process.run("sh", arguments)
+        defer process.release(out)
+        defer process.release(err)
+        assert(status == 3)
+        assert(out.length == 0)
+        assert(err.length == 0)
+
+test "run captures standard error separately from standard output":
+    with memory.heap:
+        let arguments: c.str[2] = ["-c", "echo boom 1>&2"]
+        let (status, out, err) = try process.run("sh", arguments)
+        defer process.release(out)
+        defer process.release(err)
+        assert(status == 0)
+        assert(out.length == 0)
+        assert((str)err == "boom\n")
+
+test "run reports 127 when the program cannot be executed":
+    with memory.heap:
+        let arguments: c.str[1] = ["ignored"]
+        let (status, out, err) = try process.run("luce_no_such_program_xyzzy", arguments)
+        defer process.release(out)
+        defer process.release(err)
+        assert(status == 127)

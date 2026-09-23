@@ -1,0 +1,131 @@
+#==============================================================================================
+#
+#   head - Parsing HTTP heads
+#
+#   DESCRIPTION:
+#       Parse exactly one complete request or response head into caller-owned field storage.
+#
+#==============================================================================================
+
+## Parse exactly one complete request head. On failure storage may contain partial
+## field views; only a successful result is usable. Header/body limits are separate.
+pub func http_parse_request(data: const u8[], storage: HttpField[], limits: HttpLimits = HttpLimits()) -> HttpHead!:
+    var cursor: usize = 0
+    try http_check_head(data, limits)
+    let line = try http_line(data, &cursor)
+    if line.length > limits.line_bytes:
+        error(http_limit, "HTTP request line exceeds its limit")
+    let first = strings.find(line, " ") else error(http_invalid, "request line needs a method")
+    let method = (str)line.bytes[..<first]
+    let rest = (str)line.bytes[first + 1..]
+    let second = strings.find(rest, " ") else error(http_invalid, "request line needs a version")
+    let target = (str)rest.bytes[..<second]
+    let version = (str)rest.bytes[second + 1..]
+    if not http_token(method) or not http_request_target_valid(method, target):
+        error(http_invalid, "invalid request method or target")
+    var head = HttpHead(method = method, target = target, version = version)
+    try http_finish_head(&head, data, &cursor, storage, limits)
+    if version == "HTTP/1.1" and head.field_count("host") != 1:
+        error(http_invalid, "HTTP/1.1 requires exactly one Host field")
+    if head.field_count("host") > 1:
+        error(http_invalid, "duplicate Host field")
+    if let host = head.field("host"):
+        if not http_host_valid(host):
+            error(http_invalid, "invalid Host field")
+    if head.field_count("expect") > 0:
+        if version != "HTTP/1.1" or head.field_count("expect") != 1 or not http_equal(head.field("expect") else "", "100-continue"):
+            error(http_unsupported, "unsupported HTTP expectation")
+        head.expect_continue = true
+    return head
+
+## The request method determines HEAD/CONNECT response semantics. Informational
+## responses are separate heads; callers continue parsing until a final response.
+pub func http_parse_response(data: const u8[], storage: HttpField[], request_method: str = "GET", limits: HttpLimits = HttpLimits()) -> HttpHead!:
+    var cursor: usize = 0
+    try http_check_head(data, limits)
+    let line = try http_line(data, &cursor)
+    if line.length > limits.line_bytes:
+        error(http_limit, "HTTP status line exceeds its limit")
+    if line.length < 13 or line.bytes[8] != ' ' or line.bytes[12] != ' ':
+        error(http_invalid, "invalid HTTP status line")
+    let number = try http_number((str)line.bytes[9..<12])
+    if number < 100 or number > 599 or not http_field_valid(HttpField(name = "reason", value = (str)line.bytes[13..])):
+        error(http_invalid, "invalid HTTP status or reason")
+    if not http_token(request_method):
+        error(http_invalid, "invalid request method for response framing")
+    var head = HttpHead(method = request_method, version = (str)line.bytes[..<8], status = (u16)number)
+    try http_finish_head(&head, data, &cursor, storage, limits)
+    return head
+
+func http_check_head(data: const u8[], limits: HttpLimits) -> !:
+    if data.length > limits.head_bytes:
+        error(http_limit, "HTTP head exceeds its byte limit")
+    let end = http_head_end(data) else error(http_invalid, "incomplete HTTP head")
+    if end != data.length:
+        error(http_invalid, "HTTP head parser does not consume body bytes")
+
+func http_finish_head(head: HttpHead*, data: const u8[], cursor: usize*, storage: HttpField[], limits: HttpLimits) -> !:
+    if head.version != "HTTP/1.0" and head.version != "HTTP/1.1":
+        error(http_unsupported, "unsupported HTTP version")
+    var count: usize = 0
+    while *cursor < data.length:
+        let line = try http_line(data, cursor)
+        if line.length == 0:
+            break
+        if line.length > limits.line_bytes or count >= storage.length or count >= limits.fields:
+            error(http_limit, "HTTP fields exceed caller storage or configured limits")
+        let colon = strings.find(line, ":") else error(http_invalid, "HTTP field needs a colon")
+        let item = HttpField(name = (str)line.bytes[..<colon], value = http_ows((str)line.bytes[colon + 1..]))
+        if not http_field_valid(item):
+            error(http_invalid, "invalid HTTP field name or value")
+        storage[count] = item
+        count += 1
+    head.fields = storage[..<count]
+    head.connection_upgrade = try head.has_token("connection", "upgrade")
+    let closing = try head.has_token("connection", "close")
+    head.keep_alive = not closing and (head.version == "HTTP/1.1" or (try head.has_token("connection", "keep-alive")))
+    # Successful CONNECT changes protocols immediately; RFC 9112 requires ignoring
+    # framing fields even if a peer incorrectly sends them.
+    if head.method == "CONNECT" and head.status >= 200 and head.status < 300:
+        head.body_kind = HttpBodyKind.tunnel
+        return
+    var length: u64? = none
+    var coding_count: usize = 0
+    for item in head.fields:
+        if http_equal(item.name, "content-length"):
+            var at: usize = 0
+            while let part = http_list_next(item.value, &at):
+                let parsed = try http_number(part)
+                if let previous = length:
+                    if parsed != previous:
+                        error(http_invalid, "conflicting Content-Length fields")
+                length = parsed
+        if http_equal(item.name, "transfer-encoding"):
+            var at: usize = 0
+            while let part = http_list_next(item.value, &at):
+                if part.length == 0:
+                    continue
+                if not http_equal(part, "chunked"):
+                    error(http_unsupported, "unsupported HTTP transfer coding")
+                coding_count += 1
+    if head.field_count("transfer-encoding") > 0:
+        if coding_count != 1 or length != none or head.version != "HTTP/1.1":
+            error(http_invalid, "ambiguous HTTP transfer framing")
+    if head.status > 0 and (head.status < 200 or head.status == 204):
+        if length != none or coding_count != 0:
+            error(http_invalid, "body framing is forbidden for this response status")
+    if head.status > 0 and (head.method == "HEAD" or head.status < 200 or head.status == 204 or head.status == 304):
+        head.body_kind = HttpBodyKind.empty
+        return
+    if coding_count != 0:
+        head.body_kind = HttpBodyKind.chunked
+    elif let size = length:
+        if size > limits.body_bytes:
+            error(http_limit, "HTTP body exceeds its byte limit")
+        head.body_kind = HttpBodyKind.fixed
+        head.body_length = size
+    elif head.status > 0:
+        head.body_kind = HttpBodyKind.until_eof
+        head.keep_alive = false
+    else:
+        head.body_kind = HttpBodyKind.empty

@@ -1,0 +1,19 @@
+import protocols
+
+pub func main(arguments: list[str]) -> int!:
+    let calculate = protocols.accept_key
+    let first = try calculate("dGhlIHNhbXBsZSBub25jZQ==")
+    let second = try calculate("AAAAAAAAAAAAAAAAAAAAAA==")
+    assert(first == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+    assert(second == "ICX+Yqv66kxgM0FcWaLWlFLwTAI=")
+    assert((try protocols.content_length("POST / HTTP/1.1\r\nHost: example.test\r\nContent-Length: 7\r\n\r\n")) == 7)
+    let copied = try protocols.roundtrip("hello €")
+    discard(try protocols.roundtrip("changed"))
+    assert(copied == "hello €")
+    var rejected = false
+    discard(protocols.content_length("invalid") catch failure:
+        rejected = true
+        recover 0)
+    assert(rejected)
+    print("ok Luce/Base HTTP and WebSocket boundary")
+    return 0

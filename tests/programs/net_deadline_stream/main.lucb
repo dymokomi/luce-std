@@ -1,0 +1,158 @@
+import sync
+import c
+import io
+import net
+import platform
+
+extern func socketpair(domain: i32, kind: i32, protocol: i32, pair: i32*) -> i32
+extern func reference_begin(kind: i32, fd: i32)
+extern func reference_end() -> i32
+extern func reference_cancel_callback(callback: func(void*) -> unit, context: void*)
+extern func reference_nonblocking(fd: i32) -> i32
+
+func cancel_now(context: void*):
+    let cancellation = (sync.Cancellation*)context
+    cancellation.request()
+
+pub func main(arguments: c.str[]) -> i32!:
+    var pair: i32[2]
+    assert(socketpair(1, 1, 0, &pair[0]) == 0)
+    reference_begin(8, pair[0])
+    var connection = try net.Connection.over(pair[0])
+    assert(reference_end() == (1 if platform.macos else 0))
+    defer connection.destroy()
+    var peer = try net.Connection.over(pair[1])
+    defer peer.destroy()
+    assert(reference_nonblocking(pair[0]) == 0)
+    var requires_nonblocking = false
+    discard(net.DeadlineStream.over(&connection) catch failure:
+        assert(failure.code == net.invalid_options)
+        requires_nonblocking = true
+        recover net.DeadlineStream())
+    assert(requires_nonblocking and reference_nonblocking(pair[0]) == 0)
+    try connection.set_nonblocking(true)
+    var bytes: u8[8]
+    var progress: usize = 99
+    var rejected = false
+
+    reference_begin(1, pair[0])
+    var bounded = try net.DeadlineStream.over(&connection, try net.Deadline.after(100000000))
+    io.write_all(&bounded, "abcdefgh".bytes, &progress) catch failure:
+        assert(failure.code == net.timed_out)
+        rejected = true
+    assert(rejected and progress == 2 and reference_end() == 2)
+    try io.read_exact(&peer, bytes[..<2])
+    assert((str)bytes[..<2] == "ab")
+    var retry = try net.DeadlineStream.over(&connection)
+    try io.write_all(&retry, "abcdefgh".bytes[progress..])
+    try io.read_exact(&peer, bytes[..<6])
+    assert((str)bytes[..<6] == "cdefgh")
+
+    try io.write_all(&peer, "abcdefgh".bytes)
+    reference_begin(2, pair[0])
+    bounded = try net.DeadlineStream.over(&connection, try net.Deadline.after(100000000))
+    rejected = false
+    io.read_exact(&bounded, bytes, &progress) catch failure:
+        assert(failure.code == net.timed_out)
+        rejected = true
+    assert(rejected and progress == 2 and (str)bytes[..<2] == "ab" and reference_end() == 2)
+    try io.read_exact(&retry, bytes[progress..])
+    assert((str)bytes == "abcdefgh")
+
+    reference_begin(3, pair[0])
+    bounded = try net.DeadlineStream.over(&connection, try net.Deadline.after(100000000))
+    rejected = false
+    io.write_all(&bounded, "x".bytes, &progress) catch failure:
+        assert(failure.code == net.timed_out)
+        rejected = true
+    assert(rejected and progress == 0 and reference_end() == 1)
+
+    try io.write_all(&peer, "abcdefgh".bytes)
+    var cancellation: sync.Cancellation
+    reference_cancel_callback(cancel_now, &cancellation)
+    reference_begin(4, pair[0])
+    bounded = try net.DeadlineStream.over(&connection, cancellation = &cancellation)
+    rejected = false
+    io.read_exact(&bounded, bytes, &progress) catch failure:
+        assert(failure.code == net.cancelled)
+        rejected = true
+    assert(rejected and progress == 2 and reference_end() == 1)
+    try io.read_exact(&retry, bytes[progress..])
+    assert((str)bytes == "abcdefgh")
+    assert((try bounded.read(bytes[..<0])) == 0 and (try bounded.write("".bytes)) == 0)
+
+    for kind in 5..<8:
+        reference_begin((i32)kind, pair[0])
+        rejected = false
+        if kind == 6:
+            discard(retry.read(bytes) catch failure:
+                assert(failure.code == net.failed)
+                rejected = true
+                recover 0)
+        else:
+            discard(retry.write("x".bytes) catch failure:
+                assert(failure.code == (io.no_progress if kind == 5 else net.closed))
+                rejected = true
+                recover 0)
+        assert(rejected and reference_end() == 1)
+    assert(reference_nonblocking(pair[0]) == 1)
+
+    try connection.set_nonblocking(false)
+    rejected = false
+    discard(retry.write("x".bytes) catch failure:
+        assert(failure.code == net.invalid_options)
+        rejected = true
+        recover 0)
+    assert(rejected)
+    rejected = false
+    discard(retry.read(bytes) catch failure:
+        assert(failure.code == net.invalid_options)
+        rejected = true
+        recover 0)
+    assert(rejected and (try retry.read(bytes[..<0])) == 0)
+    try connection.set_nonblocking(true)
+
+    # Real backpressure: confirm that the peer receives exactly the reported prefix.
+    try connection.set_send_buffer(4096)
+    let payload = try alloc u8[1048576]
+    defer free(payload)
+    var index: usize = 0
+    while index < payload.length:
+        payload[index] = (u8)(index % 251)
+        index += 1
+    bounded = try net.DeadlineStream.over(&connection, try net.Deadline.after(200000000))
+    rejected = false
+    io.write_all(&bounded, payload, &progress) catch failure:
+        assert(failure.code == net.timed_out)
+        rejected = true
+    assert(rejected and progress < payload.length and reference_nonblocking(pair[0]) == 1)
+    var received: usize = 0
+    var block: u8[4096]
+    while received < progress:
+        let remaining = progress - received
+        let count = remaining if remaining < block.length else block.length
+        try io.read_exact(&peer, block[..<count])
+        index = 0
+        while index < count:
+            assert(block[index] == (u8)((received + index) % 251))
+            index += 1
+        received += count
+    try peer.set_nonblocking(true)
+    var probe = try net.DeadlineStream.over(&peer, try net.Deadline.after(10000000))
+    rejected = false
+    discard(probe.read(block) catch failure:
+        assert(failure.code == net.timed_out)
+        rejected = true
+        recover 0)
+    assert(rejected)
+    try peer.shutdown(net.ShutdownDirection.write)
+    assert((try retry.read(bytes)) == 0)
+    connection.destroy()
+    rejected = false
+    discard(retry.read(bytes[..<0]) catch failure:
+        assert(failure.code == net.closed)
+        rejected = true
+        recover 0)
+    assert(rejected)
+    print("ok deadline stream progress and backpressure")
+    return 0

@@ -1,0 +1,144 @@
+#==============================================================================================
+#
+#   graphemes - Grapheme cluster iteration
+#
+#   DESCRIPTION:
+#       A borrowed iterator over the default extended grapheme clusters of UAX #29, validated
+#       up front without allocation.
+#
+#==============================================================================================
+
+## Borrowed iterator over default extended grapheme clusters from Unicode 17
+## UAX #29. Clusters are logical text boundaries, not display-column widths.
+## Construction validates the complete UTF-8 input without allocation. Keep its
+## bytes alive and unchanged until iteration ends; returned views borrow them.
+## The zero value is an exhausted iterator. State is inline and calls are serial.
+pub struct GraphemeIterator:
+    var text: str
+    var offset: usize
+
+    ## An iterator over the grapheme clusters of `text`, whose UTF-8 is validated up front.
+    pub static func over(text: str) -> GraphemeIterator!:
+        if not utf8.valid(text.bytes):
+            error(utf8.invalid_sequence, "invalid UTF-8 text")
+        return GraphemeIterator(text = text)
+
+    ## Next nonempty borrowed cluster, or none at EOF; repeated EOF stays none.
+    pub mutating func next() -> str?:
+        if self.offset == self.text.length:
+            return none
+        let start = self.offset
+        let first = utf8.decode(self.text.bytes, self.offset) else trap("the grapheme iterator's input changed")
+        var state: GraphemeState
+        state.accept((u32)first.scalar, grapheme_class((u32)first.scalar))
+        self.offset += first.width
+        while self.offset < self.text.length:
+            let decoded = utf8.decode(self.text.bytes, self.offset) else trap("the grapheme iterator's input changed")
+            let scalar = (u32)decoded.scalar
+            let current = grapheme_class(scalar)
+            if state.break_before(scalar, current):
+                break
+            state.accept(scalar, current)
+            self.offset += decoded.width
+        return (str)self.text.bytes[start..<self.offset]
+
+    ## Byte offset of the next cluster, or the input byte length at EOF.
+    pub func byte_offset() -> usize:
+        return self.offset
+
+# Values match the generator's grapheme_names and indic_names tables.
+enum GraphemeClass as u8:
+    other = 0
+    cr = 1
+    lf = 2
+    control = 3
+    extend = 4
+    zwj = 5
+    regional_indicator = 6
+    prepend = 7
+    spacing_mark = 8
+    l = 9
+    v = 10
+    t = 11
+    lv = 12
+    lvt = 13
+
+enum IndicClass as u8:
+    other = 0
+    consonant = 1
+    linker = 2
+    extend = 3
+
+enum IndicState as u8:
+    empty = 0
+    consonant = 1
+    linked = 2
+
+struct GraphemeState:
+    var previous: GraphemeClass
+    var regional_odd: bool
+    var pictographic_prefix: bool
+    var zwj_after_pictographic: bool
+    var indic: IndicState
+
+    func break_before(scalar: u32, current: GraphemeClass) -> bool:
+        # CR/LF and controls take precedence over every joining rule (GB3–GB5).
+        if self.previous == GraphemeClass.cr and current == GraphemeClass.lf:
+            return false
+        if grapheme_control(self.previous) or grapheme_control(current):
+            return true
+        if hangul_continuation(self.previous, current):
+            return false
+        # Extend/ZWJ, spacing marks and prepends (GB9, GB9a, GB9b).
+        if current == GraphemeClass.extend or current == GraphemeClass.zwj or current == GraphemeClass.spacing_mark:
+            return false
+        if self.previous == GraphemeClass.prepend:
+            return false
+        # A linker within a valid Indic consonant context joins the next
+        # consonant (GB9c). Retained state avoids rescanning earlier characters.
+        if self.indic == IndicState.linked and indic_class(scalar) == IndicClass.consonant:
+            return false
+        if self.previous == GraphemeClass.zwj and self.zwj_after_pictographic and range_value(pictographic_ranges, scalar) != 0:
+            return false
+        # Regional indicators pair from the start of each consecutive run.
+        if self.previous == GraphemeClass.regional_indicator and current == GraphemeClass.regional_indicator and self.regional_odd:
+            return false
+        return true
+
+    mutating func accept(scalar: u32, current: GraphemeClass):
+        self.zwj_after_pictographic = current == GraphemeClass.zwj and self.pictographic_prefix
+        if range_value(pictographic_ranges, scalar) != 0:
+            self.pictographic_prefix = true
+        elif current != GraphemeClass.extend:
+            self.pictographic_prefix = false
+        self.regional_odd = not self.regional_odd if current == GraphemeClass.regional_indicator else false
+        let indic = indic_class(scalar)
+        if indic == IndicClass.consonant:
+            self.indic = IndicState.consonant
+        elif indic == IndicClass.linker:
+            if self.indic != IndicState.empty:
+                self.indic = IndicState.linked
+        elif indic != IndicClass.extend:
+            self.indic = IndicState.empty
+        self.previous = current
+
+func grapheme_class(scalar: u32) -> GraphemeClass:
+    return (GraphemeClass)(u8)range_value(grapheme_ranges, scalar)
+
+func indic_class(scalar: u32) -> IndicClass:
+    return (IndicClass)(u8)range_value(indic_ranges, scalar)
+
+func grapheme_control(value: GraphemeClass) -> bool:
+    return value == GraphemeClass.control or value == GraphemeClass.cr or value == GraphemeClass.lf
+
+func hangul_continuation(previous: GraphemeClass, current: GraphemeClass) -> bool:
+    # Hangul L/V/T syllable boundaries (GB6–GB8).
+    match previous:
+        .l:
+            return current == GraphemeClass.l or current == GraphemeClass.v or current == GraphemeClass.lv or current == GraphemeClass.lvt
+        .lv, .v:
+            return current == GraphemeClass.v or current == GraphemeClass.t
+        .lvt, .t:
+            return current == GraphemeClass.t
+        _:
+            return false

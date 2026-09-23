@@ -1,0 +1,182 @@
+#==============================================================================================
+#
+#   files - Files, directories and their operations
+#
+#   DESCRIPTION:
+#       Opening, reading, writing, seeking, syncing and truncating files, plus directory
+#       listing, rename, remove, symlinks and metadata, over the POSIX and Windows calls.
+#
+#==============================================================================================
+
+import c
+import memory
+import windows_text
+import platform
+import io
+import luce_std.paths as paths
+import strings
+import os
+extern func open(path: c.str, flags: i32, ...) -> i32
+extern func openat(directory: i32, path: c.str, flags: i32, ...) -> i32
+extern func close(descriptor: i32) -> i32
+extern func posix_read as "read"(descriptor: i32, buffer: void*, count: usize) -> isize
+extern func posix_write as "write"(descriptor: i32, buffer: const void*, count: usize) -> isize
+extern func win_read as "_read"(descriptor: i32, buffer: void*, count: u32) -> i32
+extern func win_write as "_write"(descriptor: i32, buffer: const void*, count: u32) -> i32
+
+func c_read(descriptor: i32, buffer: void*, count: usize) -> isize:
+    if platform.windows:
+        return (isize)win_read(descriptor, buffer, (u32)(count if count < 2147483647 else 2147483647))
+    return posix_read(descriptor, buffer, count)
+
+func c_write(descriptor: i32, buffer: const void*, count: usize) -> isize:
+    if platform.windows:
+        return (isize)win_write(descriptor, buffer, (u32)(count if count < 2147483647 else 2147483647))
+    return posix_write(descriptor, buffer, count)
+
+extern func posix_lseek as "lseek"(descriptor: i32, offset: i64, whence: i32) -> i64
+extern func windows_lseek as "_lseeki64"(descriptor: i32, offset: i64, whence: i32) -> i64
+extern func posix_fsync as "fsync"(descriptor: i32) -> i32
+extern func windows_fsync as "_commit"(descriptor: i32) -> i32
+extern func posix_ftruncate as "ftruncate"(descriptor: i32, length: i64) -> i32
+extern func windows_ftruncate as "_chsize_s"(descriptor: i32, length: i64) -> i32
+
+func lseek(descriptor: i32, offset: i64, whence: i32) -> i64:
+    if platform.windows: return windows_lseek(descriptor, offset, whence)
+    return posix_lseek(descriptor, offset, whence)
+
+func fsync(descriptor: i32) -> i32:
+    if platform.windows: return windows_fsync(descriptor)
+    return posix_fsync(descriptor)
+
+func ftruncate(descriptor: i32, length: i64) -> i32:
+    if platform.windows:
+        let result = windows_ftruncate(descriptor, length)
+        if result != 0:
+            c.set_errno(result)
+            return -1
+        return 0
+    return posix_ftruncate(descriptor, length)
+
+extern func fchmod_macos as "fchmod"(descriptor: i32, permissions: u16) -> i32
+extern func fchmod_linux as "fchmod"(descriptor: i32, permissions: u32) -> i32
+extern func fdopendir(descriptor: i32) -> void*?
+extern func dirfd(directory: void*) -> i32
+extern func readdir_macos as "readdir"(directory: void*) -> MacEntry*?
+extern func readdir_linux as "readdir"(directory: void*) -> LinuxEntry*?
+extern func readdir_wasi as "readdir"(directory: void*) -> WasiEntry*?
+extern func closedir(directory: void*) -> i32
+extern func access(path: c.str, mode: i32) -> i32
+extern func mkdir_macos as "mkdir"(path: c.str, permissions: u16) -> i32
+extern func mkdir_linux as "mkdir"(path: c.str, permissions: u32) -> i32
+extern func rmdir(path: c.str) -> i32
+extern func unlink(path: c.str) -> i32
+extern func c_rename as "rename"(source: c.str, destination: c.str) -> i32
+extern func rename_exclusive_macos as "renamex_np"(source: c.str, destination: c.str, flags: u32) -> i32
+extern func rename_exclusive_linux as "renameat2"(source_directory: i32, source: c.str, destination_directory: i32, destination: c.str, flags: u32) -> i32
+extern func symlink(target: c.str, path: c.str) -> i32
+extern func linkat(source_directory: i32, source: c.str, destination_directory: i32, destination: c.str, flags: i32) -> i32
+extern func readlink(path: c.str, buffer: void*, capacity: usize) -> isize
+extern func getentropy(buffer: void*, length: usize) -> i32
+
+## A directory entry as macOS lays it out (`struct dirent`, 64-bit inodes).
+extern struct MacEntry:
+    inode: u64
+    seek: u64
+    length: u16
+    name_length: u16
+    kind: u8
+    name: u8[1024]
+
+## A directory entry as Linux lays it out: the name is NUL-terminated, not counted.
+extern struct LinuxEntry:
+    inode: u64
+    offset: i64
+    length: u16
+    kind: u8
+    name: u8[256]
+
+## A directory entry as WASI lays it out: the kind, then the NUL-terminated name.
+extern struct WasiEntry:
+    inode: u64
+    kind: u8
+    name: u8[256]
+
+## The next entry's name, or none at the end; `.` and `..` are entries like any other.
+func next_entry(directory: void*) -> str?!:
+    if platform.windows:
+        return try windows_next((WinDirectory*)directory)
+    while true:
+        c.set_errno(0)
+        if platform.macos:
+            if let entry = readdir_macos(directory):
+                return (str)entry.name[..<(usize)entry.name_length]
+        elif platform.wasm32:
+            if let entry = readdir_wasi(directory):
+                var n: usize = 0
+                while n < entry.name.length and entry.name[n] != 0:
+                    n += 1
+                return (str)entry.name[..<n]
+        else:
+            if let entry = readdir_linux(directory):
+                var n: usize = 0
+                while n < entry.name.length and entry.name[n] != 0:
+                    n += 1
+                return (str)entry.name[..<n]
+        let number = c.errno()
+        if number == c.interrupted:
+            continue
+        if number != 0:
+            error(classify_error(number), "the directory could not be read")
+        return none
+
+## `open` flags: macOS keeps the BSD values, Linux its own, and WASI its own again, where
+## reading is a right asked for (§19.5).
+let read_only_flag: i32 = 67108864 if platform.wasm32 else 0
+let write_only: i32 = 268435456 if platform.wasm32 else 1
+let read_write_flag: i32 = 335544320 if platform.wasm32 else 2
+let create: i32 = 4096 if platform.wasm32 else (256 if platform.windows else (512 if platform.macos else 64))
+let truncate: i32 = 32768 if platform.wasm32 else (512 if platform.windows else (1024 if platform.macos else 512))
+let close_on_exec: i32 = 0 if platform.wasm32 else (128 if platform.windows else (16777216 if platform.macos else 524288))
+let append_flag: i32 = 1 if platform.wasm32 else (8 if platform.windows or platform.macos else 1024)
+let exclusive_flag: i32 = 16384 if platform.wasm32 else (1024 if platform.windows else (2048 if platform.macos else 128))
+let nonblocking_open_flag: i32 = 4 if platform.macos or platform.wasm32 else 2048
+let would_block_errno: i32 = 6 if platform.wasm32 else (35 if platform.macos else 11)
+let transfer_limit: usize = 1073741824
+let current_directory_fd: i32 = -2 if platform.macos or platform.wasm32 else -100
+## Linux keeps the generic `open` flag values on aarch64 and the x86-64 ones elsewhere.
+let directory_flag: i32 = 8192 if platform.wasm32 else (1048576 if platform.macos else (16384 if platform.arm64 else 65536))
+let no_follow_flag: i32 = 16777216 if platform.wasm32 else (256 if platform.macos else (32768 if platform.arm64 else 131072))
+let at_no_follow_flag: i32 = 1 if platform.wasm32 else (32 if platform.macos else 256)
+# mark: Error codes ===========================================================================
+
+## The file or directory does not exist.
+pub let missing: ErrorCode = ErrorCode.package(6)
+## The operation was not permitted.
+pub let permission_denied: ErrorCode = ErrorCode.package(18)
+## The destination already exists.
+pub let already_exists: ErrorCode = ErrorCode.package(19)
+## The filesystem is out of space.
+pub let no_space: ErrorCode = ErrorCode.package(20)
+## A nonblocking operation would block.
+pub let would_block: ErrorCode = ErrorCode.package(21)
+## The arguments are invalid.
+pub let invalid_options: ErrorCode = ErrorCode.package(22)
+## The file exceeds a configured limit.
+pub let too_large: ErrorCode = ErrorCode.package(23)
+## A path component is not a directory.
+pub let not_directory: ErrorCode = ErrorCode.package(25)
+## The path is a directory where a file was expected.
+pub let is_directory: ErrorCode = ErrorCode.package(26)
+## The filesystem is read-only.
+pub let read_only_filesystem: ErrorCode = ErrorCode.package(27)
+## The directory is not empty.
+pub let not_empty: ErrorCode = ErrorCode.package(29)
+## The source and destination are on different devices.
+pub let cross_device: ErrorCode = ErrorCode.package(30)
+## Too many symbolic links were encountered.
+pub let symlink_loop: ErrorCode = ErrorCode.package(31)
+## A path or path component is too long.
+pub let name_too_long: ErrorCode = ErrorCode.package(32)
+## The operating system reported an unspecified failure.
+pub let failed: ErrorCode = ErrorCode.package(7)

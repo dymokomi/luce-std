@@ -1,0 +1,82 @@
+import c
+import files
+import interop
+import memory
+import paths
+import strings
+
+pub func main(arguments: str[]) -> i32!:
+    let path = try paths.join(arguments[1], "héllo.txt")
+    defer strings.release(path)
+    try files.write_text(path, "")
+    let empty = try files.read_text(path)
+    defer empty.release()
+    assert(empty.value == "")
+    try files.write_text(path, "éλ😀\r\n")
+    let loaded = try files.read_text(path)
+    defer loaded.release()
+    assert(loaded.value == "éλ😀\r\n")
+    assert((try files.path_kind(path)) == files.FileKind.regular)
+    let absolute = try files.absolute_path(path)
+    defer absolute.release()
+    var entries = try files.Entries(arguments[1])
+    defer entries.close()
+    var found = false
+    for index in 0..<(usize)entries.count():
+        let name = try entries.name((i64)index)
+        if name.value == "héllo.txt":
+            found = true
+        name.release()
+    assert(found)
+    var rejected = false
+    discard(files.read_text(path, limit = 1) catch failure:
+        rejected = true
+        recover interop.Owned[str](""))
+    assert(rejected)
+    try files.write((c.str)path, [255])
+    rejected = false
+    discard(files.read_text(path) catch failure:
+        rejected = true
+        recover interop.Owned[str](""))
+    assert(rejected)
+    rejected = false
+    files.write_text("bad\0path", "safe") catch failure:
+        rejected = true
+    assert(rejected)
+    let fresh = try paths.join(arguments[1], "created-λ.txt")
+    defer strings.release(fresh)
+    let copied = try paths.join(arguments[1], "copied-λ.txt")
+    defer strings.release(copied)
+    let moved = try paths.join(arguments[1], "moved-λ.txt")
+    defer strings.release(moved)
+    try files.create_text(fresh, "complete 😀")
+    rejected = false
+    files.create_text(fresh, "overwrite") catch failure:
+        assert(failure.code == files.already_exists)
+        rejected = true
+    assert(rejected)
+    try files.copy_path(fresh, copied)
+    rejected = false
+    files.move_path(copied, fresh) catch failure:
+        assert(failure.code == files.already_exists)
+        rejected = true
+    assert(rejected)
+    try files.move_path(copied, moved)
+    let contents = try files.read_text(moved)
+    defer contents.release()
+    assert(contents.value == "complete 😀")
+    try files.delete_path(fresh)
+    try files.delete_path(moved)
+    let directory = try paths.join(arguments[1], "directory-λ")
+    defer strings.release(directory)
+    try files.make_directory(directory)
+    rejected = false
+    files.make_directory(directory) catch failure:
+        assert(failure.code == files.already_exists)
+        rejected = true
+    assert(rejected)
+    try files.delete_path(directory)
+    let home = try files.home_directory()
+    defer home.release()
+    assert(home.value.length > 0)
+    return 0

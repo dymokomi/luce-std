@@ -1,0 +1,59 @@
+import c
+import files
+import memory
+import unicode
+import utf8
+
+pub func main(arguments: c.str[]) -> i32!:
+    let corpus = try files.read(arguments[1])
+    defer free(corpus)
+    var empty: u8[]
+    var refusing = memory.FixedBuffer.over(empty)
+    with refusing:
+        var position: usize = 0
+        var cases: usize = 0
+        while position < corpus.length:
+            let length = (usize)memory.read[u32](corpus.data + position)
+            let count = (usize)memory.read[u32](corpus.data + position + 4)
+            position += 8
+            let text = (str)corpus[position..<position + length]
+            position += length
+            let lengths = corpus[position..<position + count * 4]
+            position += count * 4
+            var iterator = try unicode.GraphemeIterator.over(text)
+            assert(iterator.byte_offset() == 0)
+            var offset: usize = 0
+            for index in 0..<count:
+                let expected = (usize)memory.read[u32](lengths.data + index * 4)
+                let cluster = iterator.next() else trap("a grapheme cluster is missing")
+                if cluster.length != expected:
+                    print(f"grapheme case {cases}, cluster {index}: {cluster.length} bytes, expected {expected}")
+                    trap("a grapheme boundary differs from the reference")
+                assert(cluster.bytes.data == text.bytes.data + offset)
+                assert(cluster == (str)text.bytes[offset..<offset + expected])
+                offset += expected
+                assert(iterator.byte_offset() == offset)
+            assert(offset == length)
+            assert(iterator.next() == none and iterator.next() == none)
+            cases += 1
+        assert(cases > 700)
+        var zero: unicode.GraphemeIterator
+        assert(zero.next() == none and zero.byte_offset() == 0)
+        var byte: u8[1]
+        for value in 128..<256:
+            byte[0] = (u8)value
+            var rejected = false
+            discard(unicode.GraphemeIterator.over((str)byte) catch failure:
+                assert(failure.code == utf8.invalid_sequence)
+                rejected = true
+                recover unicode.GraphemeIterator())
+            assert(rejected)
+        var malformed: u8[4] = [237, 160, 128, 65]
+        var rejected = false
+        discard(unicode.GraphemeIterator.over((str)malformed) catch failure:
+            assert(failure.code == utf8.invalid_sequence)
+            rejected = true
+            recover unicode.GraphemeIterator())
+        assert(rejected)
+    print("ok Unicode extended grapheme boundaries")
+    return 0

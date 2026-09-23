@@ -1,0 +1,142 @@
+import c
+import io
+import net
+
+extern func reference_endpoint(fd: i32, peer: i32, bytes: u8*, port: u16*, scope: u32*) -> i32
+extern func reference_scope_closed() -> i32
+extern func reference_scope_released() -> i32
+extern func reference_ipv6_only(fd: i32) -> i32
+
+func check_endpoint(fd: i32, peer: bool, address: net.SocketAddress) -> !:
+    var expected: u8[16]
+    var port: u16
+    var scope: u32
+    let version = reference_endpoint(fd, 1 if peer else 0, &expected[0], &port, &scope)
+    assert(version == 4 or version == 6)
+    var actual: u8[16]
+    let count = try address.ip.write_octets(actual)
+    assert(count == (4 if version == 4 else 16))
+    var index: usize = 0
+    while index < count:
+        assert(actual[index] == expected[index])
+        index += 1
+    assert(address.port == port and address.scope_id == scope)
+
+func tcp(version: net.IpVersion, dual: bool) -> !:
+    let binding = net.SocketAddress.any(0, version) if dual else net.SocketAddress.loopback(0, version)
+    var listener = try net.Listener.bind(binding, ipv6_only = not dual)
+    defer listener.destroy()
+    let listener_fd = listener.descriptor() else trap("listener descriptor missing")
+    let bound = try listener.address()
+    try check_endpoint(listener_fd, false, bound)
+    if version == net.IpVersion.ipv6:
+        assert(reference_ipv6_only(listener_fd) == (0 if dual else 1))
+    let destination = net.SocketAddress.loopback(bound.port, net.IpVersion.ipv4 if dual else version)
+    var client = try net.Connection.connect(destination)
+    defer client.destroy()
+    var server = try listener.accept()
+    defer server.destroy()
+    let client_fd = client.descriptor() else trap("client descriptor missing")
+    let server_fd = server.descriptor() else trap("server descriptor missing")
+    try check_endpoint(client_fd, false, try client.local_address())
+    try check_endpoint(client_fd, true, try client.peer_address())
+    try check_endpoint(server_fd, false, try server.local_address())
+    let remote = try server.peer_address()
+    try check_endpoint(server_fd, true, remote)
+    assert(remote.ip.is_ipv4_mapped() == dual)
+    try io.write_all(&client, "ping".bytes)
+    var data: u8[4]
+    try io.read_exact(&server, data)
+    assert((str)data == "ping")
+    try io.write_all(&server, "pong".bytes)
+    try io.read_exact(&client, data)
+    assert((str)data == "pong")
+    try client.shutdown()
+    assert((try server.read(data)) == 0)
+
+func udp(version: net.IpVersion, dual: bool) -> !:
+    let binding = net.SocketAddress.any(0, version) if dual else net.SocketAddress.loopback(0, version)
+    var server = try net.Datagram.bind(binding, ipv6_only = not dual)
+    defer server.destroy()
+    let fd = server.descriptor() else trap("datagram descriptor missing")
+    let bound = try server.address()
+    try check_endpoint(fd, false, bound)
+    if version == net.IpVersion.ipv6:
+        assert(reference_ipv6_only(fd) == (0 if dual else 1))
+    let client_version = net.IpVersion.ipv4 if dual else version
+    var client = try net.Datagram.bind(net.SocketAddress.loopback(0, client_version))
+    defer client.destroy()
+    let destination = net.SocketAddress.loopback(bound.port, client_version)
+    try client.send_to("ping".bytes, destination)
+    var data: u8[4]
+    let (count, remote) = try server.receive_from(data)
+    assert(count == 4 and (str)data == "ping")
+    assert(remote.ip.is_ipv4_mapped() == dual)
+    try server.send_to("pong".bytes, remote)
+    let (reply, sender) = try client.receive_from(data)
+    assert(reply == 4 and (str)data == "pong" and sender.port == bound.port)
+    try client.send_to("".bytes, destination)
+    let (empty, empty_sender) = try server.receive_from(data[..<0])
+    assert(empty == 0 and empty_sender.equals(remote))
+    try client.send_to("too long".bytes, destination)
+    var truncated = false
+    discard(server.receive_from(data) catch failure:
+        assert(failure.code == net.message_too_large)
+        truncated = true
+        recover (0, net.SocketAddress()))
+    assert(truncated)
+    try client.send_to("next".bytes, destination)
+    let (next, next_sender) = try server.receive_from(data)
+    assert(next == 4 and (str)data == "next" and next_sender.equals(remote))
+
+func endpoint_text() -> !:
+    let inputs = ["127.0.0.1:80", "[::1]:443", "[FE80::1234%4294967295]:65535", "[::%0000000000]:00000", "[::ffff:192.0.2.1]:1"]
+    let expected = ["127.0.0.1:80", "[::1]:443", "[fe80::1234%4294967295]:65535", "[::]:0", "[::ffff:192.0.2.1]:1"]
+    var index: usize = 0
+    while index < inputs.length:
+        let address = net.SocketAddress.parse(inputs[index]) else trap("valid endpoint rejected")
+        var buffer: u8[58]
+        let text = try address.render(buffer)
+        assert(text == expected[index])
+        let parsed = net.SocketAddress.parse(text) else trap("formatted endpoint rejected")
+        assert(parsed.equals(address))
+        var byte: usize = 0
+        while byte < buffer.length:
+            buffer[byte] = 85
+            byte += 1
+        var full = false
+        discard(address.render(buffer[..<expected[index].length - 1]) catch failure:
+            assert(failure.code == io.full)
+            full = true
+            recover "")
+        assert(full)
+        for value in buffer:
+            assert(value == 85)
+        index += 1
+    let invalid = ["", "::1:80", "[127.0.0.1]:80", "127.0.0.1", "127.0.0.1:", "127.0.0.1:65536", "[::1%4294967296]:1", "[::1%lo0]:1", "[::1%]:1", "[::1]:-1", "[::1]:1x", "[::1]:000000", "[::1] :1", "[::1]:1\0", "127.0.0.1%1:2"]
+    for text in invalid:
+        assert(net.SocketAddress.parse(text) == none)
+
+pub func main(arguments: c.str[]) -> i32!:
+    try endpoint_text()
+    try tcp(net.IpVersion.ipv4, false)
+    try tcp(net.IpVersion.ipv6, false)
+    try tcp(net.IpVersion.ipv6, true)
+    try udp(net.IpVersion.ipv4, false)
+    try udp(net.IpVersion.ipv6, false)
+    try udp(net.IpVersion.ipv6, true)
+    let resolved = try net.resolve("::1", 1234, net.IpVersion.ipv6)
+    assert(resolved.equals(net.SocketAddress.loopback(1234, net.IpVersion.ipv6)))
+    let scoped = try net.resolve("scoped.invalid", 4660, net.IpVersion.ipv6)
+    assert(reference_scope_released() == 1)
+    let expected_scope = net.SocketAddress.parse("[fe80::1234%16909060]:4660") else trap("scope parse failed")
+    assert(scoped.equals(expected_scope))
+    var rejected = false
+    var unavailable = net.Listener.bind(scoped) catch failure:
+        assert(failure.code == net.invalid_options)
+        rejected = true
+        recover net.Listener()
+    unavailable.destroy()
+    assert(rejected and reference_scope_closed() == 1)
+    print("ok IPv6 sockets")
+    return 0

@@ -1,0 +1,210 @@
+#==============================================================================================
+#
+#   normalization - Unicode normalization forms
+#
+#   DESCRIPTION:
+#       The four normalization forms of UAX #15 over strict UTF-8: NFC/NFD preserve canonical
+#       equivalence, NFKC/NFKD also apply compatibility mappings.
+#
+#==============================================================================================
+
+## Standard canonical and compatibility normalization forms from UAX #15.
+# mark: Normalization ========================================================================
+
+## A Unicode normalization form: canonical or compatibility, composed or decomposed.
+pub enum NormalizationForm as u8:
+    nfc = 0
+    nfd = 1
+    nfkc = 2
+    nfkd = 3
+
+## Normalize complete UTF-8 text. NFC/NFD preserve canonical equivalence;
+## NFKC/NFKD also apply compatibility mappings and can erase distinctions such as
+## presentation forms. No case folding, BOM removal or replacement is performed.
+## Return fresh owned text, even when unchanged. Temporary scalar storage and an
+## optional sorting buffer use the current allocator and are released on return.
+## max_bytes bounds the final result after composition, not intermediate storage.
+pub func normalize(text: str, form: NormalizationForm = NormalizationForm.nfc, max_bytes: usize? = none) -> str!:
+    let compatibility = form == NormalizationForm.nfkc or form == NormalizationForm.nfkd
+    var empty: u32[]
+    let count = try decompose_pass(text, compatibility, empty, false)
+    if count == 0:
+        return try strings.copy("")
+    let storage_bytes = count *? 4 else error(memory.exhausted, "the normalization storage size overflowed")
+    discard(storage_bytes)
+    let scalars = try alloc u32[count]
+    defer free(scalars)
+    let written = try decompose_pass(text, compatibility, scalars, true)
+    if written != count:
+        error(utf8.invalid_sequence, "the text changed during normalization")
+    try canonical_order(scalars)
+    let length = compose_canonical(scalars) if form == NormalizationForm.nfc or form == NormalizationForm.nfkc else count
+    return try encode_normalized(scalars[..<length], max_bytes)
+
+func decompose_pass(text: str, compatibility: bool, output: u32[], writing: bool) -> usize!:
+    let table = compatibility_mappings if compatibility else canonical_mappings
+    var offset: usize = 0
+    var position: usize = 0
+    while offset < text.length:
+        let decoded = utf8.decode(text.bytes, offset) else error(utf8.invalid_sequence, "invalid UTF-8 text")
+        offset += decoded.width
+        let scalar = (u32)decoded.scalar
+        let hangul = scalar >= 44032 and scalar <= 55203
+        let mapping = mapped(table, scalar) else identity_mapping(scalar)
+        let length: usize = (2 if (scalar - 44032) % 28 == 0 else 3) if hangul else mapping.length
+        let next = position +? length else error(memory.exhausted, "the decomposed text size overflowed")
+        if writing:
+            if next > output.length:
+                error(utf8.invalid_sequence, "the text changed during normalization")
+            if hangul:
+                let index = scalar - 44032
+                output[position] = 4352 + index // 588
+                output[position + 1] = 4449 + (index % 588) // 28
+                if length == 3:
+                    output[position + 2] = 4519 + index % 28
+            else:
+                for index in 0..<length:
+                    output[position + index] = mapping.at(index)
+        position = next
+    return position
+
+# Canonical ordering is stable within each run of nonstarters. Allocate scratch
+# only if a run is out of order; iterative merging bounds worst-case work by
+# O(n log n), including arbitrarily long descending combining-mark sequences.
+func canonical_order(scalars: u32[]) -> !:
+    var position: usize = 0
+    var needed: usize = 0
+    while position < scalars.length:
+        if combining_class(scalars[position]) == 0:
+            position += 1
+            continue
+        let start = position
+        var previous: u8 = 0
+        var unordered = false
+        while position < scalars.length:
+            let current = combining_class(scalars[position])
+            if current == 0:
+                break
+            if current < previous:
+                unordered = true
+            previous = current
+            position += 1
+        let length = position - start
+        if unordered and length > needed:
+            needed = length
+    if needed == 0:
+        return
+    let scratch = try alloc u32[needed]
+    defer free(scratch)
+    position = 0
+    while position < scalars.length:
+        if combining_class(scalars[position]) == 0:
+            position += 1
+            continue
+        let start = position
+        var previous: u8 = 0
+        var unordered = false
+        while position < scalars.length:
+            let current = combining_class(scalars[position])
+            if current == 0:
+                break
+            if current < previous:
+                unordered = true
+            previous = current
+            position += 1
+        if unordered:
+            order_run(scalars[start..<position], scratch)
+
+func order_run(scalars: u32[], scratch: u32[]):
+    let length = scalars.length
+    # A scalar needs 21 bits. Cache its class in the upper bits while sorting,
+    # so each comparison is integer arithmetic instead of another table search.
+    for index in 0..<length:
+        scalars[index] |= (u32)combining_class(scalars[index]) << 21
+    var width: usize = 1
+    while width < length:
+        var start: usize = 0
+        while start < length:
+            let middle = start + width if width < length - start else length
+            let end = middle + width if width < length - middle else length
+            var left = start
+            var right = middle
+            var output = start
+            while output < end:
+                if left < middle and (right == end or (scalars[left] >> 21) <= (scalars[right] >> 21)):
+                    scratch[output] = scalars[left]
+                    left += 1
+                else:
+                    scratch[output] = scalars[right]
+                    right += 1
+                output += 1
+            start = end
+        for index in 0..<length:
+            scalars[index] = scratch[index]
+        if width > length // 2:
+            break
+        width *= 2
+    for index in 0..<length:
+        scalars[index] &= 2097151
+
+func compose_canonical(scalars: u32[]) -> usize:
+    if scalars.length == 0:
+        return 0
+    var starter_position: usize = 0
+    var starter = scalars[0]
+    var previous_class = combining_class(starter)
+    var output: usize = 1
+    for index in 1..<scalars.length:
+        let scalar = scalars[index]
+        let current_class = combining_class(scalar)
+        let combined = composition(starter, scalar)
+        if let value = combined:
+            if previous_class < current_class or previous_class == 0:
+                scalars[starter_position] = value
+                starter = value
+                continue
+        if current_class == 0:
+            starter_position = output
+            starter = scalar
+        scalars[output] = scalar
+        output += 1
+        previous_class = current_class
+    return output
+
+func composition(left: u32, right: u32) -> u32?:
+    # Hangul syllables are algorithmic and need no per-syllable table entries.
+    if left >= 4352 and left < 4371 and right >= 4449 and right < 4470:
+        return 44032 + (left - 4352) * 588 + (right - 4449) * 28
+    if left >= 44032 and left <= 55203 and (left - 44032) % 28 == 0 and right > 4519 and right < 4547:
+        return left + right - 4519
+    let key = ((u64)left << 21) | (u64)right
+    var low: usize = 0
+    var high = composition_mappings.length // 24
+    while low < high:
+        let middle = low + (high - low) // 2
+        let offset = middle * 24
+        let candidate = ((u64)table_word(composition_mappings, offset) << 21) | (u64)table_word(composition_mappings, offset + 8)
+        if candidate < key:
+            low = middle + 1
+        elif candidate > key:
+            high = middle
+        else:
+            return table_word(composition_mappings, offset + 16)
+    return none
+
+func encode_normalized(scalars: const u32[], max_bytes: usize?) -> str!:
+    var length: usize = 0
+    for scalar in scalars:
+        let width = utf8.encoded_length(scalar) else trap("invalid generated Unicode scalar")
+        length = length +? width else error(memory.exhausted, "the normalized text size overflowed")
+        if let limit = max_bytes:
+            if length > limit:
+                error(strings.output_too_large, "the normalized text exceeds its byte limit")
+    let capacity = length +? 1 else error(memory.exhausted, "the normalized text size overflowed")
+    let output = try alloc u8[capacity]
+    var position: usize = 0
+    for scalar in scalars:
+        let width = utf8.encode(scalar, output[position..<length]) else trap("a normalized scalar did not fit its encoded length")
+        position += width
+    output[length] = 0
+    return (str)output[..<length]

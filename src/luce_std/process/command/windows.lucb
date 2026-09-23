@@ -1,0 +1,76 @@
+#==============================================================================================
+#
+#   windows - The Windows command backend
+#
+#   DESCRIPTION:
+#       Start suspended, enroll in a job, then resume so descendants inherit the job. Captures
+#       are delete-on-close files, drained in bounded chunks while the child runs.
+#
+#==============================================================================================
+
+extern func CreateJobObjectW(attributes: void*?, name: void*?) -> void*?
+extern func AssignProcessToJobObject(job: void*, process: void*) -> i32
+extern func TerminateJobObject(job: void*, status: u32) -> i32
+extern func ResumeThread(child_thread: void*) -> u32
+extern func GetFileSizeEx(file: void*, size: i64*) -> i32
+extern func ReadFile(file: void*, bytes: void*, count: u32, read: u32*, overlapped: void*?) -> i32
+extern func SetFilePointerEx(file: void*, distance: i64, position: i64*?, origin: u32) -> i32
+
+func monitor_windows(process: void*, child_thread: void*, out: void*, err: void*, state: CommandState*) -> !:
+    # Even failure before job assignment must terminate the suspended child.
+    errdefer discard(TerminateProcess(process, 1))
+    let job = CreateJobObjectW(none, none) else error(failed, "a command job could not be created")
+    defer discard(CloseHandle(job))
+    defer discard(TerminateJobObject(job, 1))
+    if AssignProcessToJobObject(job, process) == 0 or ResumeThread(child_thread) == 4294967295:
+        error(failed, "the command could not enter its process job")
+    let out_reader = try command_reader(out)
+    defer discard(CloseHandle(out_reader))
+    let err_reader = try command_reader(err)
+    defer discard(CloseHandle(err_reader))
+    var out_offset: i64 = 0
+    var err_offset: i64 = 0
+    while true:
+        if state.cancelled.load(.acquire):
+            error(failed, "command cancelled")
+        let waited = WaitForSingleObject(process, 20)
+        if waited != 0 and waited != 258:
+            error(failed, "waiting for the command failed")
+        try pull_windows(out_reader, &out_offset, state)
+        try pull_windows(err_reader, &err_offset, state)
+        if waited == 0:
+            return
+
+func pull_windows(file: void*, offset: i64*, state: CommandState*) -> !:
+    var size: i64 = 0
+    if GetFileSizeEx(file, &size) == 0 or size < *offset:
+        error(failed, "the command output cannot be measured")
+    if (u64)(size - *offset) > (u64)state.limit:
+        error(failed, "the command exceeded its output limit")
+    var bytes: u8[4096]
+    while *offset < size:
+        if state.cancelled.load(.acquire):
+            error(failed, "command cancelled")
+        if SetFilePointerEx(file, *offset, none, 0) == 0:
+            error(failed, "the command output cannot be positioned")
+        var count: u32 = 0
+        let wanted = math_min_size(bytes.length, (usize)(size - *offset))
+        if ReadFile(file, &bytes[0], (u32)wanted, &count, none) == 0 or count == 0:
+            error(failed, "the command output cannot be read")
+        try command_append(state, bytes[..<(usize)count])
+        *offset += (i64)count
+
+extern func GetFinalPathNameByHandleW(file: void*, path: u16*, size: u32, flags: u32) -> u32
+
+## Duplicating a handle shares its file position. Reopening gives the reader an
+## independent position so polling cannot move a child's next write backwards.
+func command_reader(stream: void*) -> void*!:
+    var path: u16[32768]
+    let file = (void*)win_os_handle(win_fileno(stream))
+    let size = GetFinalPathNameByHandleW(file, &path[0], (u32)path.length, 0)
+    if size == 0 or size >= path.length:
+        error(failed, "the command capture path is unavailable")
+    let reader = CreateFileW(&path[0], 2147483648, 7, none, 3, 128, none)
+    if (isize)reader == -1:
+        error(failed, "the command capture reader could not be opened")
+    return reader

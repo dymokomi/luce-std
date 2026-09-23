@@ -1,0 +1,110 @@
+#==============================================================================================
+#
+#   listener - A TCP listener
+#
+#   DESCRIPTION:
+#       An owned TCP listener: bind, accept connections, socket options and readiness waiting.
+#
+#==============================================================================================
+
+## One owned TCP listener. Zero is closed. Copying does not duplicate ownership;
+## copies must not be independently closed. Synchronize calls on one owner.
+pub struct Listener:
+    var socket: SocketHandle
+
+    ## Bind and listen with a positive requested backlog. The OS may cap the
+    ## pending connection queue; the value does not limit accepted connections.
+    ## IPv6 listeners default to IPv6-only on both hosts. Set ipv6_only=false to
+    ## also permit mapped IPv4 peers; the option has no effect for IPv4 listeners.
+    pub static func bind(address: SocketAddress, backlog: i32 = 128, ipv6_only: bool = true) -> Listener!:
+        if backlog <= 0:
+            error(invalid_options, "the listener backlog must be positive")
+        var raw: NativeAddress
+        let length = try address.write_native(&raw)
+        var owned = try SocketHandle.create(stream, address.ip.kind)
+        errdefer owned.destroy()
+        let fd = try owned.require()
+        try set_socket_integer(fd, socket_level, reuse_address_option, 1)
+        if address.ip.kind == IpVersion.ipv6:
+            try set_socket_integer(fd, ipv6_level, ipv6_only_option, 1 if ipv6_only else 0)
+        if bind(fd, &raw, length) != 0:
+            error(socket_error(socket_errno()), "the listener could not bind its address")
+        var result = listen(fd, backlog)
+        while result < 0 and socket_errno() == socket_interrupted:
+            result = listen(fd, backlog)
+        if result != 0:
+            error(socket_error(socket_errno()), "the listener could not begin listening")
+        return Listener(socket = owned)
+
+    ## Query the bound endpoint, including an automatically assigned port.
+    pub func address() -> SocketAddress!:
+        return try socket_address(try self.socket.require())
+
+    ## Accept one connection, or io.would_block when a nonblocking listener has
+    ## none pending. Accepted connections are blocking unless nonblocking=true,
+    ## independently of the listener setting and host inheritance defaults.
+    pub func accept(nonblocking: bool = false) -> Connection!:
+        let descriptor = try self.socket.require()
+        var fd = accept_socket(descriptor)
+        while fd < 0 and socket_errno() == socket_interrupted:
+            fd = accept_socket(descriptor)
+        if fd < 0:
+            error(socket_error(socket_errno()), "the listener could not accept a connection")
+        var connection = try Connection.over(fd)
+        errdefer connection.destroy()
+        try connection.set_nonblocking(nonblocking)
+        return connection
+
+    ## Wait for advisory readiness without allocating. Expiration reports timed_out;
+    ## cancellation reports cancelled. Use nonblocking I/O after readiness because
+    ## another user can consume it. The socket remains borrowed and open.
+    pub func wait(interest: WaitInterest = WaitInterest.read, deadline: Deadline = Deadline(), cancellation: sync.Cancellation*? = none) -> Readiness!:
+        return try wait_socket(try self.socket.require(), interest, deadline, cancellation)
+
+    ## Change O_NONBLOCK without changing other status flags. Descriptor aliases
+    ## share this setting; synchronize changes with all users of this socket.
+    pub mutating func set_nonblocking(enabled: bool) -> !:
+        try set_nonblocking(try self.socket.require(), enabled)
+        self.socket.nonblocking = enabled
+
+    ## Whether the socket is in nonblocking mode.
+    pub func is_nonblocking() -> bool!:
+        if platform.windows:
+            discard(try self.socket.require())
+            return self.socket.nonblocking
+        return (try socket_status_flags(try self.socket.require()) & nonblocking_flag) != 0
+
+    ## Request kernel buffering in bytes, not a guaranteed transfer size. The OS
+    ## may cap or round the request; receive_buffer returns its reported setting.
+    pub mutating func set_receive_buffer(bytes: i32) -> !:
+        try set_socket_buffer(try self.socket.require(), receive_buffer_option, bytes)
+
+    ## The receive buffer size in bytes.
+    pub func receive_buffer() -> i32!:
+        return try get_socket_integer(try self.socket.require(), socket_level, receive_buffer_option)
+
+    ## Request kernel buffering in bytes. Linux reports a doubled bookkeeping
+    ## size; both hosts may adjust the request. This does not change user buffers.
+    pub mutating func set_send_buffer(bytes: i32) -> !:
+        try set_socket_buffer(try self.socket.require(), send_buffer_option, bytes)
+
+    ## The send buffer size in bytes.
+    pub func send_buffer() -> i32!:
+        return try get_socket_integer(try self.socket.require(), socket_level, send_buffer_option)
+
+    ## Borrow the descriptor; the caller must not close it or retain it past this owner.
+    pub func descriptor() -> platform.SocketDescriptor?:
+        return self.socket.value
+
+    ## Consume ownership before the OS call. Repeated close is safe even after failure.
+    pub mutating func close() -> !:
+        try self.socket.close()
+
+    ## Best-effort cleanup for unwinding; use close to observe delayed errors.
+    pub mutating func destroy():
+        self.socket.destroy()
+
+func accept_socket(descriptor: platform.SocketDescriptor) -> platform.SocketDescriptor:
+    if platform.macos or platform.windows:
+        return accept(descriptor, none, none)
+    return accept4(descriptor, none, none, socket_close_on_exec)

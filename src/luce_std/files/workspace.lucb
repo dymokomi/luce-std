@@ -1,0 +1,120 @@
+#==============================================================================================
+#
+#   workspace - Canonical paths and temporary trees
+#
+#   DESCRIPTION:
+#       Filesystem identity and owned temporary directory trees. Path allocations use the
+#       current allocator; owners retain that allocator for eventual cleanup.
+#
+#==============================================================================================
+
+extern func realpath(path: c.str, output: u8*?) -> u8*?
+extern func release_realpath as "free"(path: void*)
+
+## Resolve an existing entry through symlinks to its absolute filesystem path.
+## Windows extended DOS/UNC prefixes are normalized to ordinary UTF-8 paths with
+## forward slashes. This resolves identity; it does not fold case or authorize access.
+## Release the returned NUL-terminated allocation with strings.release.
+pub func canonical(path: c.str) -> str!:
+    if platform.windows:
+        let handle = try windows_path_handle(path, true)
+        defer discard(CloseHandle(handle))
+        let wide = try alloc u16[32768]
+        defer free(wide)
+        let count = GetFinalPathNameByHandleW(handle, wide.data, (u32)wide.length, 0)
+        if count == 0 or count >= wide.length:
+            error(failed, "the filesystem path could not be resolved")
+        var start: usize = 0
+        if count >= 4 and wide[0] == 92 and wide[1] == 92 and wide[2] == 63 and wide[3] == 92:
+            start = 4
+            if count >= 8 and wide[4] == 85 and wide[5] == 78 and wide[6] == 67 and wide[7] == 92:
+                wide[6] = 92
+                start = 6
+        let result = try windows_text.narrow(wide[start..<(usize)count], invalid_options)
+        let bytes = (u8*)result.bytes.data
+        for index in 0..<result.length:
+            if bytes[index] == 92:
+                bytes[index] = '/'
+        return result
+    let resolved = realpath(path, none) else error(classify_error(c.errno()), "the filesystem path could not be resolved")
+    defer release_realpath((void*)resolved)
+    return try strings.copy((str)(c.str)resolved)
+
+## Atomically create an unused directory with 128 random filename bits. The
+## returned path is owned by the caller. The parent must already exist.
+pub func create_temporary_directory(parent: c.str, permissions: u32 = 448) -> str!:
+    let candidate = try paths.join((str)parent, ".luce-00000000000000000000000000000000")
+    errdefer strings.release(candidate)
+    let digits = "0123456789abcdef"
+    let data = (u8*)candidate.bytes.data
+    let suffix = candidate.length - 32
+    var attempt: usize = 0
+    while attempt < 128:
+        var random: u8[16]
+        try os.random_bytes(random)
+        for index in 0..<random.length:
+            data[suffix + index * 2] = digits.bytes[random[index] >> 4]
+            data[suffix + index * 2 + 1] = digits.bytes[random[index] & 15]
+        create_directory((c.str)candidate, permissions) catch failure:
+            if failure.code == already_exists:
+                attempt += 1
+                continue
+            error(failure.code, failure.message)
+        return candidate
+    error(already_exists, "no unused temporary directory name was found")
+
+## Remove this entry and its children. Symlinks are unlinked rather than followed;
+## a missing entry is already removed. Other failures stop and remain reportable.
+pub func remove_tree(path: c.str) -> !:
+    let info = metadata(path, follow_symlinks = false) catch failure:
+        if failure.code == missing:
+            return
+        error(failure.code, failure.message)
+    if info.kind != FileKind.directory:
+        try remove_file(path)
+        return
+    let names = try list(path)
+    defer release_list(names)
+    for name in names:
+        let child = try paths.join((str)path, name)
+        defer strings.release(child)
+        try remove_tree((c.str)child)
+    try remove_directory(path)
+
+## Own one directory tree. Borrow this owner; copying it does not copy ownership.
+## close reports cleanup failures and retains ownership for a retry. destroy makes
+## a final cleanup attempt and always releases the pathname allocation.
+pub struct TemporaryDirectory:
+    var name: str
+    var owner: memory.Allocator?
+
+    ## Create a temporary directory under `parent`, or the system default.
+    pub func init(parent: c.str = "") -> !:
+        let directory = (str)parent if ((str)parent).length > 0 else io.path.temp()
+        self.name = try create_temporary_directory((c.str)directory)
+        self.owner = memory.allocator
+
+    ## Borrowed NUL-terminated pathname, valid until close or destroy.
+    pub func path() -> str:
+        return self.name
+
+    mutating func release_name():
+        if self.name.length > 0:
+            let owner = self.owner else trap("a temporary directory lost its allocator")
+            with owner:
+                strings.release(self.name)
+            self.name = ""
+            self.owner = none
+
+    ## Remove the directory tree; reports the first failure.
+    pub mutating func close() -> !:
+        if self.name.length == 0:
+            return
+        try remove_tree((c.str)self.name)
+        self.release_name()
+
+    ## Best-effort removal, releasing memory regardless.
+    pub mutating func destroy():
+        self.close() catch failure:
+            discard(failure)
+        self.release_name()

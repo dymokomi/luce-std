@@ -1,0 +1,51 @@
+#==============================================================================================
+#
+#   copy - Atomic file copy
+#
+#   DESCRIPTION:
+#       Copy a file's bytes through a temporary sibling and publish the complete result with an
+#       atomic rename; directories are rejected and metadata is not copied.
+#
+#==============================================================================================
+
+## Copy through a temporary sibling and atomically publish the complete result.
+## The source is followed and read through EOF; directories are rejected. Refuse
+## an existing destination unless replace=true, and reject an observed source/
+## destination identity match. Final destination symlinks are entries to replace.
+## Use a finite limit for streams: one extra byte detects excess, which fails
+## without publishing. Memory for payload transfer is bounded to 4096 bytes.
+## Concurrent source writes can change the bytes observed; this is not a snapshot.
+## Return bytes copied. Permissions, synchronize, parent-path stability and
+## published have the same contracts as write_atomic; metadata is not copied.
+pub func copy_file(source_path: c.str, destination: c.str, limit: usize = ~(usize)0, replace: bool = false, permissions: u32 = 420, synchronize: bool = false, published: bool*? = none) -> usize!:
+    if let flag = published:
+        *flag = false
+    var source = try File.open(source_path)
+    defer source.destroy()
+    let source_info = try source.metadata()
+    if source_info.kind == FileKind.directory:
+        error(is_directory, "a directory cannot be copied as file bytes")
+    if let destination_info = try metadata_if_present(destination):
+        if not replace:
+            error(already_exists, "the copy destination already exists")
+        if source_info.device == destination_info.device and source_info.inode == destination_info.inode:
+            error(invalid_options, "source and destination identify the same file")
+        if destination_info.kind == FileKind.directory:
+            error(is_directory, "the copy destination is a directory")
+    var replacement = try Replacement.prepare(destination, permissions, synchronize)
+    defer replacement.destroy()
+    var buffer: u8[4096]
+    let count = try io.copy_limit(&source, &replacement.temporary, buffer, limit)
+    if count == limit:
+        if try source.read(buffer[..<1]) != 0:
+            error(too_large, "the copy source exceeds the requested limit")
+    try source.close()
+    try replacement.finish(destination, replace, published)
+    return count
+
+func metadata_if_present(path: c.str) -> Metadata?!:
+    let value = metadata(path, false) catch failure:
+        if failure.code == missing:
+            return none
+        error(failure.code, failure.message)
+    return value

@@ -1,0 +1,103 @@
+#==============================================================================================
+#
+#   handles - Socket transfer limits
+#
+#   DESCRIPTION:
+#       Individual socket transfers are bounded below both hosts' signed syscall limits.
+#
+#==============================================================================================
+
+let transfer_limit: usize = 1073741824
+
+## Shared ownership state for all socket kinds. Consume before close because an
+## interrupted or failed close may already have released the descriptor for reuse.
+struct SocketHandle:
+    var value: platform.SocketDescriptor?
+    var nonblocking: bool
+
+    ## Linux sets close-on-exec atomically with creation. macOS requires a
+    ## separate fcntl call; callers must serialize concurrent fork/exec there.
+    static func create(kind: i32, version: IpVersion) -> SocketHandle!:
+        if platform.windows:
+            try windows_socket_startup()
+            let descriptor = WSASocketW(inet if version == IpVersion.ipv4 else inet6, kind, 0, none, 0, 128)
+            if descriptor < 0:
+                error(socket_error(socket_errno()), "a socket could not be created")
+            return SocketHandle(value = descriptor)
+        let flags: i32 = 0 if platform.macos else socket_close_on_exec
+        let family = inet if version == IpVersion.ipv4 else inet6
+        let descriptor = socket(family, kind | flags, 0)
+        if descriptor < 0:
+            error(socket_error(socket_errno()), "a socket could not be created")
+        if platform.macos:
+            return try SocketHandle.adopt(descriptor)
+        return SocketHandle(value = descriptor)
+
+    ## Ownership transfers on entry, including failure. Preserve existing
+    ## descriptor flags and close once if setting close-on-exec fails.
+    static func adopt(descriptor: platform.SocketDescriptor) -> SocketHandle!:
+        if descriptor < 0:
+            error(closed, "the socket descriptor is invalid")
+        if platform.windows:
+            try windows_socket_startup()
+            var owned = SocketHandle(value = descriptor)
+            errdefer owned.destroy()
+            if SetHandleInformation((void*)descriptor, 1, 0) == 0:
+                error(failed, "socket inheritance could not be disabled")
+            try set_nonblocking(descriptor, false)
+            return owned
+        var flags = fcntl(descriptor, get_descriptor_flags)
+        while flags < 0 and socket_errno() == socket_interrupted:
+            flags = fcntl(descriptor, get_descriptor_flags)
+        if flags < 0:
+            let code = socket_error(socket_errno())
+            discard(close(descriptor))
+            error(code, "socket descriptor flags could not be queried")
+        if (flags & descriptor_close_on_exec) == 0:
+            var result = fcntl(descriptor, set_descriptor_flags, flags | descriptor_close_on_exec)
+            while result < 0 and socket_errno() == socket_interrupted:
+                result = fcntl(descriptor, set_descriptor_flags, flags | descriptor_close_on_exec)
+            if result < 0:
+                let code = socket_error(socket_errno())
+                discard(close(descriptor))
+                error(code, "the socket could not be marked close-on-exec")
+        return SocketHandle(value = descriptor)
+
+    func require() -> platform.SocketDescriptor!:
+        let descriptor = self.value else error(closed, "the socket is closed")
+        return descriptor
+
+    mutating func close() -> !:
+        let descriptor = self.value else return
+        self.value = none
+        if close(descriptor) != 0:
+            error(socket_error(socket_errno()), "the socket could not be closed")
+
+    mutating func destroy():
+        self.close() catch failure:
+            discard(failure)
+
+func socket_address(descriptor: platform.SocketDescriptor, peer: bool = false) -> SocketAddress!:
+    var raw: NativeAddress
+    var length: u32 = 28
+    var result = query_address(descriptor, &raw, &length, peer)
+    while result < 0 and socket_errno() == socket_interrupted:
+        length = 28
+        result = query_address(descriptor, &raw, &length, peer)
+    if result != 0:
+        error(socket_error(socket_errno()), "the socket address could not be queried")
+    if length > 28:
+        error(failed, "the socket address exceeds the supported IP storage")
+    return try decode_address(&raw, length)
+
+func query_address(descriptor: platform.SocketDescriptor, address: void*, length: u32*, peer: bool) -> i32:
+    if peer:
+        return getpeername(descriptor, address, length)
+    return getsockname(descriptor, address, length)
+
+func set_socket_integer(descriptor: platform.SocketDescriptor, level: i32, option: i32, value: i32) -> !:
+    var result = setsockopt(descriptor, level, option, &value, 4)
+    while result < 0 and socket_errno() == socket_interrupted:
+        result = setsockopt(descriptor, level, option, &value, 4)
+    if result != 0:
+        error(socket_error(socket_errno()), "the socket option could not be set")

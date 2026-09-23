@@ -1,0 +1,95 @@
+#==============================================================================================
+#
+#   scalars - UTF-8 scalar encoding and decoding
+#
+#   DESCRIPTION:
+#       One-shot encode and decode of a single scalar at a byte offset, over borrowed storage,
+#       with strict RFC 3629 validation and no allocation.
+#
+#==============================================================================================
+
+## One decoded scalar and the number of source bytes consumed.
+pub struct Decoded:
+    ## The decoded scalar value.
+    pub var scalar: char
+    ## The number of source bytes it was encoded in.
+    pub var width: usize
+
+## Encoded byte count, or none for a surrogate or a value beyond U+10FFFF.
+pub func encoded_length(scalar: u32) -> usize?:
+    if scalar > 1114111 or (scalar >= 55296 and scalar <= 57343):
+        return none
+    if scalar < 128:
+        return 1
+    if scalar < 2048:
+        return 2
+    return 3 if scalar < 65536 else 4
+
+## Decode at a byte offset. None means an absent, truncated, overlong or otherwise
+## invalid sequence. Only this scalar is checked, not the preceding/following bytes.
+## Offsets at or beyond the buffer end return none without accessing storage.
+pub func decode(data: const u8[], offset: usize = 0) -> Decoded?:
+    if offset >= data.length:
+        return none
+    let lead = data[offset]
+    if lead < 128:
+        return Decoded(scalar = char(lead), width = 1)
+    var width: usize = 0
+    var scalar: u32 = 0
+    if lead >= 194 and lead <= 223:
+        width = 2
+        scalar = (u32)(lead & 31)
+    elif lead >= 224 and lead <= 239:
+        width = 3
+        scalar = (u32)(lead & 15)
+    elif lead >= 240 and lead <= 244:
+        width = 4
+        scalar = (u32)(lead & 7)
+    else:
+        return none
+    if width > data.length - offset:
+        return none
+    var i: usize = 1
+    while i < width:
+        let byte = data[offset + i]
+        if (byte & 192) != 128:
+            return none
+        scalar = (scalar << 6) | (u32)(byte & 63)
+        i += 1
+    let shortest = encoded_length(scalar) else return none
+    if shortest != width:
+        return none
+    return Decoded(scalar = char(scalar), width = width)
+
+## Byte offset of the first invalid sequence's start, or none for valid input.
+## For a truncated final sequence this is its leading byte, not the missing byte.
+pub func invalid_offset(data: const u8[]) -> usize?:
+    var offset: usize = 0
+    while offset < data.length:
+        let decoded = decode(data, offset) else return offset
+        offset += decoded.width
+    return none
+
+## Whether all bytes form valid UTF-8; empty input is valid.
+pub func valid(data: const u8[]) -> bool:
+    return invalid_offset(data) == none
+
+## Encode a scalar into the start of the buffer, returning bytes written. None
+## means an invalid scalar or insufficient space; the buffer is then unchanged.
+## Bytes beyond the returned length are untouched. No NUL terminator is appended.
+pub func encode(scalar: u32, buffer: u8[]) -> usize?:
+    let width = encoded_length(scalar) else return none
+    if width > buffer.length:
+        return none
+    if width == 1:
+        buffer[0] = (u8)scalar
+        return 1
+    var remaining = scalar
+    var i = width
+    while i > 1:
+        i -= 1
+        buffer[i] = 128 | (u8)(remaining & 63)
+        remaining >>= 6
+    let prefix: u8 = 192 if width == 2 else (224 if width == 3 else 240)
+    buffer[0] = prefix | (u8)remaining
+    return width

@@ -1,0 +1,173 @@
+#==============================================================================================
+#
+#   address - Socket endpoints
+#
+#   DESCRIPTION:
+#       An IP endpoint: address, port and optional IPv6 interface scope, with parsing and
+#       formatting.
+#
+#==============================================================================================
+
+# mark: The endpoint ==========================================================================
+
+## An IP endpoint: address, port and optional IPv6 interface scope. A zero value is
+## 0.0.0.0:0. The port is host order; scope zero means no explicit interface index.
+## IPv4 endpoints must have scope zero. Values own their inline storage.
+pub struct SocketAddress:
+    ## The IP address.
+    pub var ip: IpAddress
+    ## The port number.
+    pub var port: u16
+    ## The IPv6 interface scope, or 0.
+    pub var scope_id: u32
+
+    ## The loopback endpoint on `port`.
+    pub static func loopback(port: u16, version: IpVersion = IpVersion.ipv4) -> SocketAddress:
+        if version == IpVersion.ipv4:
+            return SocketAddress(ip = IpAddress.from_ipv4(2130706433), port = port)
+        var ip = IpAddress(kind = version)
+        ip.octets[15] = 1
+        return SocketAddress(ip = ip, port = port)
+
+    ## The wildcard endpoint on `port`.
+    pub static func any(port: u16, version: IpVersion = IpVersion.ipv4) -> SocketAddress:
+        return SocketAddress(ip = IpAddress(kind = version), port = port)
+
+    ## Parse IPv4:port or [IPv6%scope]:port without DNS. Scope is optional and
+    ## numeric, not an interface name. Ports use 1–5 decimal digits; scope IDs use
+    ## 1–10. Leading zeroes in these numbers are accepted and omitted on output.
+    pub static func parse(text: str) -> SocketAddress?:
+        if text.length == 0 or text.length > 64:
+            return none
+        var ip_start: usize = 0
+        var ip_end: usize = 0
+        var port_start: usize = 0
+        var scope: u32 = 0
+        let bracketed = text.bytes[0] == '['
+        if bracketed:
+            ip_start = 1
+            var end: usize = 1
+            while end < text.length and text.bytes[end] != ']':
+                end += 1
+            if end + 1 >= text.length or text.bytes[end + 1] != ':':
+                return none
+            ip_end = end
+            port_start = end + 2
+            var i: usize = 1
+            while i < end:
+                if text.bytes[i] == '%':
+                    ip_end = i
+                    let parsed = parse_endpoint_number((str)text.bytes[i + 1..<end], 4294967295, 10) else return none
+                    scope = parsed
+                    break
+                i += 1
+        else:
+            while ip_end < text.length and text.bytes[ip_end] != ':':
+                ip_end += 1
+            if ip_end == text.length:
+                return none
+            port_start = ip_end + 1
+        let ip = IpAddress.parse((str)text.bytes[ip_start..<ip_end]) else return none
+        if (ip.kind == IpVersion.ipv6) != bracketed:
+            return none
+        let port = parse_endpoint_number((str)text.bytes[port_start..], 65535, 5) else return none
+        return SocketAddress(ip = ip, port = (u16)port, scope_id = scope)
+
+    ## Whether two endpoints are equal.
+    pub func equals(other: SocketAddress) -> bool:
+        return self.ip.equals(other.ip) and self.port == other.port and self.scope_id == other.scope_id
+
+    ## Canonical numeric endpoint text. IPv6 is bracketed; a nonzero scope is
+    ## decimal. A 58-byte buffer always suffices. The returned view borrows buffer,
+    ## has no trailing NUL, and insufficient storage is left unchanged (io.full).
+    pub func render(buffer: u8[]) -> str!:
+        try self.validate()
+        var text: u8[58]
+        var used: usize = 0
+        if self.ip.kind == IpVersion.ipv6:
+            text[0] = '['
+            let address = try self.ip.render(text[1..<40])
+            used = 1 + address.length
+            if self.scope_id != 0:
+                text[used] = '%'
+                used = render_endpoint_number(self.scope_id, text, used + 1)
+            text[used] = ']'
+            used += 1
+        else:
+            let address = try self.ip.render(text[..<39])
+            used = address.length
+        text[used] = ':'
+        used = render_endpoint_number((u32)self.port, text, used + 1)
+        if buffer.length < used:
+            error(io.full, "the destination cannot hold the formatted socket address")
+        memory.move(buffer, text, used)
+        return (str)buffer[..<used]
+
+    func validate() -> !:
+        if self.ip.kind != IpVersion.ipv4 and self.ip.kind != IpVersion.ipv6:
+            error(invalid_options, "unknown IP address version")
+        if self.ip.kind == IpVersion.ipv4 and self.scope_id != 0:
+            error(invalid_options, "IPv4 endpoints cannot have an interface scope")
+
+    func write_native(output: NativeAddress*) -> u32!:
+        try self.validate()
+        if self.ip.kind == IpVersion.ipv4:
+            let number = self.ip.ipv4_number() else error(invalid_options, "IPv4 address bits are missing")
+            output.ipv4 = NativeIpv4Address(head = family_word(inet, 16), port = swap16(self.port), address = swap32(number))
+            return 16
+        output.ipv6 = NativeIpv6Address(head = family_word(inet6, 28), port = swap16(self.port), address = self.ip.octets, scope = self.scope_id)
+        return 28
+
+func decode_address(storage: const void*, length: u32) -> SocketAddress!:
+    if length < 2:
+        error(failed, "the socket address is shorter than its family field")
+    let head = memory.read[u16](storage)
+    let family = (i32)(head >> 8) if platform.macos else (i32)head
+    if family == inet:
+        if length < 16 or head != family_word(inet, 16):
+            error(failed, "the IPv4 socket address has an invalid layout")
+        let raw = memory.read[NativeIpv4Address](storage)
+        return SocketAddress(ip = IpAddress.from_ipv4(swap32(raw.address)), port = swap16(raw.port))
+    if family == inet6:
+        if length < 28 or head != family_word(inet6, 28):
+            error(failed, "the IPv6 socket address has an invalid layout")
+        let raw = memory.read[NativeIpv6Address](storage)
+        return SocketAddress(ip = IpAddress(kind = IpVersion.ipv6, octets = raw.address), port = swap16(raw.port), scope_id = raw.scope)
+    error(failed, "the socket address is not IPv4 or IPv6")
+
+func parse_endpoint_number(text: str, maximum: u32, width: usize) -> u32?:
+    if text.length == 0 or text.length > width:
+        return none
+    var value: u32 = 0
+    for byte in text.bytes:
+        if byte < '0' or byte > '9':
+            return none
+        let digit = (u32)(byte - '0')
+        if value > (maximum - digit) // 10:
+            return none
+        value = value * 10 + digit
+    return value
+
+func render_endpoint_number(value: u32, output: u8[], start: usize) -> usize:
+    var reversed: u8[10]
+    var count: usize = 0
+    var remaining = value
+    while true:
+        reversed[count] = (u8)(remaining % 10) + '0'
+        count += 1
+        remaining //= 10
+        if remaining == 0:
+            break
+    var used = start
+    while count > 0:
+        count -= 1
+        output[used] = reversed[count]
+        used += 1
+    return used
+
+## Host to network byte order and back; both native targets are little-endian.
+func swap16(value: u16) -> u16:
+    return (value << 8) | (value >> 8)
+
+func swap32(value: u32) -> u32:
+    return (value << 24) | ((value << 8) & 16711680) | ((value >> 8) & 65280) | (value >> 24)

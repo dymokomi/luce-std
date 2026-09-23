@@ -1,0 +1,81 @@
+#==============================================================================================
+#
+#   deadline_stream - Deadline-bound transfers
+#
+#   DESCRIPTION:
+#       A borrowed Reader/Writer applying one absolute deadline to all its transfers.
+#
+#==============================================================================================
+
+## A borrowed Reader/Writer applying one absolute deadline to all its transfers.
+## Use with io.read_exact, io.write_all or buffered adapters; confirmed progress
+## remains available from those helpers when a later call times out or is cancelled.
+## This adapter allocates nothing and never owns/closes the connection. Keep the
+## connection and optional cancellation signal alive, and synchronize their use.
+## The connection must remain nonblocking. This is checked when creating the view
+## and before nonempty transfers; coordinate all descriptor aliases. macOS can
+## block sends despite MSG_DONTWAIT alone. The adapter never changes socket flags.
+## Copying this view preserves the same deadline; it does not restart a timeout.
+pub struct DeadlineStream: Reader, Writer:
+    var connection: Connection*?
+    var deadline: Deadline
+    var cancellation: sync.Cancellation*?
+
+    ## Wrap `connection` so every transfer shares one absolute deadline.
+    pub static func over(connection: Connection*, deadline: Deadline = Deadline(), cancellation: sync.Cancellation*? = none) -> DeadlineStream!:
+        try require_nonblocking(connection)
+        return DeadlineStream(connection = connection, deadline = deadline, cancellation = cancellation)
+
+    ## Read some bytes, waiting only when no data is ready. Zero on a nonempty
+    ## buffer is EOF. Empty input succeeds on an open connection even after its
+    ## deadline or cancellation, because it performs no transfer. The connection
+    ## must remain nonblocking; the adapter never changes its shared status flags.
+    pub mutating func read(buffer: u8[]) -> usize!:
+        let connection = self.connection else error(closed, "the deadline stream has no connection")
+        let descriptor = try connection.socket.require()
+        if buffer.length == 0:
+            return 0
+        try require_nonblocking(connection)
+        let count = buffer.length if buffer.length < transfer_limit else transfer_limit
+        while true:
+            try check_operation(self.deadline, self.cancellation)
+            let received = recv(descriptor, buffer.data, count, dont_wait_flag)
+            if received >= 0:
+                return (usize)received
+            try await_transfer_retry(descriptor, WaitInterest.read, socket_errno(), self.deadline, self.cancellation)
+
+    ## Write some bytes, waiting only when kernel buffers are full. Each successful
+    ## count is confirmed before checking the next attempt's deadline/cancellation;
+    ## do not discard it when a later transfer fails. Empty writes make no syscall.
+    pub mutating func write(data: const u8[]) -> usize!:
+        let connection = self.connection else error(closed, "the deadline stream has no connection")
+        let descriptor = try connection.socket.require()
+        if data.length == 0:
+            return 0
+        try require_nonblocking(connection)
+        try check_operation(self.deadline, self.cancellation)
+        if not connection.guard():
+            error(closed, "the connection closed")
+        let count = data.length if data.length < transfer_limit else transfer_limit
+        while true:
+            try check_operation(self.deadline, self.cancellation)
+            let sent = send(descriptor, data.data, count, send_flags | dont_wait_flag)
+            if sent > 0:
+                return (usize)sent
+            if sent == 0:
+                error(io.no_progress, "the connection made no write progress")
+            try await_transfer_retry(descriptor, WaitInterest.write, socket_errno(), self.deadline, self.cancellation)
+
+let dont_wait_flag: i32 = 0 if platform.windows else (128 if platform.macos else 64)
+
+func await_transfer_retry(descriptor: platform.SocketDescriptor, interest: WaitInterest, number: i32, deadline: Deadline, cancellation: sync.Cancellation*?) -> !:
+    if number == socket_interrupted:
+        return
+    let code = socket_error(number)
+    if code != io.would_block:
+        error(code, "the deadline stream transfer failed")
+    discard(try wait_socket(descriptor, interest, deadline, cancellation))
+
+func require_nonblocking(connection: Connection*) -> !:
+    if not try connection.is_nonblocking():
+        error(invalid_options, "a deadline stream requires a nonblocking connection")

@@ -1,0 +1,54 @@
+## The `unicode` module against its archive: full Unicode casing with multi-scalar
+## expansion and Greek final-sigma context, the four normalization forms, and the
+## scalar properties. Tricky sequences are built from explicit UTF-8 bytes so the test
+## does not depend on how this file's own encoding is read.
+import unicode
+import strings
+
+test "full Unicode casing: ASCII, German sharp s, and Greek final sigma":
+    let upper = try unicode.to_upper("straße")
+    defer unicode.release(upper)
+    assert(upper == "STRASSE")
+    let lowered_ascii = try unicode.to_lower("MixedCASE 42")
+    defer unicode.release(lowered_ascii)
+    assert(lowered_ascii == "mixedcase 42")
+    # ΟΔΟΣ lowercases to οδος: the trailing Σ becomes the final form ς, not medial σ
+    let greek_upper: u8[8] = [0xCE, 0x9F, 0xCE, 0x94, 0xCE, 0x9F, 0xCE, 0xA3]
+    let greek_lower: u8[8] = [0xCE, 0xBF, 0xCE, 0xB4, 0xCE, 0xBF, 0xCF, 0x82]
+    let lowered = try unicode.to_lower((str)greek_upper[0..])
+    defer unicode.release(lowered)
+    assert(lowered == (str)greek_lower[0..])
+
+test "case folding compares without case and expands like uppercase":
+    let folded_upper = try unicode.case_fold("STRASSE")
+    defer unicode.release(folded_upper)
+    let folded_sharp = try unicode.case_fold("straße")
+    defer unicode.release(folded_sharp)
+    assert(folded_upper == folded_sharp and folded_upper == "strasse")
+
+test "normalization composes, decomposes, and folds compatibility ligatures":
+    let decomposed: u8[3] = [0x65, 0xCC, 0x81]   # "e" followed by combining acute accent
+    let precomposed: u8[2] = [0xC3, 0xA9]        # the single scalar "é"
+    let composed = try unicode.normalize((str)decomposed[0..], unicode.NormalizationForm.nfc)
+    defer unicode.release(composed)
+    assert(composed == (str)precomposed[0..])
+    let expanded = try unicode.normalize((str)precomposed[0..], unicode.NormalizationForm.nfd)
+    defer unicode.release(expanded)
+    assert(expanded == (str)decomposed[0..])
+    let ligature: u8[3] = [0xEF, 0xAC, 0x81]     # the ligature "ﬁ"
+    let plain = try unicode.normalize((str)ligature[0..], unicode.NormalizationForm.nfkc)
+    defer unicode.release(plain)
+    assert(plain == "fi")
+
+test "a byte limit stops the cased output rather than overrunning it":
+    # "straße" uppercases to the seven-byte "STRASSE", past the four-byte limit
+    let limited = unicode.to_upper("straße", 4) catch failure:
+        assert(failure.code == strings.output_too_large)
+        recover "stopped"
+    assert(limited == "stopped")
+
+test "scalar properties: whitespace, combining class, and the data version":
+    assert(unicode.is_whitespace(0x20) and unicode.is_whitespace(0x00A0) and unicode.is_whitespace(0x3000))
+    assert(not unicode.is_whitespace(0x41) and not unicode.is_whitespace(0x200B))
+    assert(unicode.combining_class(0x61) == 0 and unicode.combining_class(0x0301) == 230)
+    assert(unicode.version == "17.0.0")

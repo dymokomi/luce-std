@@ -1,0 +1,57 @@
+import c
+import files
+import memory
+import strings
+import unicode
+import utf8
+
+pub func main(arguments: c.str[]) -> i32!:
+    let corpus = try files.read(arguments[1])
+    defer free(corpus)
+    var position: usize = 0
+    var count: usize = 0
+    while position < corpus.length:
+        let form = (unicode.NormalizationForm)(u8)memory.read[u32](corpus.data + position)
+        let input_length = (usize)memory.read[u32](corpus.data + position + 4)
+        let output_length = (usize)memory.read[u32](corpus.data + position + 8)
+        position += 12
+        let input = (str)corpus[position..<position + input_length]
+        position += input_length
+        let expected = (str)corpus[position..<position + output_length]
+        position += output_length
+        let actual = try unicode.normalize(input, form, expected.length)
+        if actual != expected:
+            print(f"normalization record {count}, form {(u8)form}")
+            trap("Unicode normalization differs from the reference")
+        assert(actual.bytes.data[actual.length] == 0)
+        unicode.release(actual)
+        count += 1
+    assert(count > 100000)
+    let contracted = try unicode.normalize("ﬁ", unicode.NormalizationForm.nfkd, 2)
+    assert(contracted == "fi")
+    unicode.release(contracted)
+    var rejected = false
+    discard(unicode.normalize("ﬁ", unicode.NormalizationForm.nfkd, 1) catch failure:
+        assert(failure.code == strings.output_too_large)
+        rejected = true
+        recover "")
+    assert(rejected)
+    var malformed: u8[3] = [240, 144, 128]
+    var empty: u8[]
+    var refusing = memory.FixedBuffer.over(empty)
+    with refusing:
+        for form in 0..<4:
+            rejected = false
+            discard(unicode.normalize((str)malformed, (unicode.NormalizationForm)(u8)form) catch failure:
+                assert(failure.code == utf8.invalid_sequence)
+                rejected = true
+                recover "")
+            assert(rejected)
+            rejected = false
+            discard(unicode.normalize("A", (unicode.NormalizationForm)(u8)form) catch failure:
+                assert(failure.code == memory.exhausted)
+                rejected = true
+                recover "")
+            assert(rejected)
+    print("ok Unicode normalization conformance and combining-mark stress")
+    return 0

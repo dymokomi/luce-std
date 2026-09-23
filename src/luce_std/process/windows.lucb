@@ -1,0 +1,239 @@
+#==============================================================================================
+#
+#   windows - Windows process backend
+#
+#   DESCRIPTION:
+#       The Windows implementation of process spawning and capture, over CreateProcessW, jobs
+#       and delete-on-close capture files.
+#
+#==============================================================================================
+
+import luce_std.paths as paths
+# mark: Windows process calls =================================================================
+
+from windows_abi import MultiByteToWideChar, GetLastError, CloseHandle, GetCurrentProcess, GetTempPathW, CreateFileW
+
+## Windows subprocesses use CRT argument quoting and UTF-16 process creation.
+## Temporary file captures let both output streams grow without a pipe deadlock.
+extern struct WinStartup:
+    size: u32
+    reserved: void*?
+    desktop: void*?
+    title: void*?
+    x: u32
+    y: u32
+    width: u32
+    height: u32
+    columns: u32
+    rows: u32
+    fill: u32
+    flags: u32
+    show: u16
+    reserved_size: u16
+    reserved_data: void*?
+    input: void*?
+    output: void*?
+    errors: void*?
+
+extern struct WinProcess:
+    process: void*?
+    thread: void*?
+    pid: u32
+    tid: u32
+
+extern func CreateProcessW(application: void*?, command: u16*, process_security: void*?, thread_security: void*?, inherit: i32, flags: u32, environment: void*?, directory: void*?, startup: WinStartup*, process: WinProcess*) -> i32
+extern func DuplicateHandle(source_process: void*, source: void*, target_process: void*, target: void*?*, access: u32, inherit: i32, options: u32) -> i32
+extern func WaitForSingleObject(handle: void*, milliseconds: u32) -> u32
+extern func GetExitCodeProcess(handle: void*, status: u32*) -> i32
+extern func TerminateProcess(handle: void*, status: u32) -> i32
+extern func win_open_handle as "_open_osfhandle"(handle: isize, flags: i32) -> i32
+extern func win_fdopen as "_fdopen"(descriptor: i32, mode: c.str) -> void*?
+extern func win_close as "_close"(descriptor: i32) -> i32
+extern func fopen(path: c.str, mode: c.str) -> void*?
+extern func fclose(file: void*) -> i32
+extern func win_fileno as "_fileno"(file: void*) -> i32
+extern func win_os_handle as "_get_osfhandle"(descriptor: i32) -> isize
+extern func win_seek as "_fseeki64"(file: void*, offset: i64, origin: i32) -> i32
+extern func win_tell as "_ftelli64"(file: void*) -> i64
+extern func fread(buffer: void*, size: usize, count: usize, file: void*) -> usize
+
+func quote_windows(command: u8[], used: usize*, argument: str):
+    var needs_quotes = argument.length == 0
+    for byte in argument.bytes:
+        if byte == 32 or byte == 9 or byte == 10 or byte == 13 or byte == 34:
+            needs_quotes = true
+    if not needs_quotes:
+        for byte in argument.bytes:
+            command[*used] = byte
+            *used += 1
+        return
+    command[*used] = '"'
+    *used += 1
+    var slashes: usize = 0
+    for byte in argument.bytes:
+        if byte == 92:
+            slashes += 1
+            continue
+        let count = slashes * 2 + 1 if byte == '"' else slashes
+        for index in 0..<count:
+            discard(index)
+            command[*used] = 92
+            *used += 1
+        command[*used] = byte
+        *used += 1
+        slashes = 0
+    for index in 0..<slashes * 2:
+        discard(index)
+        command[*used] = 92
+        *used += 1
+    command[*used] = '"'
+    *used += 1
+
+func inherit_file(file: void*) -> void*!:
+    var handle: void*? = none
+    let current = GetCurrentProcess()
+    if DuplicateHandle(current, (void*)win_os_handle(win_fileno(file)), current, &handle, 0, 1, 2) == 0:
+        error(failed, "a child stream could not be inherited")
+    return handle else error(failed, "a child stream has no handle")
+
+func capture_windows(file: void*) -> str!:
+    if win_seek(file, 0, 2) != 0:
+        error(failed, "a child stream could not be measured")
+    let length = win_tell(file)
+    if length < 0 or win_seek(file, 0, 0) != 0:
+        error(failed, "a child stream could not be read")
+    let bytes = try alloc u8[(usize)length]
+    if length > 0 and fread(bytes.data, 1, bytes.length, file) != bytes.length:
+        free(bytes)
+        error(failed, "a child stream could not be read")
+    return (str)bytes
+
+## Atomic, non-inheritable, delete-on-close captures use the Unicode temp path.
+func temporary_windows() -> void*!:
+    var path: u16[32768]
+    let count = GetTempPathW((u32)path.length, &path[0])
+    if count == 0 or (usize)count + 33 >= path.length:
+        error(failed, "the child temporary directory is unavailable")
+    for attempt in 0..<128:
+        discard(attempt)
+        var random: u8[16]
+        try os.random_bytes(random)
+        let digits = "0123456789abcdef".bytes
+        for index in 0..<random.length:
+            path[(usize)count + index * 2] = (u16)digits[(usize)(random[index] >> 4)]
+            path[(usize)count + index * 2 + 1] = (u16)digits[(usize)(random[index] & 15)]
+        path[(usize)count + 32] = 0
+        let handle = CreateFileW(&path[0], 3221225472, 7, none, 1, 67109120, none)
+        if (isize)handle == -1:
+            if GetLastError() == 80 or GetLastError() == 183: continue
+            error(failed, "a child capture file could not be created")
+        let descriptor = win_open_handle((isize)handle, 32898)
+        if descriptor < 0:
+            discard(CloseHandle(handle))
+            error(failed, "a child capture descriptor could not be created")
+        if let stream = win_fdopen(descriptor, "w+b"):
+            return stream
+        discard(win_close(descriptor))
+        error(failed, "a child capture stream could not be created")
+    error(failed, "no unused child capture name was found")
+
+func run_windows(program: c.str, arguments: const c.str[], directory: c.str, environment: const c.str[]?, control: CommandState*? = none) -> (i32, str, str)!:
+    let name = (str)program
+    let cwd_text = (str)directory
+    # A program named with a directory is found from `directory` when one is given, as the
+    # POSIX launcher finds it after `chdir`; CreateProcessW resolves the command line's
+    # program from the parent's working directory instead, and only when a backslash
+    # spells it: `build/tests/run` is searched as a bare name and not found, while the
+    # same path with backslashes is opened and given its `.exe`, as the module promises
+    # for both slash styles.
+    var has_directory = false
+    for byte in name.bytes:
+        if paths.separator(byte):
+            has_directory = true
+    let prefixed = has_directory and cwd_text.length > 0 and paths.root(name).length == 0
+    let extra = cwd_text.length +? 2 else error(failed, "the process command is too long")
+    var room = name.length *? 2 else error(failed, "the process command is too long")
+    room = room +? 4 else error(failed, "the process command is too long")
+    room = room +? extra else error(failed, "the process command is too long")
+    for argument in arguments:
+        let width = ((str)argument).length *? 2 else error(failed, "the process command is too long")
+        room = room +? width else error(failed, "the process command is too long")
+        room = room +? 3 else error(failed, "the process command is too long")
+    let command = try alloc u8[room]
+    defer free(command)
+    var used: usize = 0
+    let spelled_room = name.length +? extra else error(failed, "the process command is too long")
+    let spelled = try alloc u8[spelled_room]
+    defer free(spelled)
+    var length: usize = 0
+    if prefixed:
+        for byte in cwd_text.bytes:
+            spelled[length] = 92 if byte == '/' else byte
+            length += 1
+        if spelled[length - 1] != 92:
+            spelled[length] = 92
+            length += 1
+    for byte in name.bytes:
+        spelled[length] = 92 if byte == '/' else byte
+        length += 1
+    quote_windows(command, &used, (str)spelled[..<length])
+    for argument in arguments:
+        command[used] = ' '
+        used += 1
+        quote_windows(command, &used, (str)argument)
+    command[used] = 0
+    let wide = try windows_text.wide((c.str)(str)command[..<used], failed)
+    defer free(wide)
+    if wide.length > 32768:
+        error(failed, "the process command is too long")
+    var selected_directory: u16[]
+    if ((str)directory).length > 0:
+        selected_directory = try windows_text.wide(directory, failed)
+    defer release_storage(selected_directory)
+    var selected_environment: u16[]
+    if let overrides = environment:
+        selected_environment = try environment_windows(overrides)
+    defer release_storage(selected_environment)
+    let output = try temporary_windows()
+    defer discard(fclose(output))
+    let errors = try temporary_windows()
+    defer discard(fclose(errors))
+    let input = fopen("NUL", "rb") else error(failed, "the child input could not be opened")
+    defer discard(fclose(input))
+    let out_handle = try inherit_file(output)
+    defer discard(CloseHandle(out_handle))
+    let err_handle = try inherit_file(errors)
+    defer discard(CloseHandle(err_handle))
+    let in_handle = try inherit_file(input)
+    defer discard(CloseHandle(in_handle))
+    var startup: WinStartup
+    startup.size = (u32)sizeof(WinStartup)
+    startup.flags = 256
+    startup.input = in_handle
+    startup.output = out_handle
+    startup.errors = err_handle
+    var child: WinProcess
+    if CreateProcessW(none, wide.data, none, none, 1, 134217728 | 1024 | (4 if control != none else 0),
+                      selected_environment.data if selected_environment.length > 0 else none,
+                      selected_directory.data if selected_directory.length > 0 else none, &startup, &child) == 0:
+        error(failed, "the process could not be started")
+    let process = child.process else trap("CreateProcess returned no process")
+    let child_thread = child.thread else trap("CreateProcess returned no thread")
+    defer discard(CloseHandle(process))
+    defer discard(CloseHandle(child_thread))
+    if let observer = control:
+        try monitor_windows(process, child_thread, output, errors, observer)
+    elif WaitForSingleObject(process, 4294967295) != 0:
+        discard(TerminateProcess(process, 1))
+        discard(WaitForSingleObject(process, 4294967295))
+        error(failed, "waiting for the process failed")
+    var code: u32 = 0
+    if GetExitCodeProcess(process, &code) == 0:
+        error(failed, "the process exit status is unavailable")
+    if control != none:
+        return ((i32)code, "", "")
+    let out = try capture_windows(output)
+    let err = capture_windows(errors) catch failure:
+        release(out)
+        error(failure.code, failure.message)
+    return ((i32)code, out, err)

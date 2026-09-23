@@ -1,0 +1,54 @@
+#==============================================================================================
+#
+#   posix - The POSIX command backend
+#
+#   DESCRIPTION:
+#       Dedicated process groups let cancellation stop inherited child processes. The leader is
+#       not reaped until its final group signal, avoiding PID reuse.
+#
+#==============================================================================================
+
+extern func setpgid(pid: i32, group: i32) -> i32
+extern func open(path: c.str, flags: i32, ...) -> i32
+
+func stop_command(pid: i32):
+    discard(kill(-pid, 9))
+    terminate(pid)
+
+func capture_command(pid: i32, out: Capture*, err: Capture*, state: CommandState*) -> i32!:
+    errdefer stop_command(pid)
+    if fcntl(out.descriptor, set_flags, non_blocking) < 0 or fcntl(err.descriptor, set_flags, non_blocking) < 0:
+        error(failed, "the command output cannot be read")
+    while true:
+        if state.cancelled.load(.acquire):
+            error(failed, "command cancelled")
+        var watched: Poll[2] = ---
+        watched[0] = Poll(descriptor = out.descriptor if out.open else -1, events = poll_in, returned = 0)
+        watched[1] = Poll(descriptor = err.descriptor if err.open else -1, events = poll_in, returned = 0)
+        if poll((Poll*)&watched, 2, 20) < 0:
+            if c.errno() == c.interrupted:
+                continue
+            error(failed, "the command output cannot be read")
+        if out.open and watched[0].returned != 0:
+            try pull_command(out, state)
+        if err.open and watched[1].returned != 0:
+            try pull_command(err, state)
+        # With both pipes closed, wait nonblockingly so cancellation still works
+        # for a process that intentionally closes stdout/stderr before sleeping.
+        if not out.open and not err.open:
+            var status: i32 = 0
+            let result = waitpid(pid, &status, 1)
+            if result == pid:
+                return status
+            if result < 0 and c.errno() != c.interrupted:
+                error(failed, "the command status cannot be read")
+
+func pull_command(stream: Capture*, state: CommandState*) -> !:
+    var bytes: u8[4096]
+    let count = c_read(stream.descriptor, &bytes[0], bytes.length)
+    if count == 0:
+        stream.open = false
+    elif count > 0:
+        try command_append(state, bytes[..<(usize)count])
+    elif c.errno() != c.interrupted and c.errno() != would_block:
+        error(failed, "the command output cannot be read")

@@ -1,0 +1,194 @@
+## A multi-threaded HTTP server: a listener thread accepts, a pool of workers
+## serves. Static files come from a root directory; `/echo` returns a POST body;
+## `/stats` reports counters; `/quit` stops the server.
+##
+##     http [--port N] [--root DIR] [--threads N]
+
+import c
+import files
+import http
+import memory
+import net
+import paths
+import pool
+import process
+import strings
+import thread
+
+pub let max_request: usize = 65536
+
+struct Stats:
+    var requests: @u64
+    var bytes_out: @u64
+    var errors: @u64
+
+struct Server:
+    var root: str
+    var port: u16
+    var stats: Stats
+    var stopping: @bool
+    var queue: pool.Queue
+
+var server: Server
+
+## One connection: read requests until the client closes or asks to.
+func serve(connection: net.Connection):
+    var live = connection
+    defer live.destroy()
+    var buffer: u8[65536]
+    var used: usize = 0
+    while true:
+        # a request may arrive in pieces, and a pipelined one may follow in the same read
+        var end = http.header_end(buffer[..<used])
+        while end == none:
+            if used == max_request:
+                fail(&live, 413)
+                return
+            let n = live.read(buffer[used..]) catch:
+                return
+            if n == 0:
+                return
+            used += n
+            end = http.header_end(buffer[..<used])
+        let head_end = end else return
+        var request = http.parse(buffer[..<used], head_end) catch:
+            fail(&live, 400)
+            return
+        let length = request.content_length()
+        if head_end + length > max_request:
+            fail(&live, 413)
+            return
+        while used < head_end + length:
+            let n = live.read(buffer[used..]) catch:
+                return
+            if n == 0:
+                return
+            used += n
+        request.body = buffer[head_end..<head_end + length]
+        discard(server.stats.requests.add(1, .relaxed))
+        let keep = handle(&live, &request) catch failure:
+            discard(server.stats.errors.add(1, .relaxed))
+            print(f"error: {failure.message}")
+            return
+        if not keep:
+            return
+        # keep the bytes of a pipelined request that arrived with this one
+        let consumed = head_end + length
+        let rest = used - consumed
+        if rest > 0:
+            memory.move(buffer[..<rest], buffer[consumed..<used], rest)
+        used = rest
+
+func fail(connection: net.Connection*, status: u32):
+    discard(server.stats.errors.add(1, .relaxed))
+    http.respond(connection, status, "text/plain", http.reason(status).bytes, false) catch:
+        return
+
+## Route one request; the result says whether the connection stays open.
+func handle(connection: net.Connection*, request: http.Request*) -> bool!:
+    let route = route_of(request.path)
+    if route == "/quit":
+        try http.respond(connection, 200, "text/plain", "bye\n".bytes, false)
+        server.stopping.store(true, .release)
+        # a connection to the listener wakes the accept loop so it can see the flag
+        var poke = net.Connection.connect(net.SocketAddress.loopback(server.port)) catch:
+            return false
+        try poke.close()
+        return false
+    if route == "/echo":
+        if request.method != "POST":
+            try http.respond(connection, 405, "text/plain", "POST only\n".bytes, request.keep_alive)
+            return request.keep_alive
+        try http.respond(connection, 200, "application/octet-stream", request.body, request.keep_alive)
+        return request.keep_alive
+    if route == "/stats":
+        var text: u8[256]
+        let body = try format(text, f"{{\"requests\": {server.stats.requests.load(.relaxed)}, \"bytes_out\": {server.stats.bytes_out.load(.relaxed)}, \"errors\": {server.stats.errors.load(.relaxed)}}}\n")
+        try http.respond(connection, 200, "application/json", body.bytes, request.keep_alive)
+        return request.keep_alive
+    if request.method != "GET" and request.method != "HEAD":
+        try http.respond(connection, 405, "text/plain", "GET only\n".bytes, request.keep_alive)
+        return request.keep_alive
+    try serve_file(connection, request, route)
+    return request.keep_alive
+
+## The path without its query.
+func route_of(path: str) -> str:
+    let question = strings.find(path, "?") else return path
+    return (str)path.bytes[..<question]
+
+## A file under the root; `/` is `index.html`; `..` never escapes the root.
+func serve_file(connection: net.Connection*, request: http.Request*, route: str) -> !:
+    if strings.contains(route, "..") or strings.contains(route, "//"):
+        try http.respond(connection, 403, "text/plain", "forbidden\n".bytes, request.keep_alive)
+        return
+    let relative = "index.html" if route == "/" else (str)route.bytes[1..]
+    var name: u8[1024]
+    let path = try format(name, f"{server.root}/{relative}")
+    let data = files.read((c.str)path) catch failure:
+        if failure.code == files.missing:
+            try http.respond(connection, 404, "text/plain", "not found\n".bytes, request.keep_alive)
+            return
+        try http.respond(connection, 500, "text/plain", "cannot read\n".bytes, request.keep_alive)
+        return
+    defer free(data)
+    let body = data[..<0] if request.method == "HEAD" else data[0..]
+    try http.respond(connection, 200, http.content_type(route), body, request.keep_alive)
+    discard(server.stats.bytes_out.add((u64)body.length, .relaxed))
+
+## `--port N`, `--root DIR`, `--threads N`.
+struct Options:
+    var port: u16
+    var root: str
+    var threads: usize
+
+func parse_options(arguments: str[]) -> Options!:
+    var options = Options(port = 8080, root = ".", threads = 4)
+    var i: usize = 1
+    while i + 1 < arguments.length:
+        let flag = arguments[i]
+        let value = arguments[i + 1]
+        if flag == "--port":
+            let n = strings.parse_i64(value) else error(bad_option, "--port needs a number")
+            options.port = (u16)n
+        elif flag == "--root":
+            options.root = value
+        elif flag == "--threads":
+            let n = strings.parse_i64(value) else error(bad_option, "--threads needs a number")
+            options.threads = (usize)n if n > 0 and n <= 64 else 4
+        else:
+            error(bad_option, "unknown option")
+        i += 2
+    return options
+
+pub let bad_option: ErrorCode = ErrorCode.package(4)
+
+pub func main(arguments: str[]) -> i32!:
+    let options = parse_options(arguments) catch failure:
+        print(f"http: {failure.message}")
+        print("usage: http [--port N] [--root DIR] [--threads N]")
+        return 2
+    server.root = options.root
+    var listener = try net.Listener.bind(net.SocketAddress.any(options.port))
+    let bound = (try listener.address())
+    server.port = bound.port
+    var worker = pool.Worker(queue = &server.queue, serve = serve)
+    var handles: thread.Handle[64]
+    try pool.start(&worker, options.threads, handles)
+    print(f"listening on {bound.port} with {options.threads} threads, serving {options.root}")
+    while not server.stopping.load(.acquire):
+        var connection = listener.accept() catch:
+            continue
+        if server.stopping.load(.acquire):
+            try connection.close()
+            break
+        server.queue.push(connection) catch:
+            # every slot taken: turn the client away rather than queue without bound
+            var busy = connection
+            http.respond(&busy, 500, "text/plain", "busy\n".bytes, false) catch:
+                discard(0)
+            try busy.close()
+    try pool.stop_all(&server.queue, handles, options.threads)
+    try listener.close()
+    print(f"served {server.stats.requests.load(.relaxed)} requests")
+    return 0

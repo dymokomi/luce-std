@@ -1,0 +1,64 @@
+#==============================================================================================
+#
+#   lookup - Unicode property table lookup
+#
+#   DESCRIPTION:
+#       Fixed-width ASCII-hex tables keep the bootstrap parser's tree bounded independently of
+#       the number of entries; all storage is immutable.
+#
+#==============================================================================================
+
+# Tables store fixed-width ASCII hex words, keeping the bootstrap parser's tree
+# bounded independently of the number of table entries. All storage is immutable.
+func table_word(table: str, offset: usize) -> u32:
+    var value: u32 = 0
+    for index in 0..<(usize)8:
+        let byte = table.bytes[offset + index]
+        let digit = byte - '0' if byte <= '9' else byte - 'a' + 10
+        value = (value << 4) | (u32)digit
+    return value
+
+func find_record(table: str, scalar: u32) -> usize?:
+    var low: usize = 0
+    var high = table.length // 24
+    while low < high:
+        let middle = low + (high - low) // 2
+        let key = table_word(table, middle * 24)
+        if key < scalar:
+            low = middle + 1
+        elif key > scalar:
+            high = middle
+        else:
+            return middle * 24
+    return none
+
+func range_value(table: str, scalar: u32) -> u32:
+    var low: usize = 0
+    var high = table.length // 24
+    while low < high:
+        let middle = low + (high - low) // 2
+        let offset = middle * 24
+        if scalar < table_word(table, offset):
+            high = middle
+        elif scalar > table_word(table, offset + 8):
+            low = middle + 1
+        else:
+            return table_word(table, offset + 16)
+    return 0
+
+struct Mapping:
+    var offset: usize
+    var length: usize
+    var scalar: u32
+    var is_single: bool
+
+    func at(index: usize) -> u32:
+        assert(index < self.length)
+        return self.scalar if self.is_single else table_word(mapping_scalars, (self.offset + index) * 8)
+
+func mapped(table: str, scalar: u32) -> Mapping?:
+    let offset = find_record(table, scalar) else return none
+    return Mapping(offset = (usize)table_word(table, offset + 8), length = (usize)table_word(table, offset + 16))
+
+func identity_mapping(scalar: u32) -> Mapping:
+    return Mapping(scalar = scalar, length = 1, is_single = true)

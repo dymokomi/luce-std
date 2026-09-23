@@ -1,0 +1,229 @@
+#==============================================================================================
+#
+#   readiness - Deadlines, cancellation and polling
+#
+#   DESCRIPTION:
+#       Deadlines, cancellation, and a poller over descriptors, using poll on both hosts.
+#
+#==============================================================================================
+
+extern struct NativePoll:
+    descriptor: platform.SocketDescriptor
+    events: i16
+    returned: i16
+
+extern struct MonotonicStamp:
+    seconds: i64
+    nanoseconds: i64
+
+extern func poll_macos as "poll"(entries: NativePoll*, count: u32, timeout: i32) -> i32
+extern func poll_linux as "poll"(entries: NativePoll*, count: usize, timeout: i32) -> i32
+extern func read_monotonic as "clock_gettime"(clock: i32, stamp: MonotonicStamp*) -> i32
+
+# mark: Deadlines and cancellation ============================================================
+
+## A monotonic absolute deadline. Zero has no time limit. Reuse the same value
+## across retries and partial transfers so interruptions cannot restart a timeout.
+pub struct Deadline:
+    var instant: u64?
+
+    ## Expire this many nanoseconds from now. Zero is an immediate check. A delay
+    ## that exceeds the clock's representable range reports invalid_options.
+    pub static func after(nanoseconds: u64) -> Deadline!:
+        let current = try monotonic_nanoseconds()
+        let end = current +? nanoseconds else error(invalid_options, "the deadline exceeds the monotonic clock range")
+        return Deadline(instant = end)
+
+    ## Use an absolute nanosecond instant from the same monotonic origin as time.now.
+    pub static func at(nanoseconds: u64) -> Deadline:
+        return Deadline(instant = nanoseconds)
+
+## Which readiness to wait for.
+pub enum WaitInterest as u8:
+    read = 0
+    write = 1
+    both = 2
+
+## Events are advisory: another user may consume readiness before the next call.
+## Use nonblocking I/O and handle io.would_block. Hangup can coexist with queued
+## readable bytes; read until EOF rather than discarding data on this flag alone.
+pub struct Readiness:
+    ## Whether the descriptor is readable.
+    pub var readable: bool
+    ## Whether the descriptor is writable.
+    pub var writable: bool
+    ## Whether the peer hung up.
+    pub var hangup: bool
+    ## Whether an error condition is pending.
+    pub var failure: bool
+    ## Whether the descriptor is invalid.
+    pub var invalid: bool
+
+# mark: The poller ============================================================================
+
+## Reusable storage for a fixed number of borrowed descriptors. All slots begin
+## disabled; watch/disable mutate slots without allocation. Copying does not
+## duplicate ownership. The retained allocator must outlive this object.
+## Synchronize all operations; watched descriptors must stay open during wait.
+pub struct Poller:
+    var entries: NativePoll[]
+    var owner: memory.Allocator?
+
+    ## A poller for up to `capacity` descriptors.
+    pub static func create(capacity: usize) -> Poller!:
+        if capacity == 0 or capacity > 2147483647:
+            error(invalid_options, "poller capacity must be between one and i32 maximum")
+        let entries = try alloc NativePoll[capacity]
+        var index: usize = 0
+        while index < capacity:
+            entries[index] = NativePoll(descriptor = -1)
+            index += 1
+        return Poller(entries = entries, owner = memory.allocator)
+
+    ## The poller's capacity.
+    pub func capacity() -> usize:
+        return self.entries.length
+
+    ## Watch a nonnegative borrowed descriptor. A descriptor may occupy only one
+    ## slot: host poll implementations differ on duplicate entries. Use both for
+    ## combined read/write interest. Replacing a slot clears its events.
+    pub mutating func watch(index: usize, descriptor: platform.SocketDescriptor, interest: WaitInterest = WaitInterest.read) -> !:
+        try self.check_slot(index)
+        if descriptor < 0:
+            error(invalid_options, "a watched descriptor must be nonnegative")
+        let events = try poll_interest(interest)
+        var other: usize = 0
+        while other < self.entries.length:
+            if other != index and self.entries[other].descriptor == descriptor:
+                error(invalid_options, "the descriptor already occupies another poller slot")
+            other += 1
+        self.entries[index] = NativePoll(descriptor = descriptor, events = events)
+
+    ## Stop watching the descriptor at `index`.
+    pub mutating func disable(index: usize) -> !:
+        try self.check_slot(index)
+        self.entries[index] = NativePoll(descriptor = -1)
+
+    ## Wait for ready slots, returning their count or zero on deadline expiration.
+    ## No allocation occurs. Empty interest sets may be used as a timed sleep.
+    ## Cancellation reports cancelled; it is checked before and after each poll.
+    ## With cancellation supplied, kernel waits are capped at 10 ms between checks;
+    ## scheduling can delay return. A simultaneous observed cancellation wins over
+    ## readiness. Expired deadlines still perform one nonblocking readiness check.
+    ## Interrupted calls recompute the remaining deadline. Output events are cleared
+    ## on entry and on error. This does not make later I/O obey the deadline itself.
+    pub mutating func wait(deadline: Deadline = Deadline(), cancellation: sync.Cancellation*? = none) -> usize!:
+        if self.entries.length == 0:
+            error(closed, "the poller is closed")
+        return try wait_poll(self.entries, deadline, cancellation)
+
+    ## Borrow a copy of the most recent wait's events for this slot. Disabled slots
+    ## have no events. Invalid descriptors are reported per slot, not silently closed.
+    pub func readiness(index: usize) -> Readiness!:
+        try self.check_slot(index)
+        return poll_readiness(self.entries[index].returned)
+
+    ## Release the poller.
+    pub mutating func destroy():
+        if self.entries.length > 0:
+            let owner = self.owner else trap("the poller lost its allocator")
+            free(self.entries) in owner
+        var empty: NativePoll[]
+        self.entries = empty
+        self.owner = none
+
+    func check_slot(index: usize) -> !:
+        if self.entries.length == 0:
+            error(closed, "the poller is closed")
+        if index >= self.entries.length:
+            error(invalid_options, "the poller slot is outside its capacity")
+
+func poll_interest(interest: WaitInterest) -> i16!:
+    if platform.windows:
+        if interest == WaitInterest.read: return 768
+        if interest == WaitInterest.write: return 16
+        if interest == WaitInterest.both: return 784
+        error(invalid_options, "unknown readiness interest")
+    if interest == WaitInterest.read:
+        return 1
+    if interest == WaitInterest.write:
+        return 4
+    if interest == WaitInterest.both:
+        return 5
+    error(invalid_options, "unknown readiness interest")
+
+func poll_readiness(events: i16) -> Readiness:
+    if platform.windows:
+        return Readiness(readable = (events & 768) != 0, writable = (events & 16) != 0, hangup = (events & 2) != 0, failure = (events & 1) != 0, invalid = (events & 4) != 0)
+    return Readiness(readable = (events & 1) != 0, writable = (events & 4) != 0, hangup = (events & 16) != 0, failure = (events & 8) != 0, invalid = (events & 32) != 0)
+
+func clear_poll(entries: NativePoll[]):
+    var index: usize = 0
+    while index < entries.length:
+        entries[index].returned = 0
+        index += 1
+
+func check_cancellation(cancellation: sync.Cancellation*?) -> !:
+    if let signal = cancellation:
+        if signal.is_requested():
+            error(cancelled, "the readiness wait was cancelled")
+
+func wait_poll(entries: NativePoll[], deadline: Deadline, cancellation: sync.Cancellation*?) -> usize!:
+    clear_poll(entries)
+    errdefer clear_poll(entries)
+    while true:
+        try check_cancellation(cancellation)
+        var milliseconds: i32 = -1
+        if let end = deadline.instant:
+            let current = try monotonic_nanoseconds()
+            let remaining = end - current if end > current else 0
+            # Round up without adding to the possibly maximal nanosecond count.
+            let rounded = remaining // 1000000 + (1 if remaining % 1000000 != 0 else 0)
+            milliseconds = (i32)rounded if rounded < 2147483647 else 2147483647
+        if cancellation != none and (milliseconds < 0 or milliseconds > 10):
+            milliseconds = 10
+        clear_poll(entries)
+        var result: i32 = 0
+        if platform.windows:
+            result = windows_poll(entries, milliseconds)
+        elif platform.macos:
+            result = poll_macos(entries.data, (u32)entries.length, milliseconds)
+        else:
+            result = poll_linux(entries.data, entries.length, milliseconds)
+        try check_cancellation(cancellation)
+        if result < 0:
+            if socket_errno() == socket_interrupted:
+                continue
+            error(socket_error(socket_errno()), "the readiness wait failed")
+        if result > 0:
+            return (usize)result
+        if let end = deadline.instant:
+            if (try monotonic_nanoseconds()) >= end:
+                return 0
+
+func wait_socket(descriptor: platform.SocketDescriptor, interest: WaitInterest, deadline: Deadline, cancellation: sync.Cancellation*?) -> Readiness!:
+    var entry: NativePoll[1]
+    entry[0] = NativePoll(descriptor = descriptor, events = try poll_interest(interest))
+    if (try wait_poll(entry, deadline, cancellation)) == 0:
+        error(timed_out, "the socket readiness deadline expired")
+    let ready = poll_readiness(entry[0].returned)
+    if ready.invalid:
+        error(closed, "the socket descriptor is no longer open")
+    return ready
+
+func monotonic_nanoseconds() -> u64!:
+    var stamp: MonotonicStamp
+    if read_monotonic(6 if platform.macos else 1, &stamp) != 0:
+        error(failed, "the monotonic clock could not be read")
+    if stamp.seconds < 0 or stamp.nanoseconds < 0 or stamp.nanoseconds >= 1000000000:
+        error(failed, "the monotonic clock returned an invalid timestamp")
+    let seconds = (u64)stamp.seconds *? 1000000000 else error(failed, "the monotonic clock exceeds its range")
+    return seconds +? (u64)stamp.nanoseconds else error(failed, "the monotonic clock exceeds its range")
+
+## Actual operations check before each attempt, unlike a readiness-only zero-time
+## probe. A continuously ready socket must not defeat a transfer's total deadline.
+func check_operation(deadline: Deadline, cancellation: sync.Cancellation*?) -> !:
+    try check_cancellation(cancellation)
+    if let end = deadline.instant:
+        if (try monotonic_nanoseconds()) >= end:
+            error(timed_out, "the operation deadline expired")

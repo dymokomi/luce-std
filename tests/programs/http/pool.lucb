@@ -1,0 +1,111 @@
+## A fixed set of worker threads draining a bounded queue of connections. The
+## queue is a ring under a mutex; workers sleep on a condition until there is
+## work or the pool is stopping.
+
+import c
+import net
+import sync
+import thread
+
+pub let full: ErrorCode = ErrorCode.package(3)
+
+pub let capacity: usize = 64
+
+pub struct Queue:
+    var items: net.Connection[64]
+    var head: usize
+    var count: usize
+    var stopping: bool
+    var mutex: sync.Mutex
+    var ready: sync.Condition
+    var drained: sync.Condition
+
+    ## Transfer ownership to a worker on success. On failure the caller still
+    ## owns the connection; on success it must stop using its copied handle.
+    pub mutating func push(connection: net.Connection) -> !:
+        self.mutex.lock()
+        defer self.mutex.unlock()
+        if self.count == capacity:
+            error(full, "the queue is full")
+        self.items[(self.head + self.count) % capacity] = connection
+        self.count += 1
+        self.ready.signal()
+
+    ## The next connection, or none once the pool is stopping and the queue is empty.
+    pub mutating func pop() -> net.Connection?:
+        self.mutex.lock()
+        defer self.mutex.unlock()
+        while self.count == 0 and not self.stopping:
+            self.ready.wait(&self.mutex)
+        if self.count == 0:
+            return none
+        let connection = self.items[self.head]
+        self.items[self.head] = net.Connection()
+        self.head = (self.head + 1) % capacity
+        self.count -= 1
+        if self.count == 0:
+            self.drained.broadcast()
+        return connection
+
+    ## Let every worker finish and leave.
+    pub mutating func stop():
+        self.mutex.lock()
+        self.stopping = true
+        self.ready.broadcast()
+        self.mutex.unlock()
+
+    pub mutating func pending() -> usize:
+        self.mutex.lock()
+        defer self.mutex.unlock()
+        return self.count
+
+## What every worker runs: the queue and the function that serves one connection.
+pub struct Worker:
+    pub var queue: Queue*
+    pub var serve: func(net.Connection) -> unit
+
+pub func run(context: void*):
+    let worker = (Worker*)context
+    while let connection = worker.queue.pop():
+        worker.serve(connection)
+
+## Start `count` workers over `worker`; the handles join in `stop_all`.
+pub func start(worker: Worker*, count: usize, handles: thread.Handle[]) -> !:
+    var i: usize = 0
+    while i < count and i < handles.length:
+        handles[i] = try thread.spawn(run, worker)
+        i += 1
+
+pub func stop_all(queue: Queue*, handles: thread.Handle[], count: usize) -> !:
+    queue.stop()
+    var i: usize = 0
+    while i < count and i < handles.length:
+        try handles[i].join()
+        i += 1
+
+test "a queue hands out what was pushed, in order":
+    var queue: Queue
+    var listener = try net.Listener.bind(net.SocketAddress.loopback(0))
+    defer listener.destroy()
+    let address = try listener.address()
+    var first = try net.Connection.connect(address)
+    defer first.destroy()
+    var second = try net.Connection.connect(address)
+    defer second.destroy()
+    let first_descriptor = first.descriptor() else trap("first connection is closed")
+    let second_descriptor = second.descriptor() else trap("second connection is closed")
+    try queue.push(first)
+    first = net.Connection()
+    try queue.push(second)
+    second = net.Connection()
+    assert(queue.pending() == 2)
+    var popped = queue.pop() else trap("first connection is missing")
+    defer popped.destroy()
+    assert(popped.descriptor() == first_descriptor)
+    try popped.close()
+    queue.stop()
+    var next = queue.pop() else trap("second connection is missing")
+    defer next.destroy()
+    assert(next.descriptor() == second_descriptor)
+    try next.close()
+    assert(queue.pop() == none)

@@ -1,0 +1,109 @@
+## Measure operation time and allocator traffic separately from fixture setup and
+## result verification. Timings are observations; bounds and contents are assertions.
+import c
+import counting
+import files
+import io
+import memory
+import strings
+import time
+import unicode
+
+func report(operation: str, size: usize, elapsed: u64, measured: counting.Counting):
+    assert(measured.live == 0 and measured.bytes == 0)
+    assert(measured.allocations == measured.frees and measured.failures == 0)
+    print(f"{operation},{size},{elapsed},{measured.allocations},{measured.peak_bytes}")
+
+func search(size: usize) -> !:
+    let input = try alloc u8[size]
+    defer free(input)
+    let pattern = try alloc u8[size // 4]
+    defer free(pattern)
+    for index in 0..<input.length:
+        input[index] = 'a'
+    for index in 0..<pattern.length:
+        pattern[index] = 'a'
+    pattern[pattern.length - 1] = 'b'
+    var measured = counting.Counting.unlimited()
+    let start = time.now()
+    with measured:
+        assert(strings.find((str)input, (str)pattern) == none)
+        assert(strings.find_last((str)input, (str)pattern) == none)
+    let elapsed = time.since(start)
+    assert(measured.allocations == 0)
+    report("search_pair", size, elapsed, measured)
+
+func normalize(size: usize) -> !:
+    # One long combining sequence with alternating classes forces canonical
+    # ordering scratch space and prevents an already-sorted fast path.
+    let input = try alloc u8[size]
+    defer free(input)
+    for index in 0..<size:
+        input[index] = 204 if index % 2 == 0 else (149 if index % 4 == 1 else 128)
+    var measured = counting.Counting.unlimited()
+    var elapsed: u64 = 0
+    with measured:
+        let start = time.now()
+        let result = try unicode.normalize((str)input, unicode.NormalizationForm.nfd)
+        elapsed = time.since(start)
+        assert(result.length == size)
+        for index in 0..<size:
+            let expected: u8 = 204 if index % 2 == 0 else (128 if index < size // 2 else 149)
+            assert(result.bytes[index] == expected)
+        unicode.release(result)
+    assert(measured.allocations == 3)
+    assert(measured.peak_bytes <= size * 5 + 1)
+    report("normalization", size, elapsed, measured)
+
+func stream(size: usize) -> !:
+    let input = try alloc u8[size]
+    defer free(input)
+    let output = try alloc u8[size]
+    defer free(output)
+    for index in 0..<size:
+        input[index] = (u8)((index * 17 + (index >> 8)) & 255)
+    var source = io.SliceReader.over(input)
+    var destination = io.SliceWriter.over(output)
+    var storage: u8[4096]
+    var measured = counting.Counting.unlimited()
+    let start = time.now()
+    with measured:
+        assert(try io.copy_limit(&source, &destination, storage, size) == size)
+    let elapsed = time.since(start)
+    assert(destination.written().length == size and source.remaining() == 0)
+    for index in 0..<size:
+        assert(output[index] == input[index])
+    assert(measured.allocations == 0)
+    report("stream_copy", size, elapsed, measured)
+
+func copy(size: usize, source_path: c.str, destination_path: c.str) -> !:
+    let input = try alloc u8[size]
+    defer free(input)
+    for index in 0..<size:
+        input[index] = (u8)((index * 13 + (index >> 8)) & 255)
+    try files.write(source_path, input)
+    var measured = counting.Counting.unlimited()
+    var published = false
+    let start = time.now()
+    with measured:
+        assert(try files.copy_file(source_path, destination_path, size, replace = true, published = &published) == size)
+    let elapsed = time.since(start)
+    assert(published)
+    # Only path/temporary-name storage is allocated; payload storage is a fixed
+    # stack buffer. The harness also checks identical counts across input sizes.
+    assert(measured.peak_bytes < 16384)
+    let actual = try files.read_limit(destination_path, size)
+    defer free(actual)
+    assert(actual.length == size)
+    for index in 0..<size:
+        assert(actual[index] == input[index])
+    report("file_copy", size, elapsed, measured)
+
+pub func main(arguments: c.str[]) -> i32!:
+    for size in [65536, 262144, 1048576]:
+        try search((usize)size)
+        try normalize((usize)size)
+    for size in [1048576, 4194304, 16777216]:
+        try stream((usize)size)
+        try copy((usize)size, arguments[1], arguments[2])
+    return 0

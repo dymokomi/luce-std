@@ -1,0 +1,206 @@
+#==============================================================================================
+#
+#   syntax - HTTP token and head-boundary syntax
+#
+#   DESCRIPTION:
+#       ASCII case-insensitive comparison and the search for the blank line ending a head.
+#
+#==============================================================================================
+
+# mark: Syntax ================================================================================
+
+## ASCII case-insensitive equality, independent of locale and Unicode folding.
+pub func http_equal(left: str, right: str) -> bool:
+    if left.length != right.length:
+        return false
+    for index in 0..<left.length:
+        let a = left.bytes[index]
+        let b = right.bytes[index]
+        let x = a + 32 if a >= 'A' and a <= 'Z' else a
+        let y = b + 32 if b >= 'A' and b <= 'Z' else b
+        if x != y:
+            return false
+    return true
+
+func http_token(text: str) -> bool:
+    if text.length == 0:
+        return false
+    for byte in text.bytes:
+        if (byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z') or (byte >= '0' and byte <= '9'):
+            continue
+        if byte == '!' or byte == '#' or byte == '$' or byte == '%' or byte == '&' or byte == '\'' or byte == '*' or byte == '+' or byte == '-' or byte == '.' or byte == '^' or byte == '_' or byte == '`' or byte == '|' or byte == '~':
+            continue
+        return false
+    return true
+
+func http_ows(text: str) -> str:
+    var first: usize = 0
+    var last = text.length
+    while first < last and (text.bytes[first] == ' ' or text.bytes[first] == '\t'):
+        first += 1
+    while last > first and (text.bytes[last - 1] == ' ' or text.bytes[last - 1] == '\t'):
+        last -= 1
+    return (str)text.bytes[first..<last]
+
+func http_list_next(text: str, cursor: usize*) -> str?:
+    if *cursor > text.length:
+        return none
+    let first = *cursor
+    while *cursor < text.length and text.bytes[*cursor] != ',':
+        *cursor += 1
+    let last = *cursor
+    *cursor += 1
+    return http_ows((str)text.bytes[first..<last])
+
+func http_number(text: str) -> u64!:
+    if text.length == 0:
+        error(http_invalid, "empty HTTP length")
+    var result: u64 = 0
+    for byte in text.bytes:
+        if byte < '0' or byte > '9':
+            error(http_invalid, "invalid HTTP length")
+        let digit = (u64)(byte - '0')
+        if result > (18446744073709551615 - digit) // 10:
+            error(http_limit, "HTTP length overflows u64")
+        result = result * 10 + digit
+    return result
+
+func http_field_valid(item: HttpField) -> bool:
+    if not http_token(item.name):
+        return false
+    for byte in item.value.bytes:
+        if (byte < 32 and byte != '\t') or byte == 127:
+            return false
+    return true
+
+## Find the complete head without consuming body/pipeline bytes. For incremental
+## use pass the previous buffer length minus at most three as start. Incomplete
+## input returns none; malformed line syntax is diagnosed by the head parser.
+pub func http_head_end(data: const u8[], start: usize = 0) -> usize?:
+    var cursor = start
+    while cursor < data.length and data.length - cursor >= 4:
+        if data[cursor] == '\r' and data[cursor + 1] == '\n' and data[cursor + 2] == '\r' and data[cursor + 3] == '\n':
+            return cursor + 4
+        cursor += 1
+    return none
+
+func http_line(data: const u8[], cursor: usize*) -> str!:
+    let first = *cursor
+    while *cursor < data.length:
+        let byte = data[*cursor]
+        if byte == '\n':
+            error(http_invalid, "HTTP lines require CRLF")
+        if byte == '\r':
+            if data.length - *cursor < 2 or data[*cursor + 1] != '\n':
+                error(http_invalid, "HTTP lines require CRLF")
+            let last = *cursor
+            *cursor += 2
+            return (str)data[first..<last]
+        *cursor += 1
+    error(http_invalid, "incomplete HTTP line")
+
+func http_uri_letter(byte: u8) -> bool:
+    return (byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z')
+
+func http_uri_name(byte: u8) -> bool:
+    return http_uri_letter(byte) or (byte >= '0' and byte <= '9') or byte == '-' or byte == '.' or byte == '_' or byte == '~' or byte == '!' or byte == '$' or byte == '&' or byte == 39 or byte == '(' or byte == ')' or byte == '*' or byte == '+' or byte == ',' or byte == ';' or byte == '='
+
+func http_target_valid(target: str) -> bool:
+    if target.length == 0:
+        return false
+    var at: usize = 0
+    while at < target.length:
+        let byte = target.bytes[at]
+        if byte == '%':
+            if target.length - at < 3 or http_hex(target.bytes[at + 1]) == none or http_hex(target.bytes[at + 2]) == none:
+                return false
+            at += 3
+            continue
+        if not http_uri_name(byte) and byte != ':' and byte != '/' and byte != '?' and byte != '@' and byte != '[' and byte != ']':
+            return false
+        at += 1
+    return true
+
+func http_request_target_valid(method: str, target: str) -> bool:
+    if not http_target_valid(target):
+        return false
+    if method == "CONNECT":
+        var separator: usize? = none
+        for index in 0..<target.length:
+            if target.bytes[index] == ':':
+                separator = index
+        let colon = separator else return false
+        if colon + 1 == target.length:
+            return false
+        for byte in target.bytes[colon + 1..]:
+            if byte < '0' or byte > '9':
+                return false
+        return http_host_valid(target)
+    if target == "*":
+        return method == "OPTIONS"
+    if target.bytes[0] == '/':
+        return true
+    # Absolute-form accepts a syntactically valid URI scheme. Its authority and
+    # scheme-specific interpretation belong to the client/proxy/server policy.
+    if not http_uri_letter(target.bytes[0]):
+        return false
+    for index in 1..<target.length:
+        let byte = target.bytes[index]
+        if byte == ':':
+            return index + 1 < target.length
+        if not http_uri_letter(byte) and not (byte >= '0' and byte <= '9') and byte != '+' and byte != '-' and byte != '.':
+            return false
+    return false
+
+func http_host_valid(host: str) -> bool:
+    if host.length == 0:
+        return false
+    var port_start = host.length
+    if host.bytes[0] == '[':
+        let end = strings.find(host, "]") else return false
+        let literal = (str)host.bytes[1..<end]
+        if not http_ip_literal(literal):
+            return false
+        if end + 1 < host.length:
+            if host.bytes[end + 1] != ':':
+                return false
+            port_start = end + 2
+    else:
+        var at: usize = 0
+        while at < host.length:
+            let byte = host.bytes[at]
+            if byte == ':':
+                if at == 0:
+                    return false
+                port_start = at + 1
+                break
+            if byte == '%':
+                if host.length - at < 3 or http_hex(host.bytes[at + 1]) == none or http_hex(host.bytes[at + 2]) == none:
+                    return false
+                at += 3
+                continue
+            if not http_uri_name(byte):
+                return false
+            at += 1
+    for byte in host.bytes[port_start..]:
+        if byte < '0' or byte > '9':
+            return false
+    return true
+
+func http_ip_literal(text: str) -> bool:
+    if let address = IpAddress.parse(text):
+        return address.kind == IpVersion.ipv6
+    # RFC 3986 IPvFuture: v + hexadecimal version + '.' + nonempty address.
+    if text.length < 4 or (text.bytes[0] != 'v' and text.bytes[0] != 'V'):
+        return false
+    var at: usize = 1
+    while at < text.length and http_hex(text.bytes[at]) != none:
+        at += 1
+    if at == 1 or at + 1 >= text.length or text.bytes[at] != '.':
+        return false
+    at += 1
+    while at < text.length:
+        if not http_uri_name(text.bytes[at]) and text.bytes[at] != ':':
+            return false
+        at += 1
+    return true

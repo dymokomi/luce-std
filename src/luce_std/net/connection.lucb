@@ -1,0 +1,212 @@
+#==============================================================================================
+#
+#   connection - A TCP connection
+#
+#   DESCRIPTION:
+#       An owned TCP connection: connect, read, write, shutdown, socket options and readiness
+#       waiting.
+#
+#==============================================================================================
+
+## Which direction to stop using on a connection. This does not close its owner.
+pub enum ShutdownDirection as u8:
+    read = 0
+    write = 1
+    both = 2
+
+# mark: The connection ========================================================================
+
+## One owned TCP connection implementing borrowed Reader and Writer interfaces.
+## Zero is closed. Copying does not duplicate ownership; copies must not be
+## independently closed. Synchronize calls on one owner.
+pub struct Connection: Reader, Writer:
+    var socket: SocketHandle
+    ## Whether the socket is marked against `SIGPIPE` (macOS); `write` marks it on first
+    ## use, so a connection built any other way than `over` is guarded too.
+    var guarded: bool
+
+    ## Establish a TCP connection with an optional absolute deadline/cancellation.
+    ## Connection setup is nonblocking internally; the returned socket is blocking
+    ## unless nonblocking=true. Failure closes the newly acquired descriptor. DNS
+    ## resolution is separate and is not covered by this connection deadline.
+    pub static func connect(address: SocketAddress, deadline: Deadline = Deadline(), cancellation: sync.Cancellation*? = none, nonblocking: bool = false) -> Connection!:
+        try check_operation(deadline, cancellation)
+        var raw: NativeAddress
+        let length = try address.write_native(&raw)
+        var owned = try SocketHandle.create(stream, address.ip.kind)
+        errdefer owned.destroy()
+        let fd = try owned.require()
+        if address.ip.kind == IpVersion.ipv6:
+            try set_socket_integer(fd, ipv6_level, ipv6_only_option, 0)
+        try set_nonblocking(fd, true)
+        if connect(fd, &raw, length) != 0:
+            let number = socket_errno()
+            let in_progress = 10035 if platform.windows else (36 if platform.macos else 115)
+            let already_pending = 10037 if platform.windows else (37 if platform.macos else 114)
+            if number != in_progress and number != already_pending and number != socket_interrupted:
+                error(socket_error(number), "the connection could not reach its peer")
+            discard(try wait_socket(fd, WaitInterest.write, deadline, cancellation))
+            try check_operation(deadline, cancellation)
+            let pending_error = try get_socket_integer(fd, socket_level, 4103 if platform.macos or platform.windows else 4)
+            if pending_error != 0:
+                error(socket_error(pending_error), "the pending connection failed")
+        try check_operation(deadline, cancellation)
+        try set_nonblocking(fd, nonblocking)
+        owned.nonblocking = nonblocking
+        return Connection.from_socket(owned)
+
+    ## Take ownership of a socket the caller made (a `socketpair`, an inherited
+    ## descriptor), including on failure. Set close-on-exec, preserving existing
+    ## flags; this is not atomic with the caller's creation/fork/exec operations.
+    ## A negative descriptor is rejected. The socket is marked so that a write after the peer closed fails
+    ## instead of ending the process. Make the connection while the peer is still there:
+    ## macOS refuses the mark on a socket whose peer has already gone, and a write on
+    ## such a connection answers `closed` without sending.
+    pub static func over(descriptor: platform.SocketDescriptor) -> Connection!:
+        return Connection.from_socket(try SocketHandle.adopt(descriptor))
+
+    static func from_socket(owned: SocketHandle) -> Connection:
+        var connection = Connection(socket = owned, guarded = false)
+        discard(connection.guard())
+        return connection
+
+    ## Query this connection's local IP endpoint, including its assigned port.
+    pub func local_address() -> SocketAddress!:
+        return try socket_address(try self.socket.require())
+
+    ## Query the connected peer's IP endpoint; this is an address, not an identity.
+    pub func peer_address() -> SocketAddress!:
+        return try socket_address(try self.socket.require(), true)
+
+    ## Stop one or both directions while retaining ownership. Shutting down writes
+    ## sends EOF after queued TCP bytes, so the peer can still send its response.
+    ## Use read shutdown only when input is no longer needed; treatment of queued
+    ## input follows the host. Neither direction flushes user buffers; flush any
+    ## io.BufferedWriter before shutting down writes.
+    pub mutating func shutdown(direction: ShutdownDirection = ShutdownDirection.both) -> !:
+        let descriptor = try self.socket.require()
+        if direction != ShutdownDirection.read and direction != ShutdownDirection.write and direction != ShutdownDirection.both:
+            error(invalid_options, "unknown socket shutdown direction")
+        var result = shutdown(descriptor, (i32)direction)
+        while result < 0 and socket_errno() == socket_interrupted:
+            result = shutdown(descriptor, (i32)direction)
+        if result != 0:
+            error(socket_error(socket_errno()), "the connection could not be shut down")
+
+    ## Whether a write cannot raise `SIGPIPE`. Linux asks with every `send`
+    ## (`MSG_NOSIGNAL`); macOS marks the socket once (`SO_NOSIGPIPE`), and refuses the mark
+    ## with `EINVAL` on a socket whose peer has disconnected.
+    mutating func guard() -> bool:
+        let descriptor = self.socket.value else return false
+        if self.guarded:
+            return true
+        if not platform.macos:
+            self.guarded = true
+            return true
+        var yes: i32 = 1
+        var result = setsockopt(descriptor, socket_level, no_sigpipe_option, &yes, 4)
+        while result < 0 and socket_errno() == socket_interrupted:
+            result = setsockopt(descriptor, socket_level, no_sigpipe_option, &yes, 4)
+        if result == 0:
+            self.guarded = true
+        return self.guarded
+
+    ## Send some bytes, retrying interruption. Use io.write_all for a complete
+    ## payload and its optional progress output to resume after a later failure.
+    ## An empty input makes no syscall. A closed peer never raises SIGPIPE.
+    pub mutating func write(data: const u8[]) -> usize!:
+        let descriptor = try self.socket.require()
+        if data.length == 0:
+            return 0
+        if not self.guard():
+            error(closed, "the connection closed")
+        let count = data.length if data.length < transfer_limit else transfer_limit
+        var sent = send(descriptor, data.data, count, send_flags)
+        while sent < 0 and socket_errno() == socket_interrupted:
+            sent = send(descriptor, data.data, count, send_flags)
+        if sent < 0:
+            error(socket_error(socket_errno()), "the connection could not send data")
+        if sent == 0:
+            error(io.no_progress, "the connection made no write progress")
+        return (usize)sent
+
+    ## Receive some bytes. For nonempty storage, zero is peer EOF; empty storage
+    ## returns zero without probing the peer. This call does not fill the buffer.
+    pub mutating func read(buffer: u8[]) -> usize!:
+        let descriptor = try self.socket.require()
+        if buffer.length == 0:
+            return 0
+        let count = buffer.length if buffer.length < transfer_limit else transfer_limit
+        var received = recv(descriptor, buffer.data, count, 0)
+        while received < 0 and socket_errno() == socket_interrupted:
+            received = recv(descriptor, buffer.data, count, 0)
+        if received < 0:
+            error(socket_error(socket_errno()), "the connection could not receive data")
+        return (usize)received
+
+    ## Disable Nagle coalescing when enabled. This is a latency policy, not a
+    ## delivery guarantee; writes may still be buffered by the OS or network.
+    pub mutating func set_no_delay(enabled: bool) -> !:
+        try set_socket_integer(try self.socket.require(), 6, 1, 1 if enabled else 0)
+
+    ## Whether TCP no-delay (Nagle off) is set.
+    pub func no_delay() -> bool!:
+        return try get_socket_integer(try self.socket.require(), 6, 1) != 0
+
+    ## Enable OS TCP keepalive probes. Timing and retry defaults remain host
+    ## policy; keepalive does not provide an application operation deadline.
+    pub mutating func set_keepalive(enabled: bool) -> !:
+        try set_socket_integer(try self.socket.require(), socket_level, keepalive_option, 1 if enabled else 0)
+
+    ## Whether keepalive probing is enabled.
+    pub func keepalive() -> bool!:
+        return try get_socket_integer(try self.socket.require(), socket_level, keepalive_option) != 0
+
+    ## Wait for advisory readiness without allocating. Expiration reports timed_out;
+    ## cancellation reports cancelled. Use nonblocking I/O after readiness because
+    ## another user can consume it. The socket remains borrowed and open.
+    pub func wait(interest: WaitInterest = WaitInterest.read, deadline: Deadline = Deadline(), cancellation: sync.Cancellation*? = none) -> Readiness!:
+        return try wait_socket(try self.socket.require(), interest, deadline, cancellation)
+
+    ## Change O_NONBLOCK without changing other status flags. Descriptor aliases
+    ## share this setting; synchronize changes with all users of this socket.
+    pub mutating func set_nonblocking(enabled: bool) -> !:
+        try set_nonblocking(try self.socket.require(), enabled)
+        self.socket.nonblocking = enabled
+
+    ## Whether the socket is in nonblocking mode.
+    pub func is_nonblocking() -> bool!:
+        if platform.windows:
+            discard(try self.socket.require())
+            return self.socket.nonblocking
+        return (try socket_status_flags(try self.socket.require()) & nonblocking_flag) != 0
+
+    ## Request kernel buffering in bytes, not a guaranteed transfer size. The OS
+    ## may cap or round the request; receive_buffer returns its reported setting.
+    pub mutating func set_receive_buffer(bytes: i32) -> !:
+        try set_socket_buffer(try self.socket.require(), receive_buffer_option, bytes)
+
+    ## The receive buffer size in bytes.
+    pub func receive_buffer() -> i32!:
+        return try get_socket_integer(try self.socket.require(), socket_level, receive_buffer_option)
+
+    ## Request kernel buffering in bytes. Linux reports a doubled bookkeeping
+    ## size; both hosts may adjust the request. This does not change user buffers.
+    pub mutating func set_send_buffer(bytes: i32) -> !:
+        try set_socket_buffer(try self.socket.require(), send_buffer_option, bytes)
+
+    ## The send buffer size in bytes.
+    pub func send_buffer() -> i32!:
+        return try get_socket_integer(try self.socket.require(), socket_level, send_buffer_option)
+
+    ## Borrow the descriptor; the caller must not close it or retain it past this owner.
+    pub func descriptor() -> platform.SocketDescriptor?:
+        return self.socket.value
+
+    ## Consume ownership before the OS call. Repeated close is safe even after failure.
+    pub mutating func close() -> !:
+        try self.socket.close()
+
+    ## Best-effort cleanup for unwinding; use close to observe delayed errors.
+    pub mutating func destroy():
+        self.socket.destroy()

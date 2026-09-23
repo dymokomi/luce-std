@@ -1,0 +1,71 @@
+## Exercise real child processes through the same executable on every host.
+import c
+import files
+import io
+import interop
+import process
+import strings
+import thread
+import time
+
+func wait_command(command: process.Command*) -> !:
+    let started = time.now()
+    while not command.is_finished():
+        assert(time.now() - started < 5000000000)
+        thread.sleep(2)
+
+pub func main(arguments: str[]) -> i32!:
+    if arguments.length > 1:
+        var output = io.stdout()
+        if arguments[1] == "stream":
+            discard(try output.write("first\n".bytes))
+            thread.sleep(100)
+            discard(try output.write("second\n".bytes))
+            return 7
+        if arguments[1] == "sleep":
+            thread.sleep(60000)
+            return 0
+        if arguments[1] == "flood":
+            while true:
+                discard(try output.write("1234567890".bytes))
+        if arguments[1] == "unicode":
+            discard(try output.write("éλ😀".bytes))
+            return 0
+    let executable = try files.absolute_path(arguments[0])
+    defer executable.release()
+    var command = try process.Command(executable.value, ["stream"])
+    defer command.close()
+    let started = time.now()
+    var observed = false
+    while not command.is_finished():
+        let text = try command.output()
+        if text.value == "first\n":
+            observed = true
+        text.release()
+        assert(time.now() - started < 5000000000)
+        thread.sleep(2)
+    let text = try command.output()
+    defer text.release()
+    assert(text.value == "first\nsecond\n")
+    assert(observed)
+    assert((command.exit_code() else -1) == 7)
+    command.close()
+    command.close()
+    var sleeper = try process.Command(executable.value, ["sleep"])
+    defer sleeper.close()
+    sleeper.cancel()
+    try wait_command(&sleeper)
+    assert((sleeper.exit_code() else 0) == -1)
+    var flood = try process.Command(executable.value, ["flood"], output_limit = 128)
+    defer flood.close()
+    try wait_command(&flood)
+    let failure = try flood.error_message()
+    defer failure.release()
+    assert(failure.value == "the command exceeded its output limit")
+    var unicode = try process.Command(executable.value, ["unicode"])
+    defer unicode.close()
+    try wait_command(&unicode)
+    let result = try unicode.output()
+    defer result.release()
+    assert(result.value == "éλ😀")
+    return 0

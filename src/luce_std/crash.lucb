@@ -1,0 +1,145 @@
+#==============================================================================================
+#
+#   crash - Crash reports
+#
+#   DESCRIPTION:
+#       A program that turns crash reports on gets a file per crash under
+#       ~/.luce/crashes: which program and version, the platform, the trap's
+#       position and message (or the fatal signal) and a native stack. Traps are
+#       the program's own; segmentation faults, bus errors, illegal instructions,
+#       arithmetic faults and aborts are caught on POSIX. The next run can read
+#       the report back with `take_report` and show it, since a program launched
+#       from a desktop has nowhere to print.
+#
+#==============================================================================================
+
+import c
+import core
+import luce_std.files as files
+import interop
+import luce_std.paths as paths
+import platform
+import strings
+import time
+
+# mark: Enabling ===============================================================================
+
+extern func getpid() -> i32
+extern func install_signal as "signal"(number: i32, handler: (func(i32) -> unit)?) -> (func(i32) -> unit)?
+
+## The directory reports go to: ~/.luce/crashes.
+pub func directory() -> interop.Owned[str]!:
+    let home = try files.home_directory()
+    defer home.release()
+    let luce = try paths.join(home.value, ".luce")
+    defer strings.release(luce)
+    let joined = try paths.join(luce, "crashes")
+    defer strings.release(joined)
+    return try interop.copy_text(joined)
+
+## Turn crash reports on for this process. `app` names the program in the file
+## name and header (letters, digits, `-` and `_` are kept; anything else becomes
+## `-`); `version` goes in the header.
+pub func enable(app: str, version: str = "") -> !:
+    if platform.wasm32:
+        return
+    let folder = try directory()
+    defer folder.release()
+    try files.ensure_directory(folder.value)
+    var name: u8[64]
+    let kept = safe_name(app, name)
+    var stamp: u8[128]
+    let started = time.unix()
+    let pid = (i64)getpid() if platform.posix and not platform.wasm32 else 0
+    let file_name = try format(stamp, f"{kept}-{started}-{pid}.crash")
+    let path = try paths.join(folder.value, file_name)
+    defer strings.release(path)
+    var header: u8[1024]
+    let text = try format(header, f"luce crash report\napp: {app}\nversion: {version}\nplatform: {platform.name}\npid: {pid}\nstarted: {started}\n\n")
+    core.set_crash_report(path, text)
+    if platform.posix and not platform.wasm32:
+        discard(install_signal(illegal_signal, fatal_signal))
+        discard(install_signal(abort_signal, fatal_signal))
+        discard(install_signal(arithmetic_signal, fatal_signal))
+        discard(install_signal(segmentation_signal, fatal_signal))
+        discard(install_signal(bus_signal(), fatal_signal))
+
+let illegal_signal: i32 = 4
+let abort_signal: i32 = 6
+let arithmetic_signal: i32 = 8
+let segmentation_signal: i32 = 11
+
+## SIGBUS is 10 on macOS and 7 on Linux.
+func bus_signal() -> i32:
+    return 10 if platform.macos else 7
+
+func fatal_signal(number: i32):
+    if number == segmentation_signal:
+        core.report_fatal_signal("SIGSEGV (invalid memory access)", number)
+    if number == illegal_signal:
+        core.report_fatal_signal("SIGILL (illegal instruction)", number)
+    if number == arithmetic_signal:
+        core.report_fatal_signal("SIGFPE (arithmetic fault)", number)
+    if number == abort_signal:
+        core.report_fatal_signal("SIGABRT (abort)", number)
+    core.report_fatal_signal("SIGBUS (bus error)", number)
+
+## `app` with anything but letters, digits, `-` and `_` replaced by `-`, into `buffer`.
+func safe_name(app: str, buffer: u8[]) -> str:
+    var length: usize = 0
+    for byte in app.bytes:
+        if length >= buffer.length:
+            break
+        let kept = (byte >= 97 and byte <= 122) or (byte >= 65 and byte <= 90) or (byte >= 48 and byte <= 57) or byte == 45 or byte == 95
+        buffer[length] = byte if kept else 45
+        length += 1
+    if length == 0:
+        buffer[0] = 112
+        length = 1
+    return (str)buffer[..<length]
+
+# mark: Reading back ===========================================================================
+
+## The newest report `app` left that nobody has taken, read and marked taken
+## (renamed to `.seen`), or empty text when there is none.
+pub func take_report(app: str) -> interop.Owned[str]!:
+    let folder = try directory()
+    defer folder.release()
+    var name: u8[64]
+    let prefix = safe_name(app, name)
+    let folder_path = try strings.copy(folder.value)
+    defer strings.release(folder_path)
+    let names = files.list((c.str)folder_path) catch _:
+        return try interop.copy_text("")
+    defer files.release_list(names)
+    # Names are app-started-pid.crash; the newest start is the largest number.
+    var newest: str = ""
+    var newest_started: i64 = -1
+    for entry in names:
+        if entry.length > prefix.length + 7 and strings.starts_with(entry, prefix) and entry.bytes[prefix.length] == 45 and strings.ends_with(entry, ".crash"):
+            let rest = (str)entry.bytes[prefix.length + 1..]
+            let dash = strings.find(rest, "-") else continue
+            let started = strings.parse_i64((str)rest.bytes[..<dash]) else continue
+            if started > newest_started:
+                newest_started = started
+                newest = entry
+    if newest.length == 0:
+        return try interop.copy_text("")
+    let path = try paths.join(folder.value, newest)
+    defer strings.release(path)
+    let text = try files.read_text(path, limit = 262144)
+    var seen: u8[1100]
+    let seen_path = try format(seen, f"{path}.seen")
+    let target = try strings.copy(seen_path)
+    defer strings.release(target)
+    # A report that cannot be marked may show again; that is better than losing it.
+    files.rename((c.str)path, (c.str)target) catch failure:
+        discard(failure)
+    return text
+
+test "a crash name keeps letters, digits, dashes and underscores":
+    var buffer: u8[64]
+    assert(safe_name("luced-2d", buffer) == "luced-2d")
+    assert(safe_name("Luced 2D.app", buffer) == "Luced-2D-app")
+    assert(safe_name("", buffer) == "p")
+    assert(bus_signal() == (10 if platform.macos else 7))

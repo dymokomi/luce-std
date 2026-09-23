@@ -1,0 +1,70 @@
+#==============================================================================================
+#
+#   windows - Winsock backend
+#
+#   DESCRIPTION:
+#       Winsock ABI and lifetime, kept below the portable TCP/UDP interfaces.
+#
+#==============================================================================================
+
+extern func WSAStartup(version: u16, data: void*) -> i32
+extern func WSACleanup() -> i32
+extern func WSAGetLastError() -> i32
+extern func WSASocketW(family: i32, kind: i32, protocol: i32, info: void*?, group: u32, flags: u32) -> platform.SocketDescriptor
+extern func closesocket(descriptor: platform.SocketDescriptor) -> i32
+extern func ioctlsocket(descriptor: platform.SocketDescriptor, command: i32, value: u32*) -> i32
+extern func SetHandleInformation(handle: void*, mask: u32, flags: u32) -> i32
+extern func windows_send as "send"(descriptor: platform.SocketDescriptor, data: const void*, length: i32, flags: i32) -> i32
+extern func windows_recv as "recv"(descriptor: platform.SocketDescriptor, data: void*, length: i32, flags: i32) -> i32
+extern func windows_sendto as "sendto"(descriptor: platform.SocketDescriptor, data: const void*, length: i32, flags: i32, address: const void*, address_length: u32) -> i32
+extern func windows_recvfrom as "recvfrom"(descriptor: platform.SocketDescriptor, data: void*, length: i32, flags: i32, address: void*, address_length: u32*) -> i32
+extern func WSAPoll(entries: NativePoll*, count: u32, milliseconds: i32) -> i32
+extern func Sleep(milliseconds: u32)
+extern func atexit(callback: func() -> unit) -> i32
+
+var winsock_lock: sync.Mutex
+var winsock_ready: bool
+
+func windows_socket_cleanup():
+    discard(WSACleanup())
+
+func windows_socket_startup() -> !:
+    winsock_lock.lock()
+    defer winsock_lock.unlock()
+    if winsock_ready:
+        return
+    var data: u64[64]
+    let result = WSAStartup(514, (void*)&data[0])
+    if result != 0:
+        error(socket_error(result), "Winsock could not initialize")
+    if atexit(windows_socket_cleanup) != 0:
+        discard(WSACleanup())
+        error(resource_exhausted, "Winsock cleanup could not be registered")
+    winsock_ready = true
+
+func windows_poll(entries: NativePoll[], milliseconds: i32) -> i32:
+    for entry in entries:
+        if entry.descriptor >= 0:
+            return WSAPoll(entries.data, (u32)entries.length, milliseconds)
+    Sleep((u32)milliseconds if milliseconds >= 0 else 1000)
+    return 0
+
+func windows_receive(descriptor: platform.SocketDescriptor, buffer: u8[]) -> (usize, SocketAddress)!:
+    var raw: NativeAddress
+    var scratch: u8[1]
+    let destination = buffer.data if buffer.length > 0 else &scratch[0]
+    let capacity = windows_transfer_count(buffer.length) if buffer.length > 0 else 1
+    while true:
+        var length: u32 = 28
+        let received = windows_recvfrom(descriptor, destination, capacity, 0, &raw, &length)
+        if received < 0:
+            let number = WSAGetLastError()
+            if number == socket_interrupted:
+                continue
+            error(socket_error(number), "the datagram could not be received")
+        if (usize)received > buffer.length:
+            error(message_too_large, "the receive buffer was too small for the datagram")
+        return ((usize)received, try decode_address(&raw, length))
+
+func windows_transfer_count(count: usize) -> i32:
+    return (i32)(count if count < transfer_limit else transfer_limit)

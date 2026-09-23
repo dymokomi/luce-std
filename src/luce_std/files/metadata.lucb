@@ -1,0 +1,321 @@
+#==============================================================================================
+#
+#   metadata - File type, times and stat metadata
+#
+#   DESCRIPTION:
+#       The file kind, timestamps and the stat-derived metadata of a path or open file.
+#
+#==============================================================================================
+
+# mark: Kinds and times =======================================================================
+
+## File type from mode bits; unknown preserves support for host-specific kinds.
+pub enum FileKind as u8:
+    unknown = 0
+    regular = 1
+    directory = 2
+    symlink = 3
+    fifo = 4
+    socket = 5
+    block_device = 6
+    character_device = 7
+
+## Unix-epoch seconds plus a nanosecond fraction in 0..999999999. Keeping the
+## components separate preserves negative times and avoids nanosecond overflow.
+pub struct FileTime:
+    ## Whole seconds since the Unix epoch.
+    pub var seconds: i64
+    ## The sub-second part, in nanoseconds.
+    pub var nanoseconds: u32
+
+## Metadata returned by one OS query, without allocation. Concurrent mutations
+## may affect different fields at different instants. Size and block counts keep
+## the OS's signed representation; their meaning depends on the file kind.
+pub struct Metadata:
+    ## The file's type.
+    pub var kind: FileKind
+    ## The permission bits.
+    pub var permissions: u32
+    ## The logical size in bytes.
+    pub var size: i64
+    ## The device the file lives on.
+    pub var device: u64
+    ## The file's inode number.
+    pub var inode: u64
+    ## The number of hard links.
+    pub var links: u64
+    ## The owning user id.
+    pub var user: u32
+    ## The owning group id.
+    pub var group: u32
+    ## Allocated storage in 512-byte blocks, not the logical file size.
+    pub var blocks_512: i64
+    ## The last access time.
+    pub var accessed: FileTime
+    ## The last modification time.
+    pub var modified: FileTime
+    ## Last metadata/status change, not creation time.
+    pub var changed: FileTime
+    ## The macOS birth-time field; none on Linux's stat interface. Filesystems
+    ## may report zero when a meaningful birth time is unavailable.
+    pub var created: FileTime?
+
+extern struct NativeFileTime:
+    seconds: i64
+    nanoseconds: i64
+
+## ARM64 Darwin struct stat, including reserved tail space written by libc.
+extern struct MacMetadata:
+    device: i32
+    mode: u16
+    links: u16
+    inode: u64
+    user: u32
+    group: u32
+    special_device: i32
+    accessed: NativeFileTime
+    modified: NativeFileTime
+    changed: NativeFileTime
+    created: NativeFileTime
+    size: i64
+    blocks: i64
+    block_size: i32
+    flags: u32
+    generation: u32
+    reserved_word: i32
+    reserved: i64[2]
+
+## x86-64 Linux struct stat. Layout is checked against the host's C headers by
+## tests/programs/file_metadata, rather than inferred from matching field names.
+extern struct LinuxMetadata:
+    device: u64
+    inode: u64
+    links: u64
+    mode: u32
+    user: u32
+    group: u32
+    padding: i32
+    special_device: u64
+    size: i64
+    block_size: i64
+    blocks: i64
+    accessed: NativeFileTime
+    modified: NativeFileTime
+    changed: NativeFileTime
+    reserved: i64[3]
+
+## aarch64 Linux struct stat: the generic layout, 128 bytes, `st_nlink` after the mode.
+extern struct LinuxArm64Metadata:
+    device: u64
+    inode: u64
+    mode: u32
+    links: u32
+    user: u32
+    group: u32
+    special_device: u64
+    padding: u64
+    size: i64
+    block_size: i32
+    padding2: i32
+    blocks: i64
+    accessed: NativeFileTime
+    modified: NativeFileTime
+    changed: NativeFileTime
+    reserved: i32[2]
+
+## `struct stat` as WASI lays it out: the link count is eight bytes, the times follow.
+extern struct WasiMetadata:
+    device: u64
+    inode: u64
+    links: u64
+    mode: u32
+    user: u32
+    group: u32
+    padding: u32
+    special_device: u64
+    size: i64
+    block_size: c.long
+    padding2: i32
+    blocks: i64
+    accessed: NativeFileTime
+    modified: NativeFileTime
+    changed: NativeFileTime
+    reserved: i64[3]
+
+extern func stat_wasi as "stat"(path: c.str, result: WasiMetadata*) -> i32
+extern func lstat_wasi as "lstat"(path: c.str, result: WasiMetadata*) -> i32
+extern func fstat_wasi as "fstat"(descriptor: i32, result: WasiMetadata*) -> i32
+extern func fstatat_wasi as "fstatat"(directory: i32, path: c.str, result: WasiMetadata*, flags: i32) -> i32
+extern func stat_linux_arm64 as "stat"(path: c.str, result: LinuxArm64Metadata*) -> i32
+extern func lstat_linux_arm64 as "lstat"(path: c.str, result: LinuxArm64Metadata*) -> i32
+extern func fstat_linux_arm64 as "fstat"(descriptor: i32, result: LinuxArm64Metadata*) -> i32
+extern func fstatat_linux_arm64 as "fstatat"(directory: i32, path: c.str, result: LinuxArm64Metadata*, flags: i32) -> i32
+extern func stat_macos as "stat"(path: c.str, result: MacMetadata*) -> i32
+extern func stat_linux as "stat"(path: c.str, result: LinuxMetadata*) -> i32
+extern func lstat_macos as "lstat"(path: c.str, result: MacMetadata*) -> i32
+extern func lstat_linux as "lstat"(path: c.str, result: LinuxMetadata*) -> i32
+extern func fstat_macos as "fstat"(descriptor: i32, result: MacMetadata*) -> i32
+extern func fstat_linux as "fstat"(descriptor: i32, result: LinuxMetadata*) -> i32
+extern func fstatat_macos as "fstatat"(directory: i32, path: c.str, result: MacMetadata*, flags: i32) -> i32
+extern func fstatat_linux as "fstatat"(directory: i32, path: c.str, result: LinuxMetadata*, flags: i32) -> i32
+extern func futimens(descriptor: i32, times: const NativeFileTime*) -> i32
+
+func file_kind(mode: u32) -> FileKind:
+    let kind = mode & 61440
+    if kind == 32768:
+        return FileKind.regular
+    if kind == 16384:
+        return FileKind.directory
+    if kind == 40960:
+        return FileKind.symlink
+    if kind == 4096:
+        return FileKind.fifo
+    if kind == 49152:
+        return FileKind.socket
+    if kind == 24576:
+        return FileKind.block_device
+    if kind == 8192:
+        return FileKind.character_device
+    return FileKind.unknown
+
+func file_time(value: NativeFileTime) -> FileTime:
+    return FileTime(seconds = value.seconds, nanoseconds = (u32)value.nanoseconds)
+
+func mac_metadata(value: MacMetadata) -> Metadata:
+    return Metadata(kind = file_kind((u32)value.mode), permissions = (u32)value.mode & 4095,
+                    size = value.size, device = (u64)(u32)value.device, inode = value.inode,
+                    links = (u64)value.links, user = value.user, group = value.group,
+                    blocks_512 = value.blocks, accessed = file_time(value.accessed),
+                    modified = file_time(value.modified), changed = file_time(value.changed),
+                    created = file_time(value.created))
+
+func wasi_metadata(value: WasiMetadata) -> Metadata:
+    return Metadata(kind = file_kind(value.mode), permissions = value.mode & 4095,
+                    size = value.size, device = value.device, inode = value.inode,
+                    links = value.links, user = value.user, group = value.group,
+                    blocks_512 = value.blocks, accessed = file_time(value.accessed),
+                    modified = file_time(value.modified), changed = file_time(value.changed), created = none)
+
+func linux_arm64_metadata(value: LinuxArm64Metadata) -> Metadata:
+    return Metadata(kind = file_kind(value.mode), permissions = value.mode & 4095,
+                    size = value.size, device = value.device, inode = value.inode,
+                    links = (u64)value.links, user = value.user, group = value.group,
+                    blocks_512 = value.blocks, accessed = file_time(value.accessed),
+                    modified = file_time(value.modified), changed = file_time(value.changed), created = none)
+
+func linux_metadata(value: LinuxMetadata) -> Metadata:
+    return Metadata(kind = file_kind(value.mode), permissions = value.mode & 4095,
+                    size = value.size, device = value.device, inode = value.inode,
+                    links = value.links, user = value.user, group = value.group,
+                    blocks_512 = value.blocks, accessed = file_time(value.accessed),
+                    modified = file_time(value.modified), changed = file_time(value.changed), created = none)
+
+# mark: Reading metadata ======================================================================
+
+## Query a path, following its final symlink by default. With follow_symlinks=false,
+## query that entry itself, including dangling links. Intermediate links resolve
+## normally. Interrupted calls retry; failure never returns partly filled metadata.
+pub func metadata(path: c.str, follow_symlinks: bool = true) -> Metadata!:
+    if platform.windows:
+        let handle = try windows_path_handle(path, follow_symlinks)
+        defer discard(CloseHandle(handle))
+        return try windows_metadata(handle, follow_symlinks)
+    if platform.macos:
+        var raw: MacMetadata
+        while true:
+            let result = stat_macos(path, &raw) if follow_symlinks else lstat_macos(path, &raw)
+            if result == 0:
+                return mac_metadata(raw)
+            if c.errno() != c.interrupted:
+                error(classify_error(c.errno()), "file metadata could not be read")
+    elif platform.wasm32:
+        var wasi: WasiMetadata
+        while true:
+            let result = stat_wasi(path, &wasi) if follow_symlinks else lstat_wasi(path, &wasi)
+            if result == 0:
+                return wasi_metadata(wasi)
+            if c.errno() != c.interrupted:
+                error(classify_error(c.errno()), "file metadata could not be read")
+    elif platform.arm64:
+        var raw64: LinuxArm64Metadata
+        while true:
+            let result = stat_linux_arm64(path, &raw64) if follow_symlinks else lstat_linux_arm64(path, &raw64)
+            if result == 0:
+                return linux_arm64_metadata(raw64)
+            if c.errno() != c.interrupted:
+                error(classify_error(c.errno()), "file metadata could not be read")
+    else:
+        var raw: LinuxMetadata
+        while true:
+            let result = stat_linux(path, &raw) if follow_symlinks else lstat_linux(path, &raw)
+            if result == 0:
+                return linux_metadata(raw)
+            if c.errno() != c.interrupted:
+                error(classify_error(c.errno()), "file metadata could not be read")
+
+func metadata_descriptor(descriptor: i32) -> Metadata!:
+    if platform.windows:
+        return try windows_metadata((void*)win_handle(descriptor), true)
+    if platform.macos:
+        var raw: MacMetadata
+        while true:
+            if fstat_macos(descriptor, &raw) == 0:
+                return mac_metadata(raw)
+            if c.errno() != c.interrupted:
+                error(classify_error(c.errno()), "open-file metadata could not be read")
+    elif platform.wasm32:
+        var wasi: WasiMetadata
+        while true:
+            if fstat_wasi(descriptor, &wasi) == 0:
+                return wasi_metadata(wasi)
+            if c.errno() != c.interrupted:
+                error(classify_error(c.errno()), "open-file metadata could not be read")
+    elif platform.arm64:
+        var raw64: LinuxArm64Metadata
+        while true:
+            if fstat_linux_arm64(descriptor, &raw64) == 0:
+                return linux_arm64_metadata(raw64)
+            if c.errno() != c.interrupted:
+                error(classify_error(c.errno()), "open-file metadata could not be read")
+    else:
+        var raw: LinuxMetadata
+        while true:
+            if fstat_linux(descriptor, &raw) == 0:
+                return linux_metadata(raw)
+            if c.errno() != c.interrupted:
+                error(classify_error(c.errno()), "open-file metadata could not be read")
+
+func metadata_at(directory: i32, path: c.str, follow_symlinks: bool) -> Metadata!:
+    if platform.windows:
+        let joined = try windows_relative(directory, path)
+        defer strings.release(joined)
+        return try metadata((c.str)joined, follow_symlinks)
+    let flags: i32 = 0 if follow_symlinks else at_no_follow_flag
+    if platform.macos:
+        var raw: MacMetadata
+        while true:
+            if fstatat_macos(directory, path, &raw, flags) == 0:
+                return mac_metadata(raw)
+            if c.errno() != c.interrupted:
+                error(classify_error(c.errno()), "directory-entry metadata could not be read")
+    elif platform.wasm32:
+        var wasi: WasiMetadata
+        while true:
+            if fstatat_wasi(directory, path, &wasi, flags) == 0:
+                return wasi_metadata(wasi)
+            if c.errno() != c.interrupted:
+                error(classify_error(c.errno()), "directory-entry metadata could not be read")
+    elif platform.arm64:
+        var raw64: LinuxArm64Metadata
+        while true:
+            if fstatat_linux_arm64(directory, path, &raw64, flags) == 0:
+                return linux_arm64_metadata(raw64)
+            if c.errno() != c.interrupted:
+                error(classify_error(c.errno()), "directory-entry metadata could not be read")
+    else:
+        var raw: LinuxMetadata
+        while true:
+            if fstatat_linux(directory, path, &raw, flags) == 0:
+                return linux_metadata(raw)
+            if c.errno() != c.interrupted:
+                error(classify_error(c.errno()), "directory-entry metadata could not be read")

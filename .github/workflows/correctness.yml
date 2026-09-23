@@ -1,0 +1,48 @@
+name: Correctness
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, ubuntu-24.04]
+    env:
+      LUCE_TEST_GPU: optional
+      LUCE_TEST_WINDOW: optional
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: luce-std
+      - name: Read compiler and dependency pins
+        id: pins
+        run: |
+          echo "base=$(cat luce-std/bootstrap/BASE)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: dymokomi/luce-base
+          ref: ${{ steps.pins.outputs.base }}
+          path: luce-base
+      - name: Select Clang
+        run: |
+          mkdir -p "$RUNNER_TEMP/luce-bin"
+          ln -s "$(command -v clang)" "$RUNNER_TEMP/luce-bin/cc"
+          echo "$RUNNER_TEMP/luce-bin" >> "$GITHUB_PATH"
+      - name: Build the compiler
+        working-directory: luce-base
+        run: ./build.sh
+      - name: Package gate
+        working-directory: luce-std
+        run: ./test.sh
+      - name: Retain diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: luce-std-${{ matrix.runner }}-${{ github.sha }}
+          path: |
+            luce-std/build/*.log
+            luce-std/build/failures/
+          if-no-files-found: ignore

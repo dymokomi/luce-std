@@ -1,0 +1,39 @@
+import c
+import files
+import strings
+
+struct Visitor: files.WalkVisitor:
+    var root: c.str
+    var moved: c.str
+    var renamed: bool
+    var directories: usize
+    var regular: usize
+    var symlinks: usize
+    var deepest: usize
+
+    pub mutating func visit(path: str, info: files.Metadata, depth: usize) -> bool!:
+        assert(strings.starts_with(path, (str)self.root))
+        if depth > self.deepest:
+            self.deepest = depth
+        if info.kind == files.FileKind.directory:
+            self.directories += 1
+        elif info.kind == files.FileKind.regular:
+            self.regular += 1
+        elif info.kind == files.FileKind.symlink:
+            self.symlinks += 1
+        else:
+            trap("unexpected fixture entry kind")
+        if depth == 1 and not self.renamed:
+            try files.rename(self.root, self.moved, false)
+            self.renamed = true
+        return not strings.ends_with(path, "/skip")
+
+pub func main(arguments: c.str[]) -> i32!:
+    var visitor = Visitor(root = arguments[1], moved = arguments[2])
+    try files.walk(arguments[1], &visitor)
+    assert(visitor.renamed and visitor.directories == 27)
+    assert(visitor.regular == 3 and visitor.symlinks == 3 and visitor.deepest == 25)
+    assert(not (try files.exists_checked(arguments[1])))
+    assert(try files.exists_checked(arguments[2]))
+    print("ok depth-first traversal, pruning and renamed root")
+    return 0

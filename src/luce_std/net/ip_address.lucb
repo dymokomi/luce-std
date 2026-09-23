@@ -1,0 +1,276 @@
+#==============================================================================================
+#
+#   ip_address - IP addresses
+#
+#   DESCRIPTION:
+#       An IPv4 or IPv6 address value, with parsing, formatting and comparison. An IPv4-mapped
+#       IPv6 address stays IPv6.
+#
+#==============================================================================================
+
+## IP version carried by an address value. IPv4-mapped IPv6 remains IPv6.
+pub enum IpVersion as u8:
+    ipv4 = 0
+    ipv6 = 1
+
+# mark: The address ===========================================================================
+
+## An IP value without a port, prefix length or interface scope. Storage is owned
+## inline; copying is safe and requires no cleanup. Zero represents 0.0.0.0.
+pub struct IpAddress:
+    var kind: IpVersion
+    var octets: u8[16]
+
+    ## An IPv4 address from a 32-bit number.
+    pub static func from_ipv4(number: u32) -> IpAddress:
+        var result: IpAddress
+        var i: usize = 0
+        while i < 4:
+            result.octets[i] = (u8)((number >> ((3 - i) * 8)) & 255)
+            i += 1
+        return result
+
+    ## Copy exactly four IPv4 or sixteen IPv6 octets in network order.
+    pub static func from_bytes(bytes: const u8[]) -> IpAddress!:
+        if bytes.length != 4 and bytes.length != 16:
+            error(invalid_options, "an IP address needs four or sixteen octets")
+        var result = IpAddress(kind = IpVersion.ipv4 if bytes.length == 4 else IpVersion.ipv6)
+        memory.copy(result.octets, bytes, bytes.length)
+        return result
+
+    ## Parse one complete address, without DNS. Accept IPv6 compression, uppercase
+    ## hex and dotted IPv4 tails. IPv4 needs four decimal components without leading
+    ## zeros. Reject whitespace, NUL, brackets, ports, prefix lengths and zone IDs.
+    pub static func parse(text: str) -> IpAddress?:
+        if text.length == 0 or text.length > 45:
+            return none
+        var has_colon = false
+        var i: usize = 0
+        while i < text.length:
+            let byte = text.bytes[i]
+            # Bare IP values have a fixed ASCII grammar and no interface zone.
+            let digit = byte >= '0' and byte <= '9'
+            let hexadecimal = (byte >= 'a' and byte <= 'f') or (byte >= 'A' and byte <= 'F')
+            if not digit and not hexadecimal and byte != ':' and byte != '.':
+                return none
+            if byte == ':':
+                has_colon = true
+            i += 1
+        if not has_colon:
+            let number = parse_ipv4_number(text) else return none
+            return IpAddress.from_ipv4(number)
+        return parse_ipv6(text)
+
+    ## The IP version of the address.
+    pub func version() -> IpVersion:
+        return self.kind
+
+    ## IPv4 in host-order numeric notation; none for IPv6, including mapped values.
+    pub func ipv4_number() -> u32?:
+        if self.kind != IpVersion.ipv4:
+            return none
+        return ((u32)self.octets[0] << 24) | ((u32)self.octets[1] << 16) | ((u32)self.octets[2] << 8) | (u32)self.octets[3]
+
+    ## Whether this is an IPv4-mapped IPv6 address.
+    pub func is_ipv4_mapped() -> bool:
+        if self.kind != IpVersion.ipv6:
+            return false
+        var i: usize = 0
+        while i < 10:
+            if self.octets[i] != 0:
+                return false
+            i += 1
+        return self.octets[10] == 255 and self.octets[11] == 255
+
+    ## Compare address bits and version. Mapped IPv6 and IPv4 are distinct values.
+    pub func equals(other: IpAddress) -> bool:
+        if self.kind != other.kind:
+            return false
+        var i: usize = 0
+        while i < 16:
+            if self.octets[i] != other.octets[i]:
+                return false
+            i += 1
+        return true
+
+    ## Copy network-order octets, returning four or sixteen. On insufficient
+    ## storage report io.full without modifying the destination.
+    pub func write_octets(destination: u8[]) -> usize!:
+        let count: usize = 4 if self.kind == IpVersion.ipv4 else 16
+        if destination.length < count:
+            error(io.full, "the destination cannot hold the IP address octets")
+        memory.move(destination, self.octets[..<count], count)
+        return count
+
+    ## Format into borrowed storage without allocation or a trailing NUL. IPv6
+    ## uses lowercase hex, the first longest zero run, and never compresses one
+    ## zero field. Mapped IPv6 uses ::ffff: followed by dotted IPv4. A 39-byte buffer
+    ## always suffices; smaller buffers work when the result fits. On io.full the
+    ## destination is unchanged. The returned view lives only as long as the buffer.
+    pub func render(buffer: u8[]) -> str!:
+        var text: u8[39]
+        var used: usize = 0
+        if self.kind == IpVersion.ipv4:
+            used = render_ipv4(self.octets[..<4], text, 0)
+        elif self.is_ipv4_mapped():
+            memory.copy(text, "::ffff:".bytes, 7)
+            used = render_ipv4(self.octets[12..], text, 7)
+        else:
+            var best_start: usize = 8
+            var best_length: usize = 1
+            var i: usize = 0
+            while i < 8:
+                if self.word(i) != 0:
+                    i += 1
+                    continue
+                let start = i
+                while i < 8 and self.word(i) == 0:
+                    i += 1
+                if i - start > best_length:
+                    best_start = start
+                    best_length = i - start
+            i = 0
+            while i < 8:
+                if i == best_start:
+                    text[used] = ':'
+                    text[used + 1] = ':'
+                    used += 2
+                    i += best_length
+                    continue
+                if used > 0 and text[used - 1] != ':':
+                    text[used] = ':'
+                    used += 1
+                used = render_hex_word(self.word(i), text, used)
+                i += 1
+        if buffer.length < used:
+            error(io.full, "the destination cannot hold the formatted IP address")
+        memory.move(buffer, text, used)
+        return (str)buffer[..<used]
+
+    func word(index: usize) -> u16:
+        return ((u16)self.octets[index * 2] << 8) | (u16)self.octets[index * 2 + 1]
+
+func parse_ipv4_number(text: str) -> u32?:
+    var result: u32 = 0
+    var position: usize = 0
+    var component: usize = 0
+    while component < 4:
+        let start = position
+        var value: u32 = 0
+        while position < text.length and text.bytes[position] >= '0' and text.bytes[position] <= '9':
+            if position - start == 3:
+                return none
+            value = value * 10 + (u32)(text.bytes[position] - '0')
+            position += 1
+        if position == start or value > 255:
+            return none
+        if position - start > 1 and text.bytes[start] == '0':
+            return none
+        result = (result << 8) | value
+        component += 1
+        if component < 4:
+            if position == text.length or text.bytes[position] != '.':
+                return none
+            position += 1
+    if position != text.length:
+        return none
+    return result
+
+func render_ipv4(octets: const u8[], output: u8[], start: usize) -> usize:
+    var used = start
+    var i: usize = 0
+    while i < 4:
+        if i > 0:
+            output[used] = '.'
+            used += 1
+        let value = octets[i]
+        if value >= 100:
+            output[used] = '0' + value // 100
+            used += 1
+        if value >= 10:
+            output[used] = '0' + (value // 10) % 10
+            used += 1
+        output[used] = '0' + value % 10
+        used += 1
+        i += 1
+    return used
+
+func render_hex_word(word: u16, output: u8[], start: usize) -> usize:
+    let digits = "0123456789abcdef"
+    var used = start
+    var shift: i32 = 12
+    var started = false
+    while shift >= 0:
+        let digit = (usize)((word >> shift) & 15)
+        if digit != 0 or started or shift == 0:
+            output[used] = digits.bytes[digit]
+            used += 1
+            started = true
+        shift -= 4
+    return used
+
+## Decode at most eight fields, then expand a single compression gap in place.
+## The public parser has already restricted input to hex digits, dots and colons.
+func parse_ipv6(text: str) -> IpAddress?:
+    var result = IpAddress(kind = IpVersion.ipv6)
+    var position: usize = 0
+    var count: usize = 0
+    var compression: usize? = none
+    if text.bytes[0] == ':':
+        if text.length < 2 or text.bytes[1] != ':':
+            return none
+        compression = 0
+        position = 2
+    while position < text.length:
+        if count >= 8:
+            return none
+        let start = position
+        var value: u16 = 0
+        while position < text.length and text.bytes[position] != ':' and text.bytes[position] != '.':
+            if position - start == 4:
+                return none
+            let byte = text.bytes[position]
+            let digit = (u16)(byte - '0') if byte <= '9' else ((u16)(byte - 'A' + 10) if byte <= 'F' else (u16)(byte - 'a' + 10))
+            value = (value << 4) | digit
+            position += 1
+        if position < text.length and text.bytes[position] == '.':
+            if count > 6:
+                return none
+            let number = parse_ipv4_number((str)text.bytes[start..]) else return none
+            var i: usize = 0
+            while i < 4:
+                result.octets[count * 2 + i] = (u8)((number >> ((3 - i) * 8)) & 255)
+                i += 1
+            count += 2
+            position = text.length
+            break
+        if position == start:
+            return none
+        result.octets[count * 2] = (u8)(value >> 8)
+        result.octets[count * 2 + 1] = (u8)(value & 255)
+        count += 1
+        if position == text.length:
+            break
+        position += 1
+        if position == text.length:
+            return none
+        if text.bytes[position] == ':':
+            if compression != none:
+                return none
+            compression = count
+            position += 1
+    if let gap = compression:
+        if count >= 8:
+            return none
+        let missing = (8 - count) * 2
+        var i = count * 2
+        while i > gap * 2:
+            i -= 1
+            result.octets[i + missing] = result.octets[i]
+        i = gap * 2
+        while i < gap * 2 + missing:
+            result.octets[i] = 0
+            i += 1
+    elif count != 8:
+        return none
+    return result

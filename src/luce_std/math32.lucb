@@ -1,0 +1,279 @@
+#==============================================================================================
+#
+#   math32 - Single-precision mathematical functions
+#
+#   DESCRIPTION:
+#       Single-precision mathematics. `math32` has the floating-point operations of `math`, with
+#       f32 arguments and results and the same special-value contracts. Elementary functions
+#       call the host's single-precision libm entry points directly; they do not compute in f64
+#       and then introduce an extra rounding step.
+#
+#==============================================================================================
+extern func c_floor as "floorf"(x: f32) -> f32
+extern func c_ceil as "ceilf"(x: f32) -> f32
+extern func c_round as "roundf"(x: f32) -> f32
+extern func c_trunc as "truncf"(x: f32) -> f32
+extern func c_sqrt as "sqrtf"(x: f32) -> f32
+extern func c_cbrt as "cbrtf"(x: f32) -> f32
+extern func c_hypot as "hypotf"(x: f32, y: f32) -> f32
+extern func c_fmod as "fmodf"(x: f32, y: f32) -> f32
+extern func c_pow as "powf"(x: f32, y: f32) -> f32
+extern func c_exp as "expf"(x: f32) -> f32
+extern func c_exp2 as "exp2f"(x: f32) -> f32
+extern func c_log as "logf"(x: f32) -> f32
+extern func c_log2 as "log2f"(x: f32) -> f32
+extern func c_log10 as "log10f"(x: f32) -> f32
+extern func c_sin as "sinf"(x: f32) -> f32
+extern func c_cos as "cosf"(x: f32) -> f32
+extern func c_tan as "tanf"(x: f32) -> f32
+extern func c_asin as "asinf"(x: f32) -> f32
+extern func c_acos as "acosf"(x: f32) -> f32
+extern func c_atan as "atanf"(x: f32) -> f32
+extern func c_atan2 as "atan2f"(y: f32, x: f32) -> f32
+extern func c_sinh as "sinhf"(x: f32) -> f32
+extern func c_cosh as "coshf"(x: f32) -> f32
+extern func c_tanh as "tanhf"(x: f32) -> f32
+extern func c_log1p as "log1pf"(x: f32) -> f32
+extern func c_expm1 as "expm1f"(x: f32) -> f32
+extern func c_fma as "fmaf"(x: f32, y: f32, z: f32) -> f32
+extern func c_nextafter as "nextafterf"(x: f32, toward: f32) -> f32
+extern func c_frexp as "frexpf"(x: f32, out exponent: i32) -> f32
+extern func c_scalbn as "scalbnf"(x: f32, exponent: i32) -> f32
+extern func c_modf as "modff"(x: f32, out integral: f32) -> f32
+extern func c_remainder as "remainderf"(x: f32, y: f32) -> f32
+## The ratio of a circle's circumference to its diameter.
+pub let pi: f32 = 3.141592653589793
+## A full turn in radians, two pi.
+pub let tau: f32 = 6.283185307179586
+## Euler's number.
+pub let e: f32 = 2.718281828459045
+## Built from bits so that no constant expression needs to overflow.
+pub let infinity: f32 = f32.bits(2139095040)
+## A quiet not-a-number; unequal to everything, itself included.
+pub let nan: f32 = f32.bits(2143289344)
+
+let sign_mask: u32 = 0x80000000
+let magnitude_mask: u32 = 0x7fffffff
+let exponent_mask: u32 = 0x7f800000
+
+# mark: Real functions ========================================================================
+
+## Rounding: `floor` toward negative infinity, `ceil` toward positive, `round` to the
+## nearest with halves away from zero, `trunc` toward zero.
+pub func floor(x: f32) -> f32:
+    return c_floor(x)
+
+## The smallest integer value not less than `x`.
+pub func ceil(x: f32) -> f32:
+    return c_ceil(x)
+
+## `x` rounded to the nearest integer, halves away from zero.
+pub func round(x: f32) -> f32:
+    return c_round(x)
+
+## `x` with its fractional part removed, toward zero.
+pub func trunc(x: f32) -> f32:
+    return c_trunc(x)
+
+## The square root of `x`.
+pub func sqrt(x: f32) -> f32:
+    return c_sqrt(x)
+
+## The cube root of `x`.
+pub func cbrt(x: f32) -> f32:
+    return c_cbrt(x)
+
+## `sqrt(x * x + y * y)` without overflow in the squares.
+pub func hypot(x: f32, y: f32) -> f32:
+    return c_hypot(x, y)
+
+## The remainder of `x / y` with the sign of `x`, as C's `fmod`.
+pub func mod(x: f32, y: f32) -> f32:
+    return c_fmod(x, y)
+
+## `x` raised to the power `y`.
+pub func pow(x: f32, y: f32) -> f32:
+    return c_pow(x, y)
+
+## `e` raised to the power `x`.
+pub func exp(x: f32) -> f32:
+    return c_exp(x)
+
+## `2` raised to the power `x`.
+pub func exp2(x: f32) -> f32:
+    return c_exp2(x)
+
+## The natural logarithm of `x`.
+pub func log(x: f32) -> f32:
+    return c_log(x)
+
+## The base-2 logarithm of `x`.
+pub func log2(x: f32) -> f32:
+    return c_log2(x)
+
+## The base-10 logarithm of `x`.
+pub func log10(x: f32) -> f32:
+    return c_log10(x)
+
+## Natural logarithm of `1 + x`, retaining accuracy when adding `x` to one would
+## round it away. At -1 the result is negative infinity; below -1 it is NaN.
+pub func log1p(x: f32) -> f32:
+    return c_log1p(x)
+
+## `exp(x) - 1` without cancellation near zero. Signed zero is preserved.
+pub func expm1(x: f32) -> f32:
+    # Preserve the exact negative-infinity limit under directed rounding too.
+    if x.bits() == (sign_mask | exponent_mask):
+        return -1.0
+    return c_expm1(x)
+
+## Multiply `x * y` and add `z` with one final rounding, rather than rounding the
+## product first. Uses the host's floating-point rounding mode.
+pub func fma(x: f32, y: f32, z: f32) -> f32:
+    return c_fma(x, y, z)
+
+## The adjacent representable value toward `toward`; equal arguments return
+## `toward`, including its zero sign. A NaN argument produces NaN.
+pub func nextafter(x: f32, toward: f32) -> f32:
+    return c_nextafter(x, toward)
+
+## The adjacent representable value toward positive infinity. Positive infinity
+## stays infinite; either zero becomes the smallest positive subnormal.
+pub func next_up(x: f32) -> f32:
+    return c_nextafter(x, infinity)
+
+## The adjacent representable value toward negative infinity. Negative infinity
+## stays infinite; either zero becomes the smallest negative subnormal.
+pub func next_down(x: f32) -> f32:
+    return c_nextafter(x, copysign(infinity, -1.0))
+
+## Split `x` into `(fraction, exponent)` such that `x = fraction * 2**exponent`.
+## A finite nonzero fraction has magnitude in [0.5, 1). Zero, infinity and NaN
+## are returned unchanged with exponent zero, avoiding an unspecified C exponent.
+pub func frexp(x: f32) -> (f32, i32):
+    if x == 0.0 or not is_finite(x):
+        return (x, 0)
+    return c_frexp(x)
+
+## Scale by an integer power of two, without forming that power as an intermediate
+## float. Overflow/underflow follow the host rounding mode; signed zero survives.
+pub func scalbn(x: f32, exponent: i32) -> f32:
+    return c_scalbn(x, exponent)
+
+## `(fractional, integral)` parts, both with the sign of `x`; the integral part
+## truncates toward zero. Infinity has a signed-zero fraction; NaN gives two NaNs.
+pub func modf(x: f32) -> (f32, f32):
+    return c_modf(x)
+
+## `x - n*y` for the nearest integer `n` to `x/y`, with ties choosing even `n`.
+## This differs from `mod`, which truncates the quotient. Zero has the sign of `x`;
+## a zero divisor or infinite dividend produces NaN.
+pub func remainder(x: f32, y: f32) -> f32:
+    let result = c_remainder(x, y)
+    # Match the f64 contract even if a host loses the zero sign while rounding.
+    return copysign(result, x) if (result.bits() & magnitude_mask) == 0 else result
+
+## The sine of `x` radians.
+pub func sin(x: f32) -> f32:
+    return c_sin(x)
+
+## The cosine of `x` radians.
+pub func cos(x: f32) -> f32:
+    return c_cos(x)
+
+## The tangent of `x` radians.
+pub func tan(x: f32) -> f32:
+    return c_tan(x)
+
+## The arcsine of `x`, in radians.
+pub func asin(x: f32) -> f32:
+    return c_asin(x)
+
+## The arccosine of `x`, in radians.
+pub func acos(x: f32) -> f32:
+    return c_acos(x)
+
+## The arctangent of `x`, in radians.
+pub func atan(x: f32) -> f32:
+    return c_atan(x)
+
+## The angle of the point `(x, y)`, in all four quadrants.
+pub func atan2(y: f32, x: f32) -> f32:
+    return c_atan2(y, x)
+
+## The hyperbolic sine of `x`.
+pub func sinh(x: f32) -> f32:
+    return c_sinh(x)
+
+## The hyperbolic cosine of `x`.
+pub func cosh(x: f32) -> f32:
+    return c_cosh(x)
+
+## The hyperbolic tangent of `x`.
+pub func tanh(x: f32) -> f32:
+    return c_tanh(x)
+
+## True for quiet and signaling NaNs, independent of sign and payload.
+pub func is_nan(x: f32) -> bool:
+    return (x.bits() & magnitude_mask) > exponent_mask
+
+## True for zeros, subnormals and normal finite values. Classification inspects the
+## representation and performs no floating-point arithmetic on a signaling NaN.
+pub func is_finite(x: f32) -> bool:
+    return (x.bits() & exponent_mask) != exponent_mask
+
+## True only for positive or negative infinity.
+pub func is_infinite(x: f32) -> bool:
+    return (x.bits() & magnitude_mask) == exponent_mask
+
+## Whether the sign bit is set, including negative zero and signed NaNs.
+pub func signbit(x: f32) -> bool:
+    return (x.bits() & sign_mask) != 0
+
+## Clear the sign bit: negative zero becomes positive zero. NaN payload bits survive.
+pub func abs(x: f32) -> f32:
+    return f32.bits(x.bits() & magnitude_mask)
+
+## The magnitude and payload of `magnitude` with the sign bit of `sign_source`.
+pub func copysign(magnitude: f32, sign_source: f32) -> f32:
+    return f32.bits((magnitude.bits() & magnitude_mask) | (sign_source.bits() & sign_mask))
+
+## `-1.0` or `1.0` for nonzero numbers; zero and NaN are returned unchanged.
+pub func sign(x: f32) -> f32:
+    if is_nan(x):
+        return x
+    if x < 0.0:
+        return -1.0
+    if x > 0.0:
+        return 1.0
+    return x
+
+## Minimum with NaN propagation (left NaN wins if both are NaNs). Negative zero
+## wins over positive zero; a selected NaN retains its original bits.
+pub func min(a: f32, b: f32) -> f32:
+    if is_nan(a):
+        return a
+    if is_nan(b):
+        return b
+    if a == 0.0 and b == 0.0:
+        return f32.bits(a.bits() | b.bits())
+    return a if a < b else b
+
+## Maximum with NaN propagation (left NaN wins if both are NaNs). Positive zero
+## wins over negative zero; a selected NaN retains its original bits.
+pub func max(a: f32, b: f32) -> f32:
+    if is_nan(a):
+        return a
+    if is_nan(b):
+        return b
+    if a == 0.0 and b == 0.0:
+        return f32.bits(a.bits() & b.bits())
+    return a if a > b else b
+
+## Restrict `x` to inclusive ordered bounds. Reversed or NaN bounds trap. An input
+## NaN or an input equal to a bound is returned unchanged, including its zero sign.
+pub func clamp(x: f32, low: f32, high: f32) -> f32:
+    assert(low <= high)
+    if is_nan(x):
+        return x
+    return low if x < low else (high if x > high else x)

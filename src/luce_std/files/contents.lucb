@@ -1,0 +1,70 @@
+#==============================================================================================
+#
+#   contents - Whole-file reads and writes
+#
+#   DESCRIPTION:
+#       Read a file through EOF or up to a limit, and create-or-truncate write; the result is
+#       an owned allocation of the current allocator, freed there.
+#
+#==============================================================================================
+
+## Read through EOF, including files whose size changes or cannot be sought. The
+## result is an allocation of the current allocator; free the returned span there.
+## Use read_limit for untrusted or potentially unbounded input.
+pub func read(path: c.str) -> u8[]!:
+    return try read_limit(path, ~(usize)0)
+
+## Read a whole file up to `limit` bytes. One extra byte may be read to distinguish
+## an exact fit from excess input; excess fails with too_large, never truncates.
+## All allocations and the descriptor are released on failure. An empty result is
+## still an owned zero-length allocation, following read's existing free contract.
+pub func read_limit(path: c.str, limit: usize) -> u8[]!:
+    var file = try File.open(path)
+    defer file.destroy()
+    var bytes: u8[]
+    errdefer release_buffer(bytes)
+    var used: usize = 0
+    var scratch: u8[4096]
+    while true:
+        let remaining = limit - used
+        let requested = 1 if remaining == 0 else (remaining if remaining < scratch.length else scratch.length)
+        let count = try file.read(scratch[..<requested])
+        if count == 0:
+            break
+        if remaining == 0:
+            error(too_large, "the file exceeds the read limit")
+        let needed = used + count
+        if needed > bytes.length:
+            var capacity = bytes.length *? 2 else limit
+            if capacity < 4096:
+                capacity = 4096
+            if capacity < needed:
+                capacity = needed
+            if capacity > limit:
+                capacity = limit
+            if bytes.length == 0:
+                bytes = try alloc u8[capacity]
+            else:
+                bytes = try memory.grow(bytes, capacity)
+        memory.copy(bytes[used..], scratch, count)
+        used += count
+    try file.close()
+    if used == bytes.length and used > 0:
+        return bytes
+    let exact = try alloc u8[used]
+    memory.copy(exact, bytes, used)
+    release_buffer(bytes)
+    return exact
+
+## Create or truncate and write all bytes, reporting write and close failures.
+## This is neither atomic replacement nor durable sync; use those operations
+## explicitly when their guarantees are required.
+pub func write(path: c.str, data: const u8[]) -> !:
+    var file = try File.open(path, OpenMode.replace)
+    defer file.destroy()
+    try io.write_all(&file, data)
+    try file.close()
+
+func release_buffer(bytes: u8[]):
+    if bytes.length > 0:
+        free(bytes)

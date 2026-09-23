@@ -1,0 +1,37 @@
+#==============================================================================================
+#
+#   posix - POSIX termination signals
+#
+#   DESCRIPTION:
+#       The POSIX callback performs one lock-free atomic operation; registration is serialized
+#       outside the callback and restores handlers on the last close.
+#
+#==============================================================================================
+
+type TerminationHandler = func(i32) -> unit
+extern func termination_signal as "signal"(number: i32, handler: TerminationHandler?) -> TerminationHandler?
+var previous_interrupt: TerminationHandler?
+var previous_terminate: TerminationHandler?
+let interrupt_signal: i32 = 2
+let terminate_signal: i32 = 15
+
+func termination_received(number: i32):
+    discard(termination_generation.add(1, .release))
+
+func termination_refused(handler: TerminationHandler?) -> bool:
+    if let function = handler:
+        return (usize)(void*)function == ~(usize)0
+    return false
+
+func termination_posix_install() -> !:
+    previous_interrupt = termination_signal(interrupt_signal, termination_received)
+    if termination_refused(previous_interrupt):
+        error(failed, "SIGINT handler could not be installed")
+    previous_terminate = termination_signal(terminate_signal, termination_received)
+    if termination_refused(previous_terminate):
+        discard(termination_signal(interrupt_signal, previous_interrupt))
+        error(failed, "SIGTERM handler could not be installed")
+
+func termination_posix_restore():
+    discard(termination_signal(interrupt_signal, previous_interrupt))
+    discard(termination_signal(terminate_signal, previous_terminate))

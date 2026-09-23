@@ -1,0 +1,102 @@
+import c
+import files
+import memory
+import utf8
+
+func scalars(reference: const u8[]) -> !:
+    var decoder: utf8.Decoder
+    var expected: u32 = 0
+    for byte in reference:
+        let scalar = try decoder.push(byte)
+        if let value = scalar:
+            assert((u32)value == expected)
+            expected += 1
+            if expected == 55296:
+                expected = 57344
+            assert(not decoder.is_pending())
+        else:
+            assert(decoder.is_pending())
+        assert(not decoder.is_failed())
+    assert(expected == 1114112)
+    try decoder.finish()
+    try decoder.finish()
+    assert(try decoder.push('A') == char(65))
+    try decoder.finish()
+
+## Each record contains the first failing byte (or EOF), its error category,
+## and the expected scalar/unfinished result after each accepted input byte.
+func malformed(corpus: const u8[]) -> !:
+    var position: usize = 0
+    var cases: usize = 0
+    var decoder: utf8.Decoder
+    while position < corpus.length:
+        let length = (usize)corpus[position]
+        let failure_at = (usize)corpus[position + 1]
+        let kind = corpus[position + 2]
+        position += 3
+        let data = corpus[position..<position + length]
+        position += length
+        let results = corpus[position..<position + length * 4]
+        position += length * 4
+        decoder.reset()
+        assert(not decoder.is_pending() and not decoder.is_failed())
+        var rejected = false
+        for index in 0..<data.length:
+            let value = decoder.push(data[index]) catch failure:
+                assert(kind == 1 and index == failure_at)
+                assert(failure.code == utf8.invalid_sequence)
+                rejected = true
+                recover none
+            if rejected:
+                break
+            let expected = memory.read[u32](results.data + index * 4)
+            if expected == 4294967295:
+                assert(value == none and decoder.is_pending())
+            else:
+                assert(value == char(expected) and not decoder.is_pending())
+        if not rejected:
+            decoder.finish() catch failure:
+                assert(kind == 2 and failure_at == data.length)
+                assert(failure.code == utf8.incomplete_sequence)
+                rejected = true
+        assert(rejected == (kind != 0))
+        if rejected:
+            assert(decoder.is_failed() and not decoder.is_pending())
+            let expected_code = utf8.invalid_sequence if kind == 1 else utf8.incomplete_sequence
+            rejected = false
+            discard(decoder.push('A') catch failure:
+                assert(failure.code == expected_code)
+                rejected = true
+                recover none)
+            assert(rejected)
+            rejected = false
+            decoder.finish() catch failure:
+                assert(failure.code == expected_code)
+                rejected = true
+            assert(rejected)
+        else:
+            try decoder.finish()
+        decoder.reset()
+        assert(try decoder.push('A') == char(65))
+        try decoder.finish()
+        cases += 1
+    assert(cases > 70000)
+    # Reset also discards a valid partial prefix before it has failed.
+    assert(try decoder.push(240) == none)
+    assert(decoder.is_pending())
+    decoder.reset()
+    assert(try decoder.push(0) == char(0))
+    try decoder.finish()
+
+pub func main(arguments: c.str[]) -> i32!:
+    let reference = try files.read(arguments[1])
+    defer free(reference)
+    let corpus = try files.read(arguments[2])
+    defer free(corpus)
+    var empty: u8[]
+    var refusing = memory.FixedBuffer.over(empty)
+    with refusing:
+        try scalars(reference)
+        try malformed(corpus)
+    print("ok incremental utf8: every scalar and strict prefix corpus")
+    return 0

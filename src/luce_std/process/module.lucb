@@ -1,0 +1,228 @@
+#==============================================================================================
+#
+#   process - Running a child process to completion
+#
+#   DESCRIPTION:
+#       Run a program with arguments, capture its standard output and error, and return its
+#       exit status; plus the current process's own exit.
+#
+#==============================================================================================
+
+import c
+import core
+import memory
+import windows_text
+import platform
+import os
+extern func pipe(descriptors: i32*) -> i32
+extern func fork() -> i32
+extern func dup2(from_fd: i32, to_fd: i32) -> i32
+extern func close(descriptor: i32) -> i32
+extern func execvp(program: c.str, arguments: void*?*) -> i32
+extern func _exit(code: i32) -> never
+extern func waitpid(pid: i32, status: i32*, options: i32) -> i32
+extern func kill(pid: i32, signal: i32) -> i32
+extern func c_read as "read"(descriptor: i32, buffer: void*, count: usize) -> isize
+extern func poll(descriptors: Poll*, count: u32, timeout: i32) -> i32
+extern func fcntl(descriptor: i32, command: i32, ...) -> i32
+
+extern struct Poll:
+    descriptor: i32
+    events: i16
+    returned: i16
+
+let poll_in: i16 = 1
+let poll_hang_up: i16 = 16
+let poll_error: i16 = 8
+let set_flags: i32 = 4
+## `O_NONBLOCK`: 4 on macOS, 2048 on Linux.
+let non_blocking: i32 = 4 if platform.macos else 2048
+let would_block: i32 = 35 if platform.macos else 11
+## The process could not be started or managed.
+pub let failed: ErrorCode = ErrorCode.package(8)
+
+## A captured stream: bytes in the current allocator, grown as the program writes.
+struct Capture:
+    var descriptor: i32
+    var data: u8[]
+    var used: usize
+    var open: bool
+
+    mutating func pull() -> !:
+        if self.data.length - self.used < 256:
+            if self.data.length == 0:
+                self.data = try alloc u8[1024]
+            else:
+                self.data = try memory.grow(self.data, self.data.length * 2)
+        let n = c_read(self.descriptor, self.data[self.used..].data, self.data.length - self.used)
+        if n == 0:
+            self.open = false
+        elif n > 0:
+            self.used += (usize)n
+        elif c.errno() != c.interrupted and c.errno() != would_block:
+            error(failed, "the program's output cannot be read")
+
+    ## What was captured, in an allocation exactly its length, or empty with none; the
+    ## capture's own storage is given back.
+    mutating func take() -> str!:
+        var empty: u8[]
+        if self.used == 0:
+            if self.data.length > 0:
+                free(self.data)
+                self.data = empty
+            return (str)empty
+        let exact = try alloc u8[self.used]
+        memory.copy(exact, self.data, self.used)
+        free(self.data)
+        self.data = empty
+        return (str)exact
+
+    mutating func drop():
+        if self.data.length > 0:
+            free(self.data)
+            var empty: u8[]
+            self.data = empty
+
+# mark: Running a program =====================================================================
+
+## Run `program` with `arguments`, wait for it, and answer its exit status and what it
+## wrote to its standard output and error. The two texts are allocations of the current
+## allocator, each exactly its length, empty ones no allocation at all; `release` gives
+## one back. A capture failure terminates and reaps the child, then closes the pipes and
+## releases the captures; waiting never depends on output we stopped reading. The child
+## only uses async-signal-safe operations between `fork` and `exec`,
+## so a parent with other threads is safe (§15.3).
+## directory="" inherits the working directory. environment overrides selected
+## inherited variables with NAME=value strings; none inherits everything unchanged.
+## Duplicate names are rejected (case-insensitively on Windows). The parent must
+## serialize mutations of its process-wide environment during process creation.
+pub func run(program: c.str, arguments: const c.str[], directory: c.str = "", environment: const c.str[]? = none) -> (i32, str, str)!:
+    return try run_controlled(program, arguments, directory, environment, none)
+
+func run_controlled(program: c.str, arguments: const c.str[], directory: c.str, environment: const c.str[]?, control: CommandState*?) -> (i32, str, str)!:
+    if platform.windows:
+        return try run_windows(program, arguments, directory, environment, control)
+    let slot = environment_address()
+    var selected: (c.str?)[]
+    if let overrides = environment:
+        selected = try environment_posix(overrides, *slot)
+    defer release_storage(selected)
+    let argv = try alloc void*?[arguments.length + 2]
+    argv[0] = (void*)program
+    var i: usize = 0
+    while i < arguments.length:
+        argv[i + 1] = (void*)arguments[i]
+        i += 1
+    argv[arguments.length + 1] = none
+    var out_pipe: i32[2]
+    var err_pipe: i32[2]
+    if pipe((i32*)&out_pipe) != 0:
+        free(argv)
+        error(failed, "run")
+    if pipe((i32*)&err_pipe) != 0:
+        discard(close(out_pipe[0]))
+        discard(close(out_pipe[1]))
+        free(argv)
+        error(failed, "run")
+    let pid = fork()
+    if pid < 0:
+        discard(close(out_pipe[0]))
+        discard(close(out_pipe[1]))
+        discard(close(err_pipe[0]))
+        discard(close(err_pipe[1]))
+        free(argv)
+        error(failed, "run")
+    if pid == 0:
+        if control != none:
+            if setpgid(0, 0) != 0:
+                _exit(127)
+            let input = open("/dev/null", 0)
+            if input < 0 or dup2(input, 0) < 0:
+                _exit(127)
+            if input > 2:
+                discard(close(input))
+        discard(close(out_pipe[0]))
+        discard(close(err_pipe[0]))
+        if dup2(out_pipe[1], 1) < 0 or dup2(err_pipe[1], 2) < 0:
+            _exit(127)
+        discard(close(out_pipe[1]))
+        discard(close(err_pipe[1]))
+        if ((str)directory).length > 0 and chdir(directory) != 0:
+            _exit(127)
+        if selected.length > 0:
+            *slot = selected.data
+        discard(execvp(program, argv.data))
+        _exit(127)
+    if control != none:
+        discard(setpgid(pid, pid))
+    free(argv)
+    discard(close(out_pipe[1]))
+    discard(close(err_pipe[1]))
+    var empty: u8[]
+    var out = Capture(descriptor = out_pipe[0], data = empty, used = 0, open = true)
+    var err = Capture(descriptor = err_pipe[0], data = empty, used = 0, open = true)
+    defer discard(close(out_pipe[0]))
+    defer discard(close(err_pipe[0]))
+    defer out.drop()
+    defer err.drop()
+    var status: i32 = 0
+    if let observer = control:
+        status = try capture_command(pid, &out, &err, observer)
+    else:
+        try capture(pid, &out, &err)
+        status = try wait_for(pid)
+    if (status & 127) != 0:
+        error(failed, "the program was stopped by a signal")
+    let out_text = try out.take()
+    let err_text = err.take() catch failure:
+        release(out_text)
+        error(failure.code, failure.message)
+    return ((status >> 8) & 255, out_text, err_text)
+
+## Optional child state has no allocation when inherited unchanged.
+func release_storage[T](storage: T[]):
+    if storage.length > 0:
+        free(storage)
+
+## Only capture owns the cancellation path. Once it returns, result allocation can fail
+## after wait_for has reaped the child; that must never signal a potentially reused pid.
+func capture(pid: i32, out: Capture*, err: Capture*) -> !:
+    errdefer terminate(pid)
+    if fcntl(out.descriptor, set_flags, non_blocking) < 0 or fcntl(err.descriptor, set_flags, non_blocking) < 0:
+        error(failed, "the program's output cannot be read")
+    while out.open or err.open:
+        var watched: Poll[2] = ---
+        watched[0] = Poll(descriptor = out.descriptor if out.open else -1, events = poll_in, returned = 0)
+        watched[1] = Poll(descriptor = err.descriptor if err.open else -1, events = poll_in, returned = 0)
+        if poll((Poll*)&watched, 2, -1) < 0:
+            if c.errno() == c.interrupted:
+                continue
+            error(failed, "the program's output cannot be read")
+        if out.open and (watched[0].returned & (poll_in | poll_hang_up | poll_error)) != 0:
+            try out.pull()
+        if err.open and (watched[1].returned & (poll_in | poll_hang_up | poll_error)) != 0:
+            try err.pull()
+
+## The child's wait status, waited for again when a signal interrupts the wait.
+func wait_for(pid: i32) -> i32!:
+    var status: i32 = 0
+    while waitpid(pid, &status, 0) < 0:
+        if c.errno() != c.interrupted:
+            error(failed, "run")
+    return status
+
+## A child may ignore a broken pipe or SIGTERM. SIGKILL stops its writes before waiting.
+func terminate(pid: i32):
+    discard(kill(pid, 9))
+    var status: i32 = 0
+    while waitpid(pid, &status, 0) < 0 and c.errno() == c.interrupted:
+        continue
+
+## Give back a text `run` answered, to the allocator that was current then.
+pub func release(text: str):
+    if text.length > 0:
+        free(u8[]((u8*)text.bytes.data, text.length))
+
+## Terminate the current process with `code`.
+pub func exit(code: i32) -> never:
+    core.exit(code)

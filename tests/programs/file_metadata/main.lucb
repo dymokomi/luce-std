@@ -1,0 +1,158 @@
+import c
+import files
+import io
+
+extern func metadata_prepare(descriptor: i32)
+extern func metadata_reference(descriptor: i32, path: c.str, follow: i32, output: u64*)
+extern func metadata_fault_arm(kind: i32)
+extern func metadata_fault_hits() -> i32
+
+func compare(value: files.Metadata, path: c.str, follow: bool, descriptor: i32 = -1):
+    var expected: u64[17]
+    metadata_reference(descriptor, path, 1 if follow else 0, &expected[0])
+    assert((u64)value.size == expected[0])
+    assert(value.device == expected[1] and value.inode == expected[2])
+    assert(value.links == expected[3] and (u64)value.permissions == expected[4])
+    assert((u64)value.user == expected[5] and (u64)value.group == expected[6])
+    assert((u64)value.blocks_512 == expected[7])
+    assert((u64)value.accessed.seconds == expected[8] and (u64)value.accessed.nanoseconds == expected[9])
+    assert((u64)value.modified.seconds == expected[10] and (u64)value.modified.nanoseconds == expected[11])
+    assert((u64)value.changed.seconds == expected[12] and (u64)value.changed.nanoseconds == expected[13])
+    if let created = value.created:
+        assert(expected[16] == 1)
+        assert((u64)created.seconds == expected[14] and (u64)created.nanoseconds == expected[15])
+    else:
+        assert(expected[16] == 0)
+
+pub func main(arguments: c.str[]) -> i32!:
+    let path = arguments[1]
+    let link = arguments[2]
+    let fifo = arguments[3]
+    var file = try files.File.open(path, files.OpenMode.create_new_read_write)
+    defer file.destroy()
+    discard(try file.seek(5368709120))
+    try io.write_all(&file, "x".bytes)
+    let descriptor = file.descriptor() else trap("file not open")
+    metadata_prepare(descriptor)
+    metadata_fault_arm(1)
+    let value = try file.metadata()
+    assert(metadata_fault_hits() == 1)
+    assert(value.kind == files.FileKind.regular and value.size == 5368709121)
+    assert(value.permissions == 416 and value.accessed.seconds == -12345)
+    compare(value, path, true, descriptor)
+    metadata_fault_arm(2)
+    let by_path = try files.metadata(path)
+    assert(metadata_fault_hits() == 1)
+    compare(by_path, path, true)
+    try files.create_symlink("data", link)
+    metadata_fault_arm(3)
+    let by_link = try files.metadata(link, false)
+    assert(metadata_fault_hits() == 1 and by_link.kind == files.FileKind.symlink)
+    compare(by_link, link, false)
+    compare(try files.metadata(link), link, true)
+    let pipe = try files.metadata(fifo)
+    assert(pipe.kind == files.FileKind.fifo)
+    compare(pipe, fifo, true)
+    var kind: i32 = 4
+    while kind <= 6:
+        metadata_fault_arm(kind)
+        var rejected = false
+        if kind == 4:
+            discard(file.metadata() catch failure:
+                assert(failure.code == files.failed)
+                rejected = true
+                recover value)
+        else:
+            discard(files.metadata(path, kind == 5) catch failure:
+                assert(failure.code == (files.permission_denied if kind == 5 else files.failed))
+                rejected = true
+                recover value)
+        assert(rejected and metadata_fault_hits() == 1)
+        kind += 1
+    metadata_fault_arm(7)
+    try file.set_permissions(384)
+    assert(metadata_fault_hits() == 1 and (try file.metadata()).permissions == 384)
+    discard(try file.seek(0))
+    try io.write_all(&file, "ab".bytes)
+    discard(try file.seek(5368709121))
+    metadata_fault_arm(8)
+    try file.truncate(2)
+    assert(metadata_fault_hits() == 1 and (try file.metadata()).size == 2)
+    try file.truncate(6)
+    assert((try file.seek(0, files.SeekOrigin.current)) == 5368709121)
+    discard(try file.seek(0))
+    var bytes: u8[6]
+    try io.read_exact(&file, bytes)
+    assert(bytes[0] == 97 and bytes[1] == 98)
+    assert(bytes[2] == 0 and bytes[3] == 0 and bytes[4] == 0 and bytes[5] == 0)
+    let accessed = files.FileTime(seconds = -23456, nanoseconds = 222333444)
+    let modified = files.FileTime(seconds = 1234567000, nanoseconds = 444333222)
+    metadata_fault_arm(9)
+    try file.set_times(accessed, modified)
+    assert(metadata_fault_hits() == 1)
+    let updated = try file.metadata()
+    assert(updated.accessed.seconds == accessed.seconds and updated.modified.seconds == modified.seconds)
+    compare(updated, path, true, descriptor)
+    var invalid = false
+    file.truncate(-1) catch failure:
+        assert(failure.code == files.invalid_options)
+        invalid = true
+    assert(invalid)
+    invalid = false
+    file.set_permissions(4096) catch failure:
+        assert(failure.code == files.invalid_options)
+        invalid = true
+    assert(invalid)
+    invalid = false
+    file.set_times(accessed, files.FileTime(nanoseconds = 1000000000)) catch failure:
+        assert(failure.code == files.invalid_options)
+        invalid = true
+    assert(invalid)
+    kind = 10
+    while kind <= 12:
+        metadata_fault_arm(kind)
+        invalid = false
+        if kind == 10:
+            file.set_permissions(420) catch failure:
+                assert(failure.code == files.permission_denied)
+                invalid = true
+        elif kind == 11:
+            file.truncate(0) catch failure:
+                assert(failure.code == files.no_space)
+                invalid = true
+        else:
+            file.set_times(files.FileTime(), files.FileTime()) catch failure:
+                assert(failure.code == files.failed)
+                invalid = true
+        assert(invalid and metadata_fault_hits() == 1)
+        let unchanged = try file.metadata()
+        assert(unchanged.size == 6 and unchanged.permissions == 384)
+        assert(unchanged.modified.seconds == updated.modified.seconds)
+        assert(unchanged.modified.nanoseconds == updated.modified.nanoseconds)
+        kind += 1
+    try files.remove_file(path)
+    let unlinked = try file.metadata()
+    assert(unlinked.links == 0 and unlinked.size == 6)
+    compare(unlinked, path, true, descriptor)
+    var rejected = false
+    discard(files.metadata(link) catch failure:
+        assert(failure.code == files.missing)
+        rejected = true
+        recover value)
+    assert(rejected)
+    assert((try files.metadata(link, false)).kind == files.FileKind.symlink)
+    try file.close()
+    invalid = false
+    file.truncate(0) catch failure:
+        assert(failure.code == io.closed)
+        invalid = true
+    assert(invalid)
+    rejected = false
+    discard(file.metadata() catch failure:
+        assert(failure.code == io.closed)
+        rejected = true
+        recover value)
+    assert(rejected)
+    try files.remove_file(link)
+    print("ok file metadata and native layouts")
+    return 0

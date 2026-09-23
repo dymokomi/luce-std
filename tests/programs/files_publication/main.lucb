@@ -1,0 +1,59 @@
+import c
+import files
+import thread
+
+extern func publication_verify(data: const u8*, length: usize)
+extern func publication_start(path: c.str)
+extern func publication_finish() -> u32
+
+struct Writer:
+    var path: c.str?
+    var identity: u8
+    var succeeded: bool
+
+func fill(data: u8[], identity: u8, generation: u8) -> usize:
+    let length: usize = 4096 + ((usize)generation * 7919) % 61441
+    data[0] = identity
+    data[1] = generation
+    for index in 2..<length:
+        data[index] = (u8)(((usize)identity * 31 + (usize)generation * 17 + index * 13 + (index >> 8)) & 255)
+    return length
+
+func publish(writer: Writer*) -> !:
+    let path = writer.path else trap("missing publication path")
+    var output: u8[65536]
+    for generation in 1..<65:
+        let length = fill(output, writer.identity, (u8)generation)
+        var published = false
+        try files.write_atomic(path, output[..<length], synchronize = generation % 16 == 0, published = &published)
+        assert(published)
+        # Another writer may already have replaced this generation. The result
+        # must still be a complete publication, verified by the independent peer.
+        let observed = try files.read_limit(path, output.length)
+        publication_verify(observed.data, observed.length)
+        free(observed)
+    writer.succeeded = true
+
+func worker(context: void*?):
+    let pointer = context else trap("missing publication context")
+    let writer = (Writer*)pointer
+    publish(writer) catch failure:
+        print(f"publication writer {writer.identity}: {failure.message}")
+
+pub func main(arguments: c.str[]) -> i32!:
+    var initial: u8[65536]
+    let length = fill(initial, 0, 0)
+    try files.write_atomic(arguments[1], initial[..<length])
+    publication_start(arguments[1])
+    var writers: Writer[4]
+    var handles: thread.Handle[4]
+    for index in 0..<writers.length:
+        writers[index].path = arguments[1]
+        writers[index].identity = (u8)(index + 1)
+        handles[index] = try thread.spawn(worker, &writers[index], name = "publication")
+    for index in 0..<handles.length:
+        try handles[index].join()
+        assert(writers[index].succeeded)
+    assert(publication_finish() >= 3)
+    print("ok concurrent atomic publication and bounded reads")
+    return 0

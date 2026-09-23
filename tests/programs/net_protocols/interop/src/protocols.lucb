@@ -1,0 +1,25 @@
+## Test-only boundary: borrowed thread-local result buffers let Luce prove that
+## returned text is copied before another call overwrites the Base storage.
+import net
+import io
+
+local var accept_output: u8[28]
+local var payload_output: u8[256]
+
+pub func accept_key(key: str) -> str!:
+    return try net.websocket_accept_key(key, accept_output)
+
+pub func content_length(wire: str) -> i64!:
+    var fields: net.HttpField[16]
+    let head = try net.http_parse_request(wire.bytes, fields)
+    return (i64)head.body_length
+
+pub func roundtrip(text: str) -> str!:
+    var wire: u8[512]
+    var sink = io.SliceWriter.over(wire)
+    var encoder = net.WebSocketEncoder.create(true)
+    try encoder.write(&sink, net.WebSocketOpcode.text, text.bytes)
+    var decoder = net.WebSocketDecoder.create(true)
+    let result = try decoder.consume(sink.written(), payload_output)
+    assert(result.message_end)
+    return (str)payload_output[..<result.written]

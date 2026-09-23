@@ -1,0 +1,88 @@
+import c
+import files
+import io
+import net
+
+pub func main(arguments: c.str[]) -> i32!:
+    let corpus = try files.read(arguments[1])
+    defer free(corpus)
+    var position: usize = 0
+    var cases: usize = 0
+    while position < corpus.length:
+        let input_length = (usize)corpus[position]
+        let version = corpus[position + 1]
+        let text_length = (usize)corpus[position + 2]
+        position += 3
+        let input = (str)corpus[position..<position + input_length]
+        position += input_length
+        let expected = (str)corpus[position..<position + text_length]
+        position += text_length
+        let parsed = net.IpAddress.parse(input)
+        if version == 0:
+            assert(parsed == none, input)
+            cases += 1
+            continue
+        let address = parsed else trap("a valid IP address was rejected")
+        let byte_count: usize = 4 if version == 4 else 16
+        let packed = corpus[position..<position + byte_count]
+        position += byte_count
+        assert(address.version() == (net.IpVersion.ipv4 if version == 4 else net.IpVersion.ipv6))
+        var bytes: u8[16]
+        assert((try address.write_octets(bytes)) == byte_count)
+        var i: usize = 0
+        while i < byte_count:
+            assert(bytes[i] == packed[i])
+            i += 1
+        assert((try net.IpAddress.from_bytes(packed)).equals(address))
+        if version == 4:
+            let number = address.ipv4_number() else trap("IPv4 number is missing")
+            assert(net.IpAddress.from_ipv4(number).equals(address))
+        else:
+            assert(address.ipv4_number() == none)
+        var output: u8[39]
+        let rendered = try address.render(output[..<text_length])
+        assert(rendered == expected, input)
+        let round_trip = net.IpAddress.parse(rendered) else trap("formatted IP address did not parse")
+        assert(round_trip.equals(address))
+        i = 0
+        while i < output.length:
+            output[i] = 85
+            i += 1
+        var rejected = false
+        discard(address.render(output[..<text_length - 1]) catch failure:
+            assert(failure.code == io.full)
+            rejected = true
+            recover "")
+        assert(rejected)
+        i = 0
+        while i < output.length:
+            assert(output[i] == 85)
+            i += 1
+        rejected = false
+        discard(address.write_octets(output[..<byte_count - 1]) catch failure:
+            assert(failure.code == io.full)
+            rejected = true
+            recover 0)
+        assert(rejected and output[0] == 85)
+        cases += 1
+    assert(cases > 5000)
+    var zero: net.IpAddress
+    var output: u8[39]
+    assert((try zero.render(output)) == "0.0.0.0")
+    let mapped = net.IpAddress.parse("::ffff:192.0.2.1") else trap("mapped IPv6 was rejected")
+    let ipv4 = net.IpAddress.parse("192.0.2.1") else trap("IPv4 was rejected")
+    assert(mapped.is_ipv4_mapped() and not ipv4.is_ipv4_mapped())
+    assert(not mapped.equals(ipv4) and mapped.ipv4_number() == none)
+    var bytes: u8[17]
+    var length: usize = 0
+    while length <= bytes.length:
+        if length != 4 and length != 16:
+            var rejected = false
+            discard(net.IpAddress.from_bytes(bytes[..<length]) catch failure:
+                assert(failure.code == net.invalid_options)
+                rejected = true
+                recover net.IpAddress())
+            assert(rejected)
+        length += 1
+    print("ok IP address reference corpus")
+    return 0

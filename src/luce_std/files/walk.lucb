@@ -1,0 +1,136 @@
+#==============================================================================================
+#
+#   walk - Recursive directory traversal
+#
+#   DESCRIPTION:
+#       Walk a directory tree, handing each entry to a visitor, guarding against symlink
+#       cycles and a maximum depth.
+#
+#==============================================================================================
+
+## A symlink cycle was found during the walk.
+pub let directory_cycle: ErrorCode = ErrorCode.package(33)
+## The walk exceeded its maximum depth.
+pub let depth_limit: ErrorCode = ErrorCode.package(34)
+
+## A borrowed traversal callback. For directories, true requests descent and
+## false prunes that subtree; the return value is ignored for other entry kinds.
+## Path is a NUL-terminated borrowed label, valid only during this callback. Copy
+## it to retain it. Error-message storage must outlive the walk, as for other
+## borrowed Base errors. Callbacks run serially in depth-first enumeration order.
+pub interface WalkVisitor:
+    mutating func visit(path: str, info: Metadata, depth: usize) -> bool!
+
+## Visit root at depth zero, then its descendants, without following directory
+## symlinks below root. Root uses ordinary OS path resolution. Labels are built
+## from the supplied root; directory renames do not redirect handle-based traversal
+## and may leave those labels unusable as OS paths. This is not a filesystem snapshot.
+## A child deeper than max_depth reports depth_limit instead of silently skipping
+## entries. Repeated ancestor identities report directory_cycle. OS/callback errors
+## stop traversal; earlier callback effects remain. All owned resources are cleaned
+## up on failure. Storage is proportional to depth plus the longest path label;
+## cycle detection compares each descended directory with its open ancestors.
+pub func walk(root: c.str, visitor: WalkVisitor, max_depth: usize = 64) -> !:
+    let owner = memory.allocator
+    let root_info = try metadata(root)
+    let descend = try visitor.visit((str)root, root_info, 0)
+    if root_info.kind != FileKind.directory or not descend:
+        return
+    var state = try WalkState.start(root, root_info, owner)
+    defer state.destroy()
+    while state.count > 0:
+        let index = state.count - 1
+        let next_name = try state.frames[index].directory.next()
+        if next_name == none:
+            try state.pop()
+            continue
+        let name = next_name else continue
+        let depth = state.count
+        if depth > max_depth:
+            error(depth_limit, "directory traversal exceeded its depth limit")
+        let info = try state.frames[index].directory.entry_metadata((c.str)name, false)
+        let parent_length = state.path.view().length
+        if parent_length > 0 and state.path.view().bytes[parent_length - 1] != '/':
+            try state.path.put("/")
+        try state.path.put(name)
+        let visit_children = try visitor.visit(state.path.view(), info, depth)
+        if info.kind != FileKind.directory or not visit_children:
+            try state.path.truncate(parent_length)
+            continue
+        if state.contains(info.device, info.inode):
+            error(directory_cycle, "directory traversal encountered an ancestor again")
+        var child = try state.frames[index].directory.open_directory((c.str)name, false)
+        errdefer child.destroy()
+        let opened = try child.metadata()
+        if opened.device != info.device or opened.inode != info.inode:
+            error(failed, "a directory changed before traversal could enter it")
+        try state.push(child, opened)
+
+struct WalkFrame:
+    var directory: Directory
+    var device: u64
+    var inode: u64
+    var path_length: usize
+
+## Frames own open directories; one builder owns the current path. No borrowed
+## frame pointer survives growth, and the allocator is independent of callback
+## changes to memory.allocator.
+struct WalkState:
+    var frames: WalkFrame[]
+    var count: usize
+    var path: strings.Builder
+    var owner: memory.Allocator
+
+    static func start(root: c.str, expected: Metadata, owner: memory.Allocator) -> WalkState!:
+        var directory = try Directory.open(root)
+        errdefer directory.destroy()
+        let info = try directory.metadata()
+        if info.device != expected.device or info.inode != expected.inode:
+            error(failed, "the traversal root changed before it could be opened")
+        with owner:
+            var path = try strings.Builder.create(64)
+            errdefer path.destroy()
+            try path.put((str)root)
+            let frames = try alloc WalkFrame[8]
+            frames[0] = WalkFrame(directory = directory, device = info.device, inode = info.inode,
+                                  path_length = path.view().length)
+            return WalkState(frames = frames, count = 1, path = path, owner = owner)
+
+    func contains(device: u64, inode: u64) -> bool:
+        for frame in self.frames[..<self.count]:
+            if frame.device == device and frame.inode == inode:
+                return true
+        return false
+
+    ## Ownership transfers only after growth succeeds. The caller closes child
+    ## on failure; after success this frame is its sole owner.
+    mutating func push(child: Directory, info: Metadata) -> !:
+        if self.count == self.frames.length:
+            let capacity = self.frames.length *? 2 else error(memory.exhausted, "the traversal stack is too large")
+            with self.owner:
+                let grown = try alloc WalkFrame[capacity]
+                memory.copy(grown, self.frames, self.count)
+                free(self.frames)
+                self.frames = grown
+        self.frames[self.count] = WalkFrame(directory = child, device = info.device, inode = info.inode,
+                                            path_length = self.path.view().length)
+        self.count += 1
+
+    mutating func pop() -> !:
+        let index = self.count - 1
+        self.frames[index].directory.close() catch failure:
+            self.count -= 1
+            error(failure.code, failure.message)
+        self.count -= 1
+        if self.count > 0:
+            try self.path.truncate(self.frames[self.count - 1].path_length)
+
+    mutating func destroy():
+        while self.count > 0:
+            self.count -= 1
+            self.frames[self.count].directory.destroy()
+        self.path.destroy()
+        if self.frames.length > 0:
+            free(self.frames) in self.owner
+            var empty: WalkFrame[]
+            self.frames = empty

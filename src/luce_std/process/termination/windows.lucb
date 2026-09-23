@@ -1,0 +1,39 @@
+#==============================================================================================
+#
+#   windows - Windows console termination
+#
+#   DESCRIPTION:
+#       Windows terminates a closing console process when its handler returns, so this callback
+#       stays alive until normal threads acknowledge cleanup, within a bound.
+#
+#==============================================================================================
+
+extern func SetConsoleCtrlHandler(handler: func(u32) -> i32, add: i32) -> i32
+extern func GetTickCount64() -> u64
+extern func Sleep(milliseconds: u32)
+let console_interrupt: u32 = 0
+let console_break: u32 = 1
+let console_close: u32 = 2
+let console_logoff: u32 = 5
+let console_shutdown: u32 = 6
+let console_acknowledgement_ms: u64 = 4000
+
+func termination_console_received(event: u32) -> i32:
+    let closing = event == console_close or event == console_logoff or event == console_shutdown
+    if not closing and event != console_interrupt and event != console_break:
+        return 0
+    if closing:
+        termination_closing.store(true, .release)
+    discard(termination_generation.add(1, .release))
+    if closing:
+        let started = GetTickCount64()
+        while termination_owners.load(.acquire) > 0 and GetTickCount64() -% started < console_acknowledgement_ms:
+            Sleep(1)
+    return 1
+
+func termination_windows_install() -> !:
+    if SetConsoleCtrlHandler(termination_console_received, 1) == 0:
+        error(failed, "the console termination handler could not be installed")
+
+func termination_windows_restore():
+    discard(SetConsoleCtrlHandler(termination_console_received, 0))

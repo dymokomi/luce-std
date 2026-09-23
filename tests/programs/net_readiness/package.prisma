@@ -1,0 +1,12 @@
+#prisma 4.0
+def package "readiness_contracts" {
+    def native "inputs" {
+        str[] sources = ["reference.c"]
+    }
+
+    def dependency "luce-std" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../../.."
+    }
+}

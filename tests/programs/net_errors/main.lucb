@@ -1,0 +1,69 @@
+import c
+import io
+import net
+
+extern func reference_count() -> i32
+extern func reference_category(index: i32) -> i32
+extern func reference_resolver_count() -> i32
+extern func reference_resolver_category(index: i32) -> i32
+extern func reference_arm(stage: i32, index: i32)
+extern func reference_consumed() -> i32
+extern func reference_closed() -> i32
+extern func socketpair(domain: i32, kind: i32, protocol: i32, pair: i32*) -> i32
+
+pub func main(arguments: c.str[]) -> i32!:
+    let categories = [net.failed, io.would_block, net.closed, net.timed_out, net.cancelled, net.connection_refused, net.network_unreachable, net.address_in_use, net.address_unavailable, net.permission_denied, net.resource_exhausted, net.connection_aborted, net.message_too_large, net.invalid_options, net.unsupported, net.failed, net.resolution_temporary, net.unknown_host]
+    var packet = try net.Datagram.bind(net.SocketAddress.loopback(0))
+    defer packet.destroy()
+    let target = try packet.address()
+    var index: i32 = 0
+    while index < reference_count():
+        let expected = categories[(usize)reference_category(index)]
+        reference_arm(1, index)
+        var rejected = false
+        packet.send_to("x".bytes, target) catch failure:
+            assert(failure.code == expected)
+            rejected = true
+        assert(rejected and reference_consumed() == 1)
+        reference_arm(2, index)
+        rejected = false
+        var unavailable = net.Datagram.bind(net.SocketAddress.loopback(0)) catch failure:
+            assert(failure.code == expected)
+            rejected = true
+            recover net.Datagram()
+        unavailable.destroy()
+        assert(rejected and reference_consumed() == 1)
+        index += 1
+    index = 0
+    while index < reference_resolver_count():
+        let expected = categories[(usize)reference_resolver_category(index)]
+        reference_arm(3, index)
+        var rejected = false
+        discard(net.resolve("failure.invalid", 1234) catch failure:
+            assert(failure.code == expected)
+            rejected = true
+            recover net.SocketAddress())
+        assert(rejected and reference_consumed() == 1)
+        reference_arm(3, index)
+        rejected = false
+        var unavailable = net.resolve_all("failure.invalid", 1234) catch failure:
+            assert(failure.code == expected)
+            rejected = true
+            recover net.ResolvedAddresses()
+        unavailable.destroy()
+        assert(rejected and reference_consumed() == 1)
+        index += 1
+    var pair: i32[2]
+    assert(socketpair(1, 1, 0, &pair[0]) == 0)
+    reference_arm(4, 0)
+    var rejected = false
+    var adopted = net.Connection.over(pair[0]) catch failure:
+        assert(failure.code == net.permission_denied)
+        rejected = true
+        recover net.Connection()
+    adopted.destroy()
+    assert(rejected and reference_consumed() == 1 and reference_closed() == 1)
+    var peer = try net.Connection.over(pair[1])
+    peer.destroy()
+    print("ok host network error categories")
+    return 0

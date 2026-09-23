@@ -1,0 +1,12 @@
+import c
+import files
+
+pub func main(arguments: c.str[]) -> i32!:
+    var published = false
+    assert(try files.copy_file(arguments[1], arguments[4], limit = 11003,
+                              synchronize = true, published = &published) == 11003)
+    assert(published)
+    assert(try files.copy_file(arguments[2], arguments[5], limit = 8) == 8)
+    assert(try files.copy_file(arguments[3], arguments[6], limit = 0) == 0)
+    print("ok bounded file and stream copies")
+    return 0

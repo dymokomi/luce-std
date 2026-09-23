@@ -1,0 +1,304 @@
+import c
+import files
+import io
+import memory
+import net
+import strings
+import utf8
+
+struct CappedWriter: io.Writer:
+    var sink: io.SliceWriter
+
+    pub mutating func write(data: const u8[]) -> usize!:
+        let size: usize = data.length if data.length < 3 else 3
+        return try self.sink.write(data[..<size])
+
+func request_rejected(text: str):
+    var fields: net.HttpField[100]
+    var rejected = false
+    discard(net.http_parse_request(text.bytes, fields) catch problem:
+        rejected = true
+        recover net.HttpHead())
+    assert(rejected)
+
+func test_http() -> !:
+    var fields: net.HttpField[100]
+    let wire = (str)(b"POST /data?q=1 HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5, 05\r\nContent-Length: 5\r\nConnection: keep-alive, close\r\nX-Raw: \xff\r\n\r\n")
+    let head = try net.http_parse_request(wire.bytes, fields)
+    assert(head.body_kind == net.HttpBodyKind.fixed and head.body_length == 5)
+    assert(not head.keep_alive and head.field_count("CONTENT-LENGTH") == 2)
+    assert((head.field("x-raw") else "").bytes[0] == 255)
+    for length in 0..<wire.length:
+        assert(net.http_head_end(wire.bytes[..<length]) == none)
+    assert(net.http_head_end(wire.bytes) == wire.length)
+    let bad: str[14] = ["GET / HTTP/1.1\r\n\r\n", "GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n", "GET / HTTP/1.1\r\nHost: a\r\n folded: x\r\n\r\n", "GET / HTTP/1.1\r\nHost : a\r\n\r\n", "GET / HTTP/1.1\r\nHost: a\r\nContent-Length: -1\r\n\r\n", "GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 1,2\r\n\r\n", "GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n", "GET / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked,chunked\r\n\r\n", "GET / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n", "GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 18446744073709551616\r\n\r\n", "GET / HTTP/1.1\r\nHost: a\r\nExpect: magic\r\n\r\n", "GET / HTTP/1.1\r\nHost: a\nX: b\r\n\r\n", "GET / HTTP/1.1\r\nHost: a\r\n\r\nx", "GET / HTTP/2.0\r\nHost: a\r\n\r\n"]
+    for text in bad:
+        request_rejected(text)
+    let bad_targets: str[7] = ["GET * HTTP/1.1\r\nHost: a\r\n\r\n", "CONNECT [::1] HTTP/1.1\r\nHost: a\r\n\r\n", "GET /bad%2 HTTP/1.1\r\nHost: a\r\n\r\n", "GET relative HTTP/1.1\r\nHost: a\r\n\r\n", "GET / HTTP/1.1\r\nHost: [xyz]\r\n\r\n", "GET / HTTP/1.1\r\nHost: bad%GG\r\n\r\n", "CONNECT host: HTTP/1.1\r\nHost: a\r\n\r\n"]
+    for text in bad_targets:
+        request_rejected(text)
+    discard(try net.http_parse_request("OPTIONS * HTTP/1.1\r\nHost: example.test\r\n\r\n".bytes, fields))
+    discard(try net.http_parse_request("CONNECT [::1]:443 HTTP/1.1\r\nHost: [::1]:443\r\n\r\n".bytes, fields))
+    discard(try net.http_parse_request("GET /caf%C3%A9 HTTP/1.1\r\nHost: [v1.future:address]\r\n\r\n".bytes, fields))
+    let response = try net.http_parse_response("HTTP/1.1 200 OK\r\nContent-Length: 9999999999\r\n\r\n".bytes, fields, "HEAD")
+    assert(response.body_kind == net.HttpBodyKind.empty)
+    let tunnel = try net.http_parse_response("HTTP/1.1 200 OK\r\nContent-Length: wrong\r\n\r\n".bytes, fields, "CONNECT")
+    assert(tunnel.body_kind == net.HttpBodyKind.tunnel)
+    let eof = try net.http_parse_response("HTTP/1.1 200 OK\r\n\r\n".bytes, fields)
+    assert(eof.body_kind == net.HttpBodyKind.until_eof and not eof.keep_alive)
+    var output: u8[4096]
+    var outgoing: net.HttpField[1] = [net.HttpField(name = "Host", value = "example.test")]
+    let encoded = try net.http_encode_head(output, net.HttpHead(method = "POST", target = "/", version = "HTTP/1.1", fields = outgoing, body_kind = net.HttpBodyKind.chunked, keep_alive = true))
+    assert((try net.http_parse_request(encoded, fields)).body_kind == net.HttpBodyKind.chunked)
+    let chunks = "3;name=\"a\\\"b\"\r\nabc\r\n2\r\nde\r\n0\r\nX-Checksum: test\r\n\r\nNEXT"
+    for fragment in 1..=chunks.length:
+        var decoder = try net.HttpBodyDecoder.create(net.HttpBodyKind.chunked, maximum = 5)
+        var body = try strings.Builder.create()
+        defer body.destroy()
+        var at: usize = 0
+        var trailers: usize = 0
+        while not decoder.finished():
+            let end = at + fragment if at + fragment < chunks.length else chunks.length
+            let step = try decoder.consume(chunks.bytes[at..<end])
+            assert(step.consumed > 0)
+            at += step.consumed
+            discard(try body.write(step.body))
+            if let trailer = step.trailer:
+                assert(net.http_equal(trailer.name, "x-checksum") and trailer.value == "test")
+                trailers += 1
+        try decoder.finish()
+        assert(body.view() == "abcde" and trailers == 1)
+        assert((str)chunks.bytes[at..] == "NEXT")
+    var fixed = try net.HttpBodyDecoder.create(net.HttpBodyKind.fixed, 2)
+    assert((try fixed.consume("abc".bytes)).consumed == 2 and fixed.finished())
+    var premature = try net.HttpBodyDecoder.create(net.HttpBodyKind.fixed, 2)
+    discard(try premature.consume("a".bytes))
+    var incomplete = false
+    premature.finish() catch problem:
+        assert(problem.code == io.unexpected_eof)
+        incomplete = true
+    assert(incomplete)
+    let malformed: str[10] = ["x\r\n", "1\r\naX", "0\r\nHost: x\r\n\r\n", "1 \r\n", "1;\r\n", "1; a=\"unterminated\r\n", "10000000000000000\r\n", "0\r\n folded: x\r\n\r\n", "6\r\n", "1\na"]
+    for text in malformed:
+        var decoder = try net.HttpBodyDecoder.create(net.HttpBodyKind.chunked, maximum = 5)
+        var at: usize = 0
+        var refused = false
+        while at < text.length and not refused:
+            let step = decoder.consume(text.bytes[at..]) catch problem:
+                refused = true
+                recover net.HttpBodyStep(consumed = text.length - at)
+            at += step.consumed
+        assert(refused)
+        assert(not decoder.finished())
+    var writer = io.SliceWriter.over(output)
+    try net.http_write_chunk(&writer, "abc".bytes)
+    try net.http_write_chunk(&writer, "".bytes)
+    try net.http_end_chunks(&writer)
+    assert((str)writer.written() == "3\r\nabc\r\n0\r\n\r\n")
+    var capped = CappedWriter(sink = io.SliceWriter.over(output))
+    var body_writer = try net.HttpBodyWriter.over(&capped, net.HttpBodyKind.fixed, 6)
+    assert((try body_writer.write("abcdef".bytes)) == 6)
+    try body_writer.finish()
+    assert((str)capped.sink.written() == "abcdef")
+    var too_short = try net.HttpBodyWriter.over(&capped, net.HttpBodyKind.fixed, 2)
+    var refused_length = false
+    too_short.finish() catch problem:
+        assert(problem.code == io.unexpected_eof)
+        refused_length = true
+    assert(refused_length)
+    print("ok HTTP heads, framing, every fragment size, limits and EOF")
+
+func test_websocket() -> !:
+    var accept: u8[28]
+    assert((try net.websocket_accept_key("dGhlIHNhbXBsZSBub25jZQ==", accept)) == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+    var request: u8[1024]
+    var response: u8[1024]
+    var fields: net.HttpField[100]
+    var response_fields: net.HttpField[100]
+    let key = "dGhlIHNhbXBsZSBub25jZQ=="
+    let outgoing = try net.websocket_encode_request(request, "example.test", "/chat", key, "chat, binary")
+    let head = try net.http_parse_request(outgoing, fields)
+    assert((try net.websocket_check_request(head)) == key)
+    let incoming = try net.websocket_encode_response(response, head, "chat")
+    let answer = try net.http_parse_response(incoming, response_fields)
+    assert((try net.websocket_check_response(answer, key, "chat, binary")) == "chat")
+    var nonce: u8[24]
+    let fresh = try net.websocket_client_key(nonce)
+    discard(try net.websocket_accept_key(fresh, accept))
+    var protocol_output: u8[1024]
+    var duplicate = false
+    discard(net.websocket_encode_request(protocol_output, "example.test", "/", key, "chat, chat") catch problem:
+        assert(problem.code == net.websocket_invalid)
+        duplicate = true
+        recover "".bytes)
+    assert(duplicate)
+    discard(try net.websocket_encode_request(protocol_output, "example.test", "/", key, "chat, Chat"))
+    var repeated = head
+    fields[head.fields.length] = net.HttpField(name = "Sec-WebSocket-Protocol", value = "chat")
+    repeated.fields = fields[..<head.fields.length + 1]
+    duplicate = false
+    discard(net.websocket_check_request(repeated) catch problem:
+        duplicate = true
+        recover "")
+    assert(duplicate)
+    # an empty list element is ignored (RFC 9110 section 5.6.1.2)
+    discard(try net.websocket_encode_request(protocol_output, "example.test", "/", key, "chat,,binary"))
+    # a control frame the peer had queued may follow its close (RFC 6455 section 5.5.1)
+    var late: u8[64]
+    var late_sink = io.SliceWriter.over(late)
+    var late_encoder = net.WebSocketEncoder.create(true)
+    try late_encoder.write(&late_sink, net.WebSocketOpcode.close, b"\x03\xe8")
+    try late_encoder.write(&late_sink, net.WebSocketOpcode.pong, "".bytes)
+    var late_decoder = net.WebSocketDecoder.create(true)
+    var late_output: u8[8]
+    var late_at: usize = 0
+    while late_at < late_sink.written().length:
+        let late_step = try late_decoder.consume(late_sink.written()[late_at..], late_output)
+        late_at += late_step.consumed
+    # RFC 6455 section 5.7's masked Hello frame is independent of our encoder.
+    let example = b"\x81\x85\x37\xfa\x21\x3d\x7f\x9f\x4d\x51\x58"
+    var example_decoder = net.WebSocketDecoder.create(true)
+    var example_output: u8[5]
+    let example_step = try example_decoder.consume(example, example_output)
+    assert(example_step.consumed == example.length and example_step.message_end and (str)example_output == "Hello")
+    var abnormal = false
+    example_decoder.finish() catch problem:
+        assert(problem.code == io.unexpected_eof)
+        abnormal = true
+    assert(abnormal)
+    var wire: u8[4096]
+    var sink = io.SliceWriter.over(wire)
+    var encoder = net.WebSocketEncoder.create(true)
+    # The euro sign's UTF-8 sequence straddles frames, with a ping between them.
+    try encoder.write(&sink, net.WebSocketOpcode.text, b"\xe2", false)
+    try encoder.write(&sink, net.WebSocketOpcode.ping, "ping".bytes)
+    try encoder.write(&sink, net.WebSocketOpcode.continuation, b"\x82\xac!")
+    try encoder.write(&sink, net.WebSocketOpcode.close, b"\x03\xe8bye")
+    for fragment in 1..=sink.written().length:
+        var decoder = net.WebSocketDecoder.create(true)
+        var output: u8[2]
+        var at: usize = 0
+        var body = try strings.Builder.create()
+        defer body.destroy()
+        var frames: usize = 0
+        var messages: usize = 0
+        while at < sink.written().length:
+            let end = at + fragment if at + fragment < sink.written().length else sink.written().length
+            let step = try decoder.consume(sink.written()[at..<end], output)
+            assert(step.consumed > 0)
+            at += step.consumed
+            if (u8)step.opcode < 8:
+                discard(try body.write(output[..<step.written]))
+            if step.frame_end:
+                frames += 1
+            if step.message_end:
+                messages += 1
+        try decoder.finish()
+        assert(body.view() == "€!" and frames == 4 and messages == 1)
+    let bad: str[10] = [(str)(b"\xc1\x00"), (str)(b"\x83\x00"), (str)(b"\x81\x80\x00\x00\x00\x00"), (str)(b"\x89\x7e\x00\x7e"), (str)(b"\x09\x00"), (str)(b"\x82\x7e\x00\x01"), (str)(b"\x82\x7f\x80\x00\x00\x00\x00\x00\x00\x00"), (str)(b"\x80\x00"), (str)(b"\x81\x01\xff"), (str)(b"\x88\x01x")]
+    for text in bad:
+        var decoder = net.WebSocketDecoder.create(false)
+        var output: u8[128]
+        var refused = false
+        discard(decoder.consume(text.bytes, output) catch problem:
+            refused = true
+            recover net.WebSocketStep())
+        assert(refused)
+        var latched = false
+        discard(decoder.consume("".bytes, output) catch problem:
+            latched = true
+            recover net.WebSocketStep())
+        assert(latched)
+    # A failed writer must not attempt a second frame on the same stream.
+    var tiny: u8[1]
+    var short_sink = io.SliceWriter.over(tiny)
+    var short_encoder = net.WebSocketEncoder.create(false)
+    var failed = false
+    short_encoder.write(&short_sink, net.WebSocketOpcode.binary, "abc".bytes) catch problem:
+        failed = true
+    assert(failed)
+    let lengths: usize[4] = [125, 126, 65535, 65536]
+    for size in lengths:
+        let payload = try alloc u8[size]
+        defer free(payload)
+        memory.set(payload, 97)
+        let encoded_storage = try alloc u8[size + 14]
+        defer free(encoded_storage)
+        var capped = CappedWriter(sink = io.SliceWriter.over(encoded_storage))
+        var boundary_encoder = net.WebSocketEncoder.create(true)
+        try boundary_encoder.write(&capped, net.WebSocketOpcode.binary, payload)
+        let encoded = capped.sink.written()
+        let frame = try net.websocket_parse_frame(encoded, true) else trap("missing complete frame")
+        assert(frame.length == (u64)size and frame.header_bytes == encoded.length - size)
+        var boundary_decoder = net.WebSocketDecoder.create(true)
+        var output: u8[127]
+        var at: usize = 0
+        var received: usize = 0
+        var ended = false
+        while at < encoded.length:
+            let step = try boundary_decoder.consume(encoded[at..], output)
+            assert(step.consumed > 0)
+            at += step.consumed
+            received += step.written
+            for byte in output[..<step.written]:
+                assert(byte == 97)
+            ended = step.message_end
+        assert(received == size and ended)
+    print("ok WebSocket handshake, masking, fragmented UTF-8, control frames and errors")
+
+## Arbitrary wire bytes must yield bounded progress or a normal error, never a
+## trap. A fixed seed makes every failing input reproducible on both backends.
+func test_mutations() -> !:
+    var seed: u64 = 81985529216486895
+    var fields: net.HttpField[16]
+    var input: u8[256]
+    var output: u8[31]
+    for iteration in 0..<10000:
+        seed = seed *% 6364136223846793005 +% 1442695040888963407
+        let size = (usize)(seed % 256)
+        for index in 0..<size:
+            seed = seed *% 6364136223846793005 +% 1442695040888963407
+            input[index] = (u8)(seed >> 32)
+        discard(net.http_parse_request(input[..<size], fields) catch problem:
+            recover net.HttpHead())
+        discard(net.http_parse_response(input[..<size], fields) catch problem:
+            recover net.HttpHead())
+        var body = try net.HttpBodyDecoder.create(net.HttpBodyKind.chunked, maximum = 1024)
+        var frames = net.WebSocketDecoder.create(iteration % 2 == 0, 1024, 1024)
+        var at: usize = 0
+        while at < size:
+            let step = body.consume(input[at..<size]) catch problem:
+                break
+            assert(step.consumed <= size - at)
+            if step.finished:
+                break
+            assert(step.consumed > 0)
+            at += step.consumed
+        at = 0
+        while at < size:
+            let step = frames.consume(input[at..<size], output) catch problem:
+                break
+            assert(step.consumed > 0 and step.consumed <= size - at and step.written <= output.length)
+            at += step.consumed
+    print("ok 10000 deterministic malformed-input cases")
+
+pub func main(arguments: c.str[]) -> i32!:
+    if arguments.length == 4 and (str)arguments[1] == "frame-file":
+        let payload = try files.read(arguments[3])
+        defer free(payload)
+        var encoder = net.WebSocketEncoder.create((str)arguments[2] == "client")
+        try encoder.write(io.stdout(), net.WebSocketOpcode.binary, payload)
+        return 0
+    if arguments.length == 4 and (str)arguments[1] == "frame":
+        var encoder = net.WebSocketEncoder.create((str)arguments[2] == "client")
+        try encoder.write(io.stdout(), net.WebSocketOpcode.binary, ((str)arguments[3]).bytes)
+        return 0
+    if arguments.length == 3 and (str)arguments[1] == "accept":
+        var output: u8[28]
+        print(try net.websocket_accept_key((str)arguments[2], output))
+        return 0
+    with memory.heap:
+        try test_http()
+        try test_websocket()
+        try test_mutations()
+    return 0

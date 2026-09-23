@@ -1,0 +1,192 @@
+## HTTP/1.1 on a byte buffer: the request line, headers, and a body sized by
+## Content-Length; responses written as one header block and one body.
+
+import io
+import net
+import strings
+
+pub let bad_request: ErrorCode = ErrorCode.package(1)
+pub let too_large: ErrorCode = ErrorCode.package(2)
+
+pub let max_headers: usize = 32
+
+pub struct Header:
+    pub var name: str
+    pub var value: str
+
+## A parsed request; every `str` views the buffer the request was read into.
+pub struct Request:
+    pub var method: str
+    pub var path: str
+    pub var version: str
+    pub var headers: Header[32]
+    pub var header_count: usize
+    pub var body: const u8[]
+    pub var keep_alive: bool
+
+    pub func header(name: str) -> str?:
+        var i: usize = 0
+        while i < self.header_count:
+            if equal_fold(self.headers[i].name, name):
+                return self.headers[i].value
+            i += 1
+        return none
+
+    pub func content_length() -> usize:
+        let text = self.header("Content-Length") else return 0
+        let n = strings.parse_i64(strings.trim(text)) else return 0
+        return (usize)n if n > 0 else 0
+
+## Case-insensitive ASCII equality, for header names.
+pub func equal_fold(a: str, b: str) -> bool:
+    if a.length != b.length:
+        return false
+    var i: usize = 0
+    while i < a.length:
+        if lower(a.bytes[i]) != lower(b.bytes[i]):
+            return false
+        i += 1
+    return true
+
+func lower(byte: u8) -> u8:
+    return byte + 32 if byte >= 'A' and byte <= 'Z' else byte
+
+## Where the header block ends: the offset just past the first blank line, if it arrived.
+pub func header_end(data: const u8[]) -> usize?:
+    var i: usize = 0
+    while i + 3 < data.length:
+        if data[i] == '\r' and data[i + 1] == '\n' and data[i + 2] == '\r' and data[i + 3] == '\n':
+            return i + 4
+        i += 1
+    return none
+
+## Parse the request whose header block ends at `end`; the body is whatever follows.
+pub func parse(data: const u8[], end: usize) -> Request!:
+    let head = str(data[..<end]) catch:
+        error(bad_request, "the request is not text")
+    var empty: Header[32]
+    var request = Request(method = "", path = "", version = "", headers = empty, header_count = 0, body = data[end..], keep_alive = false)
+    var line_start: usize = 0
+    var line_index: usize = 0
+    while line_start < head.length:
+        let rest = (str)head.bytes[line_start..]
+        let newline = strings.find(rest, "\r\n") else break
+        let line = (str)rest.bytes[..<newline]
+        line_start += newline + 2
+        if line.length == 0:
+            break
+        if line_index == 0:
+            try parse_request_line(&request, line)
+        else:
+            if request.header_count >= max_headers:
+                error(too_large, "too many headers")
+            let colon = strings.find(line, ":") else error(bad_request, "a header needs a colon")
+            let name = (str)line.bytes[..<colon]
+            let value = strings.trim((str)line.bytes[colon + 1..])
+            request.headers[request.header_count] = Header(name = name, value = value)
+            request.header_count += 1
+        line_index += 1
+    if request.method.length == 0:
+        error(bad_request, "no request line")
+    request.keep_alive = request.version == "HTTP/1.1"
+    if let connection = request.header("Connection"):
+        if equal_fold(strings.trim(connection), "close"):
+            request.keep_alive = false
+        elif equal_fold(strings.trim(connection), "keep-alive"):
+            request.keep_alive = true
+    return request
+
+func parse_request_line(request: Request*, line: str) -> !:
+    let first = strings.find(line, " ") else error(bad_request, "the request line needs a method")
+    request.method = (str)line.bytes[..<first]
+    let rest = (str)line.bytes[first + 1..]
+    let second = strings.find(rest, " ") else error(bad_request, "the request line needs a version")
+    request.path = (str)rest.bytes[..<second]
+    request.version = (str)rest.bytes[second + 1..]
+    if request.path.length == 0 or request.path.bytes[0] != '/':
+        error(bad_request, "the path must start with `/`")
+
+## The reason phrase of a status code.
+pub func reason(status: u32) -> str:
+    match status:
+        200: return "OK"
+        201: return "Created"
+        204: return "No Content"
+        400: return "Bad Request"
+        403: return "Forbidden"
+        404: return "Not Found"
+        405: return "Method Not Allowed"
+        413: return "Payload Too Large"
+        500: return "Internal Server Error"
+        _: return "Unknown"
+
+## The content type a file extension implies.
+pub func content_type(path: str) -> str:
+    if strings.ends_with(path, ".html"):
+        return "text/html; charset=utf-8"
+    if strings.ends_with(path, ".css"):
+        return "text/css"
+    if strings.ends_with(path, ".js"):
+        return "text/javascript"
+    if strings.ends_with(path, ".json"):
+        return "application/json"
+    if strings.ends_with(path, ".png"):
+        return "image/png"
+    if strings.ends_with(path, ".txt") or strings.ends_with(path, ".lucb") or strings.ends_with(path, ".md"):
+        return "text/plain; charset=utf-8"
+    return "application/octet-stream"
+
+## Write one response: status line, the headers every response carries, then the body.
+pub func respond(connection: net.Connection*, status: u32, kind: str, body: const u8[], keep_alive: bool) -> !:
+    var head: u8[512]
+    let connection_header = "keep-alive" if keep_alive else "close"
+    let text = try format(head, f"HTTP/1.1 {status} {reason(status)}\r\nContent-Type: {kind}\r\nContent-Length: {body.length}\r\nConnection: {connection_header}\r\nServer: luce-base\r\n\r\n")
+    try write_all(connection, text.bytes)
+    if body.length > 0:
+        try write_all(connection, body)
+
+## `write` may send part of a buffer; keep going until it has all gone.
+pub func write_all(connection: net.Connection*, data: const u8[]) -> !:
+    try io.write_all(connection, data)
+
+func empty_request(body: const u8[]) -> Request:
+    var empty: Header[32]
+    return Request(method = "", path = "", version = "", headers = empty, header_count = 0, body = body, keep_alive = false)
+
+func or_zero(offset: usize?) -> usize:
+    let n = offset else return 0
+    return n
+
+test "a request parses into its parts":
+    let text = "POST /echo?x=1 HTTP/1.1\r\nHost: localhost\r\ncontent-length: 5\r\nConnection: close\r\n\r\nhello"
+    let end = or_zero(header_end(text.bytes))
+    assert(end == 82)
+    let request = try parse(text.bytes, end)
+    assert(request.method == "POST")
+    assert(request.path == "/echo?x=1")
+    assert(request.version == "HTTP/1.1")
+    assert(request.header_count == 3)
+    assert(request.content_length() == 5)
+    assert(not request.keep_alive)
+    let host = request.header("HOST") else return
+    assert(host == "localhost")
+    assert(request.header("host") != none)
+    assert(request.header("nothing") == none)
+    assert((str)request.body == "hello")
+
+test "a request without a version is rejected":
+    let text = "GET /\r\n\r\n"
+    let end = or_zero(header_end(text.bytes))
+    assert(end == 9)
+    var rejected = false
+    let parsed = parse(text.bytes, end) catch failure:
+        rejected = failure.code == bad_request
+        recover empty_request(text.bytes[..<0])
+    discard(parsed.method.length)
+    assert(rejected, "the request should have been rejected")
+
+test "content types follow the extension":
+    assert(content_type("/index.html") == "text/html; charset=utf-8")
+    assert(content_type("/a/b.png") == "image/png")
+    assert(content_type("/blob") == "application/octet-stream")
+    assert(reason(404) == "Not Found")

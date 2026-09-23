@@ -1,0 +1,70 @@
+import c
+import files
+import io
+import os
+import strings
+
+pub func main(arguments: c.str[]) -> i32!:
+    try os.change_dir(arguments[1])
+    var file = try files.File.open("data", files.OpenMode.create_new_read_write)
+    defer file.destroy()
+    assert(try file.seek(5368709120) == 5368709120)
+    assert(try file.seek(0) == 0)
+    try io.write_all(&file, "abcdef".bytes)
+    try file.truncate(3)
+    try file.sync()
+    assert((try file.metadata()).size == 3)
+    try file.set_times(files.FileTime(-12345, 123456700), files.FileTime(1234567890, 765432100))
+    let info = try file.metadata()
+    assert(info.accessed.seconds == -12345 and info.accessed.nanoseconds == 123456700)
+    assert(info.modified.seconds == 1234567890 and info.modified.nanoseconds == 765432100)
+    try file.set_permissions(292)
+    assert((try file.metadata()).permissions == 292)
+    try file.set_permissions(438)
+    assert((try file.metadata()).permissions == 438)
+    try files.rename("data", "renamed")
+    assert((try file.metadata()).inode == (try files.metadata("renamed")).inode)
+    try files.create_hard_link("renamed", "hard")
+    assert((try files.metadata("hard")).links == 2)
+    try files.remove_file("renamed")
+    assert(try file.seek(0) == 0)
+    var content: u8[3]
+    try io.read_exact(&file, content)
+    assert((str)content == "abc")
+    var directory = try files.Directory.open(".")
+    defer directory.destroy()
+    var relative = try directory.open_file("hard")
+    defer relative.destroy()
+    assert((try relative.metadata()).inode == info.inode)
+    var temporary = try files.TemporaryFile.create(".")
+    defer temporary.destroy()
+    try io.write_all(&temporary, "published".bytes)
+    try temporary.publish("published")
+    let published = try files.read("published")
+    defer free(published)
+    assert((str)published == "published")
+    var link_available = true
+    files.create_symlink("hard", "symbolic") catch failure:
+        assert(failure.code == files.permission_denied)
+        link_available = false
+    if link_available:
+        let target = try files.read_symlink("symbolic")
+        defer strings.release(target)
+        assert(target == "hard")
+        assert((try files.metadata("symbolic", false)).kind == files.FileKind.symlink)
+        var refused = false
+        discard(directory.open_file("symbolic", follow_symlinks = false) catch failure:
+            assert(failure.code == files.symlink_loop)
+            refused = true
+            recover files.File())
+        assert(refused)
+        try files.remove_file("symbolic")
+        print("ok symbolic links and no-follow")
+    else:
+        print("symbolic links unavailable: Windows denied creation")
+    try relative.close()
+    try file.close()
+    try files.remove_file("hard")
+    try files.remove_file("published")
+    print("ok seek, truncate, times, attributes, open rename, hard links, relative files, publication")
+    return 0

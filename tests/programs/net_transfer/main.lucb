@@ -1,0 +1,74 @@
+import c
+import io
+import net
+import memory
+import thread
+
+extern func transfer_start(version: i32) -> u16
+extern func transfer_finish()
+
+struct Client:
+    var address: net.SocketAddress
+    var identity: u8
+    var succeeded: bool
+
+func transfer(client: Client*) -> !:
+    let deadline = try net.Deadline.after(45000000000)
+    var connection = try net.Connection.connect(client.address, deadline, nonblocking = true)
+    defer connection.destroy()
+    try connection.set_no_delay(true)
+    try connection.set_send_buffer(4096)
+    try connection.set_receive_buffer(4096)
+    var bounded = try net.DeadlineStream.over(&connection, deadline)
+    var write_storage: u8[509]
+    var read_storage: u8[701]
+    var writer = try io.BufferedWriter.over(&bounded, write_storage)
+    var reader = try io.BufferedReader.over(&bounded, read_storage)
+    var header: u8[1]
+    header[0] = client.identity
+    try io.write_all(&writer, header)
+    var output: u8[3079]
+    var input: u8[3079]
+    var offset: usize = 0
+    while offset < 2097152:
+        let wanted = 3079 - (offset // 3079) % 511
+        let length = wanted if wanted < 2097152 - offset else 2097152 - offset
+        for index in 0..<length:
+            let position = offset + index
+            output[index] = (u8)((position * 17 + (position >> 8) + (usize)client.identity * 31) & 255)
+        try io.write_all(&writer, output[..<length])
+        try writer.flush()
+        try io.read_exact(&reader, input[..<length])
+        for index in 0..<length:
+            assert(input[index] == (output[index] ^ 165))
+        offset += length
+    try connection.shutdown(net.ShutdownDirection.write)
+    assert(try reader.read(input[..<1]) == 0)
+    client.succeeded = true
+
+func worker(context: void*?):
+    let pointer = context else trap("missing transfer context")
+    let client = (Client*)pointer
+    # Each worker has independent empty allocator storage. All transport and
+    # buffering work must succeed without acquiring a payload allocation.
+    var empty: u8[]
+    var refusing = memory.FixedBuffer.over(empty)
+    with refusing:
+        transfer(client) catch failure:
+            print(f"transfer client {client.identity}: {failure.message}")
+
+pub func main(arguments: c.str[]) -> i32!:
+    for version in [4, 6]:
+        let port = transfer_start((i32)version)
+        var clients: Client[4]
+        var handles: thread.Handle[4]
+        for index in 0..<clients.length:
+            clients[index].identity = (u8)index
+            clients[index].address = net.SocketAddress.loopback(port, net.IpVersion.ipv4 if version == 4 else net.IpVersion.ipv6)
+            handles[index] = try thread.spawn(worker, &clients[index], name = "transfer")
+        for index in 0..<handles.length:
+            try handles[index].join()
+            assert(clients[index].succeeded)
+        transfer_finish()
+    print("ok concurrent IPv4/IPv6 buffered transfers")
+    return 0

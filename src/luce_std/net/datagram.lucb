@@ -1,0 +1,145 @@
+#==============================================================================================
+#
+#   datagram - A UDP socket
+#
+#   DESCRIPTION:
+#       An owned UDP socket: bind, send to and receive from addresses, socket options and
+#       readiness waiting.
+#
+#==============================================================================================
+
+## One owned UDP socket. Zero is closed. Copying does not duplicate ownership;
+## copies must not be independently closed. Synchronize calls on one owner.
+pub struct Datagram:
+    var socket: SocketHandle
+    var version: IpVersion
+
+    ## IPv6 sockets are IPv6-only by default. Set ipv6_only=false to permit
+    ## mapped IPv4 packets; it has no effect when binding an IPv4 address.
+    pub static func bind(address: SocketAddress, ipv6_only: bool = true) -> Datagram!:
+        var raw: NativeAddress
+        let length = try address.write_native(&raw)
+        var owned = try SocketHandle.create(datagram, address.ip.kind)
+        errdefer owned.destroy()
+        let fd = try owned.require()
+        if address.ip.kind == IpVersion.ipv6:
+            try set_socket_integer(fd, ipv6_level, ipv6_only_option, 1 if ipv6_only else 0)
+        if bind(fd, &raw, length) != 0:
+            error(socket_error(socket_errno()), "the datagram socket could not bind its address")
+        return Datagram(socket = owned, version = address.ip.kind)
+
+    ## Query the bound endpoint, including an automatically assigned port.
+    pub func address() -> SocketAddress!:
+        return try socket_address(try self.socket.require())
+
+    ## Send one complete IP datagram, including an empty packet. A successful
+    ## send confirms local acceptance, not peer delivery. IPv4 permits up to 65507
+    ## payload bytes, IPv6 up to 65527; host/path limits may be smaller. IPv6
+    ## jumbograms are not supported. The destination must match the socket version.
+    pub func send_to(data: const u8[], address: SocketAddress) -> !:
+        let descriptor = try self.socket.require()
+        if address.ip.kind != self.version:
+            error(invalid_options, "the datagram destination has a different IP version")
+        let maximum: usize = 65507 if self.version == IpVersion.ipv4 else 65527
+        if data.length > maximum:
+            error(message_too_large, "the UDP payload exceeds the IP version's maximum")
+        var raw: NativeAddress
+        let length = try address.write_native(&raw)
+        var n = sendto(descriptor, data.data, data.length, 0, &raw, length)
+        while n < 0 and socket_errno() == socket_interrupted:
+            n = sendto(descriptor, data.data, data.length, 0, &raw, length)
+        if n < 0:
+            error(socket_error(socket_errno()), "the datagram could not be sent")
+        if (usize)n != data.length:
+            error(failed, "the datagram send did not confirm the complete packet")
+
+    ## Consume one packet. Zero means a valid empty datagram, not stream EOF.
+    ## If storage is too small, consume/discard the packet and report
+    ## message_too_large; a copied prefix may remain in the buffer. The next call
+    ## receives the next packet. Empty storage can receive only an empty packet.
+    pub func receive_from(buffer: u8[]) -> (usize, SocketAddress)!:
+        let descriptor = try self.socket.require()
+        if platform.windows:
+            return try windows_receive(descriptor, buffer)
+        var raw: NativeAddress
+        # macOS can return immediately without consuming a packet when receive
+        # capacity is zero. Probe into one scratch byte so even empty storage
+        # consumes exactly one packet and obtains its sender address.
+        var scratch: u8[1]
+        var vector = ReceiveVector(data = buffer.data, length = buffer.length)
+        if buffer.length == 0:
+            vector = ReceiveVector(data = &scratch[0], length = 1)
+        while true:
+            var received: isize = 0
+            var address_length: u32 = 0
+            var flags: i32 = 0
+            if platform.macos:
+                var message = MacMessage(address = &raw, address_length = 28, vectors = &vector, vector_count = 1)
+                received = receive_message_macos(descriptor, &message, 0)
+                address_length = message.address_length
+                flags = message.flags
+            else:
+                var message = LinuxMessage(address = &raw, address_length = 28, vectors = &vector, vector_count = 1)
+                received = receive_message_linux(descriptor, &message, 0)
+                address_length = message.address_length
+                flags = message.flags
+            if received < 0:
+                let number = socket_errno()
+                if number == socket_interrupted:
+                    continue
+                error(socket_error(number), "the datagram could not be received")
+            let truncated: i32 = 16 if platform.macos else 32
+            if (flags & truncated) != 0 or (usize)received > buffer.length:
+                error(message_too_large, "the receive buffer was too small for the datagram")
+            if address_length > 28:
+                error(failed, "the datagram sender address exceeds the supported storage")
+            return ((usize)received, try decode_address(&raw, address_length))
+
+    ## Wait for advisory readiness without allocating. Expiration reports timed_out;
+    ## cancellation reports cancelled. Use nonblocking I/O after readiness because
+    ## another user can consume it. The socket remains borrowed and open.
+    pub func wait(interest: WaitInterest = WaitInterest.read, deadline: Deadline = Deadline(), cancellation: sync.Cancellation*? = none) -> Readiness!:
+        return try wait_socket(try self.socket.require(), interest, deadline, cancellation)
+
+    ## Change O_NONBLOCK without changing other status flags. Descriptor aliases
+    ## share this setting; synchronize changes with all users of this socket.
+    pub mutating func set_nonblocking(enabled: bool) -> !:
+        try set_nonblocking(try self.socket.require(), enabled)
+        self.socket.nonblocking = enabled
+
+    ## Whether the socket is in nonblocking mode.
+    pub func is_nonblocking() -> bool!:
+        if platform.windows:
+            discard(try self.socket.require())
+            return self.socket.nonblocking
+        return (try socket_status_flags(try self.socket.require()) & nonblocking_flag) != 0
+
+    ## Request kernel buffering in bytes, not a guaranteed transfer size. The OS
+    ## may cap or round the request; receive_buffer returns its reported setting.
+    pub mutating func set_receive_buffer(bytes: i32) -> !:
+        try set_socket_buffer(try self.socket.require(), receive_buffer_option, bytes)
+
+    ## The receive buffer size in bytes.
+    pub func receive_buffer() -> i32!:
+        return try get_socket_integer(try self.socket.require(), socket_level, receive_buffer_option)
+
+    ## Request kernel buffering in bytes. Linux reports a doubled bookkeeping
+    ## size; both hosts may adjust the request. This does not change user buffers.
+    pub mutating func set_send_buffer(bytes: i32) -> !:
+        try set_socket_buffer(try self.socket.require(), send_buffer_option, bytes)
+
+    ## The send buffer size in bytes.
+    pub func send_buffer() -> i32!:
+        return try get_socket_integer(try self.socket.require(), socket_level, send_buffer_option)
+
+    ## Borrow the descriptor; the caller must not close it or retain it past this owner.
+    pub func descriptor() -> platform.SocketDescriptor?:
+        return self.socket.value
+
+    ## Consume ownership before the OS call. Repeated close is safe even after failure.
+    pub mutating func close() -> !:
+        try self.socket.close()
+
+    ## Best-effort cleanup for unwinding; use close to observe delayed errors.
+    pub mutating func destroy():
+        self.socket.destroy()

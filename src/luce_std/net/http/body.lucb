@@ -1,0 +1,222 @@
+#==============================================================================================
+#
+#   body - HTTP message body decoding
+#
+#   DESCRIPTION:
+#       Decode an HTTP/1.1 message body (fixed length or chunked) one step at a time; storage
+#       is caller-owned and borrowed.
+#
+#==============================================================================================
+
+# mark: Body decoding =========================================================================
+
+## One decoding step. body borrows the supplied input. A trailer borrows the
+## decoder's line buffer until its next consume call; copy it before continuing.
+## consumed stops before the next message. Call again with the unconsumed suffix.
+pub struct HttpBodyStep:
+    ## Bytes consumed from the input this step.
+    pub var consumed: usize
+    ## The decoded body bytes for this step (borrowed).
+    pub var body: const u8[]
+    ## A trailer field, when one was decoded.
+    pub var trailer: HttpField?
+    ## Whether the body is complete.
+    pub var finished: bool
+
+## Incremental fixed, chunked or EOF-delimited body framing, independent of I/O.
+## No payload accumulation: only a bounded line buffer is retained. Failures latch;
+## discard/recreate after failure. Zero initialization describes an empty body.
+pub struct HttpBodyDecoder:
+    var kind: HttpBodyKind
+    var remaining: u64
+    var total: u64
+    var maximum: u64
+    var phase: u8 = 6
+    var line: u8[8192]
+    var used: usize
+    var line_cr: bool
+    var chunks: usize
+    var trailer_bytes: usize
+    var trailer_fields: usize
+    var failed: bool
+    var failure: ErrorCode
+
+    ## A decoder for a body of `kind`.
+    pub static func create(kind: HttpBodyKind, length: u64 = 0, maximum: u64 = 1073741824) -> HttpBodyDecoder!:
+        if kind == HttpBodyKind.tunnel:
+            error(http_unsupported, "a tunnel has no HTTP body decoder")
+        if kind == HttpBodyKind.fixed and length > maximum:
+            error(http_limit, "HTTP body exceeds its byte limit")
+        var result = HttpBodyDecoder(kind = kind, remaining = length, maximum = maximum)
+        if kind == HttpBodyKind.chunked:
+            result.phase = 1
+        elif kind == HttpBodyKind.until_eof or (kind == HttpBodyKind.fixed and length > 0):
+            result.phase = 0
+        return result
+
+    ## Whether the body is fully decoded.
+    pub func finished() -> bool:
+        return not self.failed and self.phase == 6
+
+    ## Decode one step from `data`.
+    pub mutating func consume(data: const u8[]) -> HttpBodyStep!:
+        if self.failed:
+            error(self.failure, "HTTP body decoder has failed")
+        return self.advance(data) catch problem:
+            self.failed = true
+            self.failure = problem.code
+            error(problem.code, problem.message)
+
+    ## Assert the body ended cleanly.
+    pub mutating func finish() -> !:
+        if self.failed:
+            error(self.failure, "HTTP body decoder has failed")
+        if self.kind == HttpBodyKind.until_eof:
+            self.phase = 6
+        if self.phase != 6:
+            self.failed = true
+            self.failure = io.unexpected_eof
+            error(io.unexpected_eof, "HTTP body ended before its framing completed")
+
+    mutating func advance(data: const u8[]) -> HttpBodyStep!:
+        var at: usize = 0
+        while at < data.length and self.phase != 6:
+            if self.phase == 0 or self.phase == 2:
+                var count = data.length - at
+                if self.kind != HttpBodyKind.until_eof and (u64)count > self.remaining:
+                    count = (usize)self.remaining
+                if (u64)count > self.maximum - self.total:
+                    error(http_limit, "HTTP body exceeds its byte limit")
+                self.total += (u64)count
+                if self.kind != HttpBodyKind.until_eof:
+                    self.remaining -= (u64)count
+                    if self.remaining == 0:
+                        self.phase = 3 if self.kind == HttpBodyKind.chunked else 6
+                return HttpBodyStep(consumed = at + count, body = data[at..<at + count], finished = self.phase == 6)
+            let byte = data[at]
+            at += 1
+            if self.phase == 3 or self.phase == 4:
+                let expected: u8 = '\r' if self.phase == 3 else '\n'
+                if byte != expected:
+                    error(http_invalid, "chunk data must end with CRLF")
+                self.phase = 4 if self.phase == 3 else 1
+                continue
+            if self.phase == 5:
+                self.trailer_bytes += 1
+                if self.trailer_bytes > 32768:
+                    error(http_limit, "HTTP trailers exceed their byte limit")
+            if self.line_cr:
+                if byte != '\n':
+                    error(http_invalid, "chunk lines require CRLF")
+                self.line_cr = false
+                let text = (str)self.line[..<self.used]
+                self.used = 0
+                if self.phase == 1:
+                    self.remaining = try http_chunk_size(text)
+                    self.chunks += 1
+                    if self.chunks > 1000000 or self.remaining > self.maximum - self.total:
+                        error(http_limit, "HTTP chunks exceed their count or byte limit")
+                    self.phase = 5 if self.remaining == 0 else 2
+                elif text.length == 0:
+                    self.phase = 6
+                else:
+                    self.trailer_fields += 1
+                    if self.trailer_fields > 100:
+                        error(http_limit, "too many HTTP trailer fields")
+                    let colon = strings.find(text, ":") else error(http_invalid, "trailer needs a colon")
+                    let item = HttpField(name = (str)text.bytes[..<colon], value = http_ows((str)text.bytes[colon + 1..]))
+                    if not http_field_valid(item) or http_forbidden_trailer(item.name):
+                        error(http_invalid, "invalid or forbidden HTTP trailer")
+                    return HttpBodyStep(consumed = at, trailer = item)
+            elif byte == '\r':
+                self.line_cr = true
+            else:
+                if byte == '\n':
+                    error(http_invalid, "chunk lines require CRLF")
+                if self.used == self.line.length:
+                    error(http_limit, "chunk line exceeds its byte limit")
+                self.line[self.used] = byte
+                self.used += 1
+        return HttpBodyStep(consumed = at, finished = self.phase == 6)
+
+func http_hex(byte: u8) -> u8?:
+    if byte >= '0' and byte <= '9':
+        return byte - '0'
+    if byte >= 'a' and byte <= 'f':
+        return byte - 'a' + 10
+    if byte >= 'A' and byte <= 'F':
+        return byte - 'A' + 10
+    return none
+
+func http_chunk_size(text: str) -> u64!:
+    var at: usize = 0
+    var size: u64 = 0
+    while at < text.length:
+        let digit = http_hex(text.bytes[at]) else break
+        if size > (18446744073709551615 - (u64)digit) // 16:
+            error(http_limit, "HTTP chunk length overflows u64")
+        size = size * 16 + (u64)digit
+        at += 1
+    if at == 0:
+        error(http_invalid, "chunk size needs hexadecimal digits")
+    while at < text.length:
+        try http_chunk_extension(text, &at)
+    return size
+
+func http_skip_ows(text: str, at: usize*):
+    while *at < text.length and (text.bytes[*at] == ' ' or text.bytes[*at] == '\t'):
+        *at += 1
+
+func http_chunk_extension(text: str, at: usize*) -> !:
+    http_skip_ows(text, at)
+    if *at == text.length or text.bytes[*at] != ';':
+        error(http_invalid, "invalid chunk extension separator")
+    *at += 1
+    http_skip_ows(text, at)
+    let first = *at
+    while *at < text.length and http_token((str)text.bytes[*at..<*at + 1]):
+        *at += 1
+    if *at == first:
+        error(http_invalid, "chunk extension needs a name")
+    let after_name = *at
+    http_skip_ows(text, at)
+    if *at == text.length:
+        if *at != after_name:
+            error(http_invalid, "trailing whitespace in chunk extension")
+        return
+    if text.bytes[*at] == ';':
+        return
+    if text.bytes[*at] != '=':
+        error(http_invalid, "invalid chunk extension")
+    *at += 1
+    http_skip_ows(text, at)
+    if *at == text.length:
+        error(http_invalid, "chunk extension needs a value")
+    if text.bytes[*at] != '"':
+        let value_start = *at
+        while *at < text.length and http_token((str)text.bytes[*at..<*at + 1]):
+            *at += 1
+        if *at == value_start:
+            error(http_invalid, "invalid chunk extension value")
+        return
+    *at += 1
+    while *at < text.length:
+        var byte = text.bytes[*at]
+        *at += 1
+        if byte == '"':
+            return
+        if byte == '\\':
+            if *at == text.length:
+                error(http_invalid, "incomplete chunk quoted pair")
+            byte = text.bytes[*at]
+            *at += 1
+        if (byte < 32 and byte != '\t') or byte == 127:
+            error(http_invalid, "invalid chunk quoted text")
+    error(http_invalid, "unclosed chunk extension value")
+
+func http_forbidden_trailer(name: str) -> bool:
+    let forbidden: str[11] = ["content-length", "transfer-encoding", "host", "connection", "trailer", "upgrade", "expect", "authorization", "content-type", "content-encoding", "content-range"]
+    for field in forbidden:
+        if http_equal(name, field):
+            return true
+    return false

@@ -1,0 +1,49 @@
+## A measuring allocator for the robustness programs: every block through it is counted, so a
+## program can print what it held at its peak and what it left live. `limit` makes it fail
+## past a budget, the way a fixed budget does in the field.
+import memory
+
+pub struct Counting: memory.Allocator:
+    pub var live: usize
+    pub var bytes: usize
+    pub var peak_bytes: usize
+    pub var peak_live: usize
+    pub var allocations: usize
+    pub var frees: usize
+    pub var failures: usize
+    pub var limit: usize
+
+    pub static func unlimited() -> Counting:
+        return Counting(live = 0, bytes = 0, peak_bytes = 0, peak_live = 0, allocations = 0, frees = 0, failures = 0, limit = 0)
+
+    pub static func within(limit: usize) -> Counting:
+        var c = Counting.unlimited()
+        c.limit = limit
+        return c
+
+    pub mutating func allocate(size: usize, alignment: usize) -> u8[]?:
+        if self.limit > 0 and self.bytes + size > self.limit:
+            self.failures += 1
+            return none
+        let block = memory.heap.allocate(size, alignment) else return none
+        self.live += 1
+        self.bytes += size
+        self.allocations += 1
+        if self.bytes > self.peak_bytes:
+            self.peak_bytes = self.bytes
+        if self.live > self.peak_live:
+            self.peak_live = self.live
+        return block
+
+    pub mutating func resize(block: u8[], size: usize) -> bool:
+        return false
+
+    pub mutating func release(block: u8[]):
+        self.live -= 1
+        self.bytes -= block.length
+        self.frees += 1
+        memory.heap.release(block)
+
+    ## One line: what was allocated and freed, and what is still live.
+    pub func report(name: str):
+        print(f"{name}: allocations={self.allocations} frees={self.frees} live={self.live} bytes={self.bytes} peak_live={self.peak_live} peak_bytes={self.peak_bytes} failures={self.failures}")

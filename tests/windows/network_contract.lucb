@@ -1,0 +1,115 @@
+import sync
+import io
+import net
+
+func tcp(version: net.IpVersion, dual: bool) -> !:
+    let binding = net.SocketAddress.any(0, version) if dual else net.SocketAddress.loopback(0, version)
+    var listener = try net.Listener.bind(binding, ipv6_only = not dual)
+    defer listener.destroy()
+    let bound = try listener.address()
+    let destination = net.SocketAddress.loopback(bound.port, net.IpVersion.ipv4 if dual else version)
+    var client = try net.Connection.connect(destination)
+    defer client.destroy()
+    var server = try listener.accept()
+    defer server.destroy()
+    let remote = try server.peer_address()
+    assert(remote.ip.is_ipv4_mapped() == dual)
+    try io.write_all(&client, "ping".bytes)
+    var data: u8[4]
+    try io.read_exact(&server, data)
+    assert((str)data == "ping")
+    try io.write_all(&server, "pong".bytes)
+    try io.read_exact(&client, data)
+    assert((str)data == "pong")
+    try client.shutdown()
+    assert((try server.read(data)) == 0)
+
+func udp(version: net.IpVersion, dual: bool) -> !:
+    let binding = net.SocketAddress.any(0, version) if dual else net.SocketAddress.loopback(0, version)
+    var server = try net.Datagram.bind(binding, ipv6_only = not dual)
+    defer server.destroy()
+    let bound = try server.address()
+    let client_version = net.IpVersion.ipv4 if dual else version
+    var client = try net.Datagram.bind(net.SocketAddress.loopback(0, client_version))
+    defer client.destroy()
+    let destination = net.SocketAddress.loopback(bound.port, client_version)
+    try client.send_to("ping".bytes, destination)
+    var data: u8[4]
+    let (count, remote) = try server.receive_from(data)
+    assert(count == 4 and (str)data == "ping")
+    assert(remote.ip.is_ipv4_mapped() == dual)
+    try server.send_to("pong".bytes, remote)
+    let (reply, sender) = try client.receive_from(data)
+    assert(reply == 4 and (str)data == "pong" and sender.port == bound.port)
+    try client.send_to("".bytes, destination)
+    let (empty, empty_sender) = try server.receive_from(data[..<0])
+    assert(empty == 0 and empty_sender.equals(remote))
+    try client.send_to("too long".bytes, destination)
+    var truncated = false
+    discard(server.receive_from(data) catch failure:
+        assert(failure.code == net.message_too_large)
+        truncated = true
+        recover (0, net.SocketAddress()))
+    assert(truncated)
+    try client.send_to("next".bytes, destination)
+    let (next, next_sender) = try server.receive_from(data)
+    assert(next == 4 and (str)data == "next" and next_sender.equals(remote))
+
+func deadline_contract() -> !:
+    var listener = try net.Listener.bind(net.SocketAddress.loopback(0))
+    defer listener.destroy()
+    try listener.set_nonblocking(true)
+    var expired = false
+    discard(listener.wait(deadline = try net.Deadline.after(10000000)) catch failure:
+        assert(failure.code == net.timed_out)
+        expired = true
+        recover net.Readiness())
+    assert(expired)
+    var client = try net.Connection.connect(try listener.address(), deadline = try net.Deadline.after(1000000000), nonblocking = true)
+    defer client.destroy()
+    discard(try listener.wait(deadline = try net.Deadline.after(1000000000)))
+    var peer = try listener.accept(nonblocking = true)
+    defer peer.destroy()
+    assert(try peer.is_nonblocking())
+    try peer.set_keepalive(true)
+    assert(try peer.keepalive())
+    try peer.set_no_delay(true)
+    assert(try peer.no_delay())
+    try peer.set_receive_buffer(8192)
+    assert(try peer.receive_buffer() >= 8192)
+    var reader = try net.DeadlineStream.over(&peer, try net.Deadline.after(10000000))
+    var data: u8[4]
+    expired = false
+    discard(reader.read(data) catch failure:
+        assert(failure.code == net.timed_out)
+        expired = true
+        recover 0)
+    assert(expired)
+    var cancellation: sync.Cancellation
+    cancellation.request()
+    var cancelled = false
+    discard(peer.wait(cancellation = &cancellation) catch failure:
+        assert(failure.code == net.cancelled)
+        cancelled = true
+        recover net.Readiness())
+    assert(cancelled)
+    try io.write_all(&client, "ping".bytes)
+    var fresh = try net.DeadlineStream.over(&peer, try net.Deadline.after(1000000000))
+    try io.read_exact(&fresh, data)
+    assert((str)data == "ping")
+    var addresses = try net.resolve_all("localhost", 12345)
+    defer addresses.destroy()
+    assert(addresses.view().length > 0)
+    for address in addresses.view(): assert(address.port == 12345)
+    assert((try net.resolve("127.0.0.1", 80)).port == 80)
+
+pub func main(arguments: str[]) -> i32!:
+    try tcp(net.IpVersion.ipv4, false)
+    try tcp(net.IpVersion.ipv6, false)
+    try tcp(net.IpVersion.ipv6, true)
+    try udp(net.IpVersion.ipv4, false)
+    try udp(net.IpVersion.ipv6, false)
+    try udp(net.IpVersion.ipv6, true)
+    try deadline_contract()
+    print("ok IPv4, IPv6, dual stack, TCP, UDP truncation, deadlines, cancellation, socket options, resolver")
+    return 0

@@ -1,0 +1,47 @@
+## The `net` module's address value against its archive: `IpAddress.parse` and `format`
+## round-trip IPv4 and IPv6 without DNS or a socket, `from_ipv4` agrees with the parser,
+## `equals` compares by value, and malformed text is rejected. `format` writes into the
+## caller's buffer and returns a view of it, so the buffer is passed in and outlives the
+## comparison; parsing and formatting touch no allocator, so these tests need none.
+import net
+
+func round_trip(text: str, buffer: u8[]) -> str:
+    let address = net.IpAddress.parse(text) else return "unparsed"
+    return (str)(address.render(buffer) catch _: recover "unformatted")
+
+test "IPv4 parses, exposes its number, and formats back to the same text":
+    let address = net.IpAddress.parse("192.168.1.1") else trap("192.168.1.1 must parse")
+    assert(address.version() == net.IpVersion.ipv4)
+    assert((address.ipv4_number() else 0) == 3232235777)
+    var buffer: u8[46]
+    assert(round_trip("192.168.1.1", buffer[0..]) == "192.168.1.1")
+    assert(round_trip("0.0.0.0", buffer[0..]) == "0.0.0.0")
+    assert(round_trip("255.255.255.255", buffer[0..]) == "255.255.255.255")
+
+test "from_ipv4 agrees with the parser":
+    let built = net.IpAddress.from_ipv4(3232235777)
+    let parsed = net.IpAddress.parse("192.168.1.1") else trap("must parse")
+    assert(built.equals(parsed))
+
+test "IPv6 parses with compression and formats to canonical text":
+    let address = net.IpAddress.parse("2001:db8::1") else trap("2001:db8::1 must parse")
+    assert(address.version() == net.IpVersion.ipv6)
+    var buffer: u8[46]
+    assert(round_trip("2001:db8::1", buffer[0..]) == "2001:db8::1")
+    assert(round_trip("::1", buffer[0..]) == "::1")
+    assert(round_trip("::", buffer[0..]) == "::")
+
+test "equals compares by value across separate parses":
+    let a = net.IpAddress.parse("10.0.0.1") else trap("must parse")
+    let b = net.IpAddress.parse("10.0.0.1") else trap("must parse")
+    let c = net.IpAddress.parse("10.0.0.2") else trap("must parse")
+    assert(a.equals(b))
+    assert(not a.equals(c))
+
+test "malformed addresses are rejected":
+    assert(net.IpAddress.parse("") == none)
+    assert(net.IpAddress.parse("999.1.1.1") == none)
+    assert(net.IpAddress.parse("192.168.1") == none)
+    assert(net.IpAddress.parse("1.2.3.4.5") == none)
+    assert(net.IpAddress.parse("not an address") == none)
+    assert(net.IpAddress.parse("192.168.1.1 ") == none)

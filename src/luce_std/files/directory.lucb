@@ -1,0 +1,189 @@
+#==============================================================================================
+#
+#   directory - Directory streams and listing
+#
+#   DESCRIPTION:
+#       An owned directory stream that yields entry names, opens children, and reads their
+#       metadata, plus the whole-listing helper.
+#
+#==============================================================================================
+
+## One owned directory stream; the zero value is closed. Copying does not duplicate
+## ownership. Borrow it for iteration and serialize access to the stream.
+pub struct Directory:
+    var handle: void*?
+
+    ## Open a close-on-exec directory stream. With follow_symlinks=false, refuse
+    ## a final symlink; intermediate path components still resolve normally.
+    pub static func open(path: c.str, follow_symlinks: bool = true) -> Directory!:
+        return try open_directory_at(current_directory_fd, path, follow_symlinks)
+
+    ## Borrow the descriptor until close. Do not close it or change its position.
+    pub func descriptor() -> i32!:
+        let directory = self.handle else error(io.closed, "the directory is closed")
+        if platform.windows:
+            return ((WinDirectory*)directory).descriptor
+        let descriptor = dirfd(directory)
+        if descriptor < 0:
+            error(classify_error(c.errno()), "the directory has no usable descriptor")
+        return descriptor
+
+    ## Metadata for the opened directory, independent of its current pathname.
+    pub func metadata() -> Metadata!:
+        return try metadata_descriptor(try self.descriptor())
+
+    ## Resolve a relative path from this open directory, even after it is renamed.
+    ## Absolute paths use normal OS resolution. With follow_symlinks=false, inspect
+    ## the final link itself. Separators and parent components retain OS semantics.
+    pub func entry_metadata(path: c.str, follow_symlinks: bool = true) -> Metadata!:
+        return try metadata_at(try self.descriptor(), path, follow_symlinks)
+
+    ## Open a directory relative to this handle. The new stream owns a separate
+    ## descriptor and position; closing either stream does not close the other.
+    ## With follow_symlinks=false, refuse a final symlink atomically during open.
+    pub func open_directory(path: c.str, follow_symlinks: bool = true) -> Directory!:
+        return try open_directory_at(try self.descriptor(), path, follow_symlinks)
+
+    ## Open a file relative to this directory. Absolute paths and parent segments
+    ## retain OS semantics; callers implementing containment must walk validated
+    ## individual components. Refusing symlinks applies atomically to the final
+    ## component. Nonblocking mode prevents FIFO opens from waiting for a peer;
+    ## it does not make ordinary filesystem I/O asynchronous.
+    pub func open_file(path: c.str, mode: OpenMode = OpenMode.read, permissions: u32 = 420, follow_symlinks: bool = true, nonblocking: bool = false) -> File!:
+        let parent = try self.descriptor()
+        var flags = try file_open_flags(mode, permissions)
+        if platform.windows:
+            let joined = try windows_relative(parent, path)
+            defer strings.release(joined)
+            return File(handle = try windows_open((c.str)joined, flags, permissions, follow_symlinks, nonblocking))
+        if not follow_symlinks:
+            flags |= no_follow_flag
+        if nonblocking:
+            flags |= nonblocking_open_flag
+        var descriptor = openat(parent, path, flags, permissions)
+        while descriptor < 0 and c.errno() == c.interrupted:
+            descriptor = openat(parent, path, flags, permissions)
+        if descriptor < 0:
+            error(classify_error(c.errno()), "the directory-relative file could not be opened")
+        return File(handle = descriptor)
+
+    ## The next name excluding dot and dot-dot, or none at end. Names are raw path
+    ## bytes, NUL-terminated but not guaranteed UTF-8. The view expires on the next
+    ## call or close.
+    pub mutating func next() -> str?!:
+        let directory = self.handle else error(io.closed, "the directory is closed")
+        while true:
+            let name = try next_entry(directory) else return none
+            if name != "." and name != "..":
+                return name
+
+    ## Consume ownership even on failure; repeated calls on this value are safe.
+    pub mutating func close() -> !:
+        let directory = self.handle else return
+        self.handle = none
+        if platform.windows:
+            try windows_directory_close((WinDirectory*)directory)
+            return
+        if closedir(directory) != 0:
+            error(classify_error(c.errno()), "the directory could not be closed")
+
+    ## Best-effort unwind cleanup; use close to observe an error on the success path.
+    pub mutating func destroy():
+        self.close() catch failure:
+            discard(failure)
+
+## Acquire a descriptor first so CLOEXEC and final-symlink policy are atomic.
+## fdopendir takes ownership only on success; capture errno before closing on failure.
+func open_directory_at(parent: i32, path: c.str, follow_symlinks: bool) -> Directory!:
+    if platform.windows:
+        return try windows_directory_open(parent, path, follow_symlinks)
+    var flags = directory_flag | close_on_exec
+    if not follow_symlinks:
+        flags |= no_follow_flag
+    var descriptor = openat(parent, path, flags)
+    while descriptor < 0 and c.errno() == c.interrupted:
+        descriptor = openat(parent, path, flags)
+    if descriptor < 0:
+        error(classify_error(c.errno()), "the directory could not be opened")
+    if let stream = fdopendir(descriptor):
+        return Directory(handle = stream)
+    let number = c.errno()
+    discard(close(descriptor))
+    error(classify_error(number), "the directory stream could not be created")
+
+# mark: Listing ===============================================================================
+
+## The names in a directory, sorted by bytes, without `.` and `..`: each name and the
+## array holding them, exactly as long as the names, are allocations of the current
+## allocator, which `release_list` returns together. On a failure nothing allocated is
+## kept and the directory is closed.
+pub func list(path: c.str) -> str[]!:
+    var directory = try Directory.open(path)
+    defer directory.destroy()
+    var names = try alloc str[16]
+    var count: usize = 0
+    errdefer release_entries(names, count)
+    while let name = try directory.next():
+        if count == names.length:
+            let capacity = names.length *? 2 else error(memory.exhausted, "the directory listing is too large")
+            let grown = try alloc str[capacity]
+            memory.copy(grown, names, count)
+            free(names)
+            names = grown
+        let copy = try alloc u8[name.length + 1]
+        memory.copy(copy, name.bytes, name.length)
+        copy[name.length] = 0
+        names[count] = (str)copy[..<name.length]
+        count += 1
+    try directory.close()
+    sort_names(names[..<count])
+    # the array as long as the names, so that `release_list` returns what was allocated
+    if count == 0:
+        free(names)
+        var empty: str[]
+        return empty
+    let exact = try alloc str[count]
+    memory.copy(exact, names, count)
+    free(names)
+    return exact
+
+## In-place heapsort gives large directories O(n log n) comparisons without a
+## second allocation or a recursion depth dependent on filesystem enumeration order.
+func sort_names(names: str[]):
+    var root = names.length // 2
+    while root > 0:
+        root -= 1
+        sift_names(names, root, names.length)
+    var end = names.length
+    while end > 1:
+        end -= 1
+        let largest = names[0]
+        names[0] = names[end]
+        names[end] = largest
+        sift_names(names, 0, end)
+
+func sift_names(names: str[], start: usize, end: usize):
+    var parent = start
+    while parent < end // 2:
+        var child = parent * 2 + 1
+        if child + 1 < end and names[child] < names[child + 1]:
+            child += 1
+        if not (names[parent] < names[child]):
+            return
+        let saved = names[parent]
+        names[parent] = names[child]
+        names[child] = saved
+        parent = child
+
+## Return what `list` allocated: every name, then the array, to the allocator that is
+## current, which must be the one `list` allocated from. The names are one byte longer
+## than they read, the NUL after each (§5.5).
+pub func release_list(names: str[]):
+    release_entries(names, names.length)
+
+## Partial lists still own the whole array allocation, including its unfilled capacity.
+func release_entries(names: str[], count: usize):
+    for name in names[..<count]:
+        free(u8[]((u8*)name.bytes.data, name.length + 1))
+    if names.length > 0:
+        free(names)

@@ -1,0 +1,20 @@
+## The `files` module against its archive: a file written, read back, described and
+## removed, in a temporary place.
+import c
+import files
+import io
+import strings
+
+test "a file round trip":
+    let directory = io.path.temp()
+    let path = try strings.join([directory, "/luce-base-files-test.txt"], "")
+    defer strings.release(path)
+    try files.write((c.str)path, "one line\n".bytes)
+    assert(files.exists((c.str)path))
+    let back = try files.read((c.str)path)
+    defer free(back)
+    assert((str)back == "one line\n")
+    let info = try files.metadata((c.str)path)
+    assert(info.size == 9)
+    try files.remove_file((c.str)path)
+    assert(not files.exists((c.str)path))

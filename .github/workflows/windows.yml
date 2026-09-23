@@ -1,0 +1,57 @@
+name: Windows x64
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      CC: gcc
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: luce-std
+      - name: Read compiler and dependency pins
+        id: pins
+        shell: pwsh
+        run: |
+          "base=$(Get-Content luce-std/bootstrap/BASE)" >> $env:GITHUB_OUTPUT
+      - uses: actions/checkout@v7
+        with:
+          repository: dymokomi/luce-base
+          ref: ${{ steps.pins.outputs.base }}
+          path: luce-base
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-python
+      - name: Configure native library search
+        shell: msys2 {0}
+        run: echo "LIBRARY_PATH=$(cygpath -m /ucrt64/lib)" >> "$GITHUB_ENV"
+      - name: Build the compiler
+        working-directory: luce-base
+        shell: msys2 {0}
+        run: python tools/build_windows.py
+      - name: Module tests through both backends
+        working-directory: luce-std
+        shell: msys2 {0}
+        run: python tests/run.py --base ../luce-base/build/luce-base.exe --skip-programs
+      - name: Windows contracts
+        working-directory: luce-std
+        shell: msys2 {0}
+        run: |
+          python tools/test_windows_native.py --compiler ../luce-base/build/luce-base.exe
+          python tests/programs/net_protocols/run.py ../luce-base/build/luce-base.exe
+      - name: Retain diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: luce-std-windows-${{ github.sha }}
+          path: |
+            luce-std/build/*.json
+            luce-std/build/*.log
+          if-no-files-found: ignore

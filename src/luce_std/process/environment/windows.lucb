@@ -1,0 +1,90 @@
+#==============================================================================================
+#
+#   windows - The Windows environment block
+#
+#   DESCRIPTION:
+#       CreateProcessW receives a private, sorted UTF-16 environment block; inherited
+#       drive-directory entries are retained and override names compare ordinally.
+#
+#==============================================================================================
+
+extern func GetEnvironmentStringsW() -> u16*?
+extern func FreeEnvironmentStringsW(environment: u16*) -> i32
+extern func CompareStringOrdinal(left: const u16*, left_length: i32, right: const u16*, right_length: i32, ignore_case: i32) -> i32
+
+func environment_windows_key(entry: const u16[]) -> const u16[]:
+    var index: usize = 1
+    while index < entry.length and entry[index] != 61:
+        index += 1
+    return entry[..<index]
+
+func environment_windows_compare(left: const u16[], right: const u16[]) -> i32:
+    let a = environment_windows_key(left)
+    let b = environment_windows_key(right)
+    return CompareStringOrdinal(a.data, (i32)a.length, b.data, (i32)b.length, 1) - 2
+
+func environment_windows(overrides: const c.str[]) -> u16[]!:
+    let inherited = GetEnvironmentStringsW() else error(failed, "the inherited environment is unavailable")
+    defer discard(FreeEnvironmentStringsW(inherited))
+    var count: usize = 0
+    var cursor: usize = 0
+    while inherited[cursor] != 0:
+        count += 1
+        while inherited[cursor] != 0:
+            cursor += 1
+        cursor += 1
+    let owned = try alloc (u16[])[overrides.length]
+    defer free(owned)
+    var converted: usize = 0
+    defer environment_windows_release(owned, converted)
+    for index in 0..<overrides.length:
+        discard(try environment_name(overrides[index]))
+        owned[index] = try windows_text.wide(overrides[index], failed)
+        converted += 1
+        for prior in 0..<index:
+            if environment_windows_compare(owned[index], owned[prior]) == 0:
+                error(failed, "an environment override repeats a name")
+    let capacity = count +? overrides.length else error(failed, "the environment is too large")
+    let entries = try alloc (u16[])[capacity]
+    defer free(entries)
+    var used: usize = 0
+    cursor = 0
+    while inherited[cursor] != 0:
+        let start = cursor
+        while inherited[cursor] != 0:
+            cursor += 1
+        cursor += 1
+        let entry = u16[](&inherited[start], cursor - start)
+        var replaced = false
+        for index in 0..<converted:
+            if environment_windows_compare(entry, owned[index]) == 0:
+                replaced = true
+                break
+        if not replaced:
+            entries[used] = entry
+            used += 1
+    for index in 0..<converted:
+        entries[used] = owned[index]
+        used += 1
+    for index in 1..<used:
+        let entry = entries[index]
+        var position = index
+        while position > 0 and environment_windows_compare(entry, entries[position - 1]) < 0:
+            entries[position] = entries[position - 1]
+            position -= 1
+        entries[position] = entry
+    var size: usize = 1
+    for index in 0..<used:
+        size = size +? entries[index].length else error(failed, "the environment is too large")
+    let result = try alloc u16[size if used > 0 else 2]
+    var output: usize = 0
+    for index in 0..<used:
+        for word in entries[index]:
+            result[output] = word
+            output += 1
+    result[output] = 0
+    return result
+
+func environment_windows_release(entries: u16[][], count: usize):
+    for index in 0..<count:
+        free(entries[index])

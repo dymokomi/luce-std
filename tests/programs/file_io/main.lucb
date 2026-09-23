@@ -1,0 +1,105 @@
+import c
+import files
+import io
+
+extern func file_fault_watch(fd: i32)
+extern func file_fault_arm(kind: i32)
+extern func file_fault_hits() -> i32
+extern func fcntl(fd: i32, command: i32, ...) -> i32
+
+pub func main(arguments: str[]) -> i32!:
+    assert(arguments.length == 3)
+    let path = (c.str)arguments[1]
+    assert(not (try files.exists_checked(path)))
+    assert(files.exists((c.str)arguments[2]), "existence checks must not open a FIFO")
+    var file = try files.File.open(path, files.OpenMode.create_new)
+    defer file.destroy()
+    let original_fd = file.descriptor() else -1
+    assert(try files.exists_checked(path))
+    assert(original_fd >= 0)
+    assert((fcntl(original_fd, 1) & 1) == 1)
+    file_fault_watch(original_fd)
+    file_fault_arm(2)
+    try io.write_all(&file, "abcdef".bytes)
+    assert(file_fault_hits() == 1)
+    file_fault_arm(5)
+    try file.sync()
+    assert(file_fault_hits() == 1)
+    try file.close()
+    assert(file.descriptor() == none)
+
+    var reopened = try files.File.open(path, files.OpenMode.read_write)
+    defer reopened.destroy()
+    let reopened_fd = reopened.descriptor() else -1
+    # The sole process thread has freed the lowest descriptor and reopened it.
+    assert(reopened_fd == original_fd)
+    try file.close()
+    file_fault_watch(reopened_fd)
+    file_fault_arm(1)
+    var data: u8[6]
+    try io.read_exact(&reopened, data)
+    assert(file_fault_hits() == 1)
+    assert((str)data == "abcdef")
+    assert((try reopened.seek(-2, files.SeekOrigin.end)) == 4)
+    file_fault_arm(3)
+    var progress: usize = 99
+    var caught = false
+    io.write_all(&reopened, "1234".bytes, &progress) catch failure:
+        assert(failure.code == files.no_space)
+        caught = true
+    assert(caught and progress == 2 and file_fault_hits() == 1)
+    assert((try reopened.seek(0)) == 0)
+    try io.read_exact(&reopened, data)
+    assert((str)data == "abcd12")
+    file_fault_arm(4)
+    caught = false
+    reopened.close() catch failure:
+        assert(failure.code == files.failed)
+        caught = true
+    assert(caught and file_fault_hits() == 1)
+    assert(reopened.descriptor() == none)
+    try reopened.close()
+
+    var appender = try files.File.open(path, files.OpenMode.append)
+    defer appender.destroy()
+    try io.write_all(&appender, "xy".bytes)
+    try appender.close()
+    caught = false
+    var duplicate = files.File.open(path, files.OpenMode.create_new) catch failure:
+        assert(failure.code == files.already_exists)
+        caught = true
+        var empty: files.File
+        recover empty
+    duplicate.destroy()
+    assert(caught)
+    caught = false
+    file.read(data[..<0]) catch failure:
+        assert(failure.code == io.closed)
+        caught = true
+        recover 0
+    assert(caught)
+    file_fault_watch(original_fd)
+    file_fault_arm(1)
+    let bytes = try files.read_limit(path, 8)
+    defer free(bytes)
+    assert((str)bytes == "abcd12xy" and file_fault_hits() == 1)
+    caught = false
+    files.read_limit(path, 7) catch failure:
+        assert(failure.code == files.too_large)
+        caught = true
+        var empty: u8[]
+        recover empty
+    assert(caught and fcntl(original_fd, 1) == -1)
+    file_fault_arm(4)
+    caught = false
+    files.read_limit(path, 8) catch failure:
+        assert(failure.code == files.failed)
+        caught = true
+        var empty: u8[]
+        recover empty
+    assert(caught and file_fault_hits() == 1 and fcntl(original_fd, 1) == -1)
+    let streamed = try files.read_limit((c.str)arguments[2], 8)
+    defer free(streamed)
+    assert((str)streamed == "streamed")
+    print("ok file handles and injected failures")
+    return 0
