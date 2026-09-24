@@ -143,13 +143,14 @@ func command_dispose(state: CommandState*):
         # Empty copied strings still own the trailing NUL.
         if (usize)state.directory.bytes.data != 0:
             strings.release(state.directory)
-        for argument in state.arguments[..<state.argument_count]:
-            strings.release((str)argument)
+        # a list never allocated is not sliced, even empty
         if (usize)state.arguments.data != 0:
+            for argument in state.arguments[..<state.argument_count]:
+                strings.release((str)argument)
             free(state.arguments)
-        for override in state.environment[..<state.environment_count]:
-            strings.release((str)override)
         if (usize)state.environment.data != 0:
+            for override in state.environment[..<state.environment_count]:
+                strings.release((str)override)
             free(state.environment)
         if state.output.length > 0:
             free(state.output)
