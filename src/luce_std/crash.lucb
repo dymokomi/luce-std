@@ -7,7 +7,8 @@
 #       ~/.luce/crashes: which program and version, the platform, the trap's
 #       position and message (or the fatal signal) and a native stack. Traps are
 #       the program's own; segmentation faults, bus errors, illegal instructions,
-#       arithmetic faults and aborts are caught on POSIX. The next run can read
+#       arithmetic faults and aborts are caught on POSIX, and unhandled exceptions
+#       (access violations and the like) on Windows. The next run can read
 #       the report back with `take_report` and show it, since a program launched
 #       from a desktop has nowhere to print.
 #
@@ -26,6 +27,18 @@ import time
 
 extern func getpid() -> i32
 extern func install_signal as "signal"(number: i32, handler: (func(i32) -> unit)?) -> (func(i32) -> unit)?
+extern func GetCurrentProcessId() -> u32
+extern func SetUnhandledExceptionFilter(filter: (func(WindowsException*) -> i32)?) -> void*?
+
+## EXCEPTION_RECORD's leading fields, all the filter reads.
+extern struct WindowsExceptionRecord:
+    var code: u32
+    var flags: u32
+
+## EXCEPTION_POINTERS.
+extern struct WindowsException:
+    var record: WindowsExceptionRecord*
+    var context: void*
 
 ## The directory reports go to: ~/.luce/crashes.
 pub func directory() -> interop.Owned[str]!:
@@ -50,7 +63,11 @@ pub func enable(app: str, version: str = "") -> !:
     let kept = safe_name(app, name)
     var stamp: u8[128]
     let started = time.unix()
-    let pid = (i64)getpid() if platform.posix and not platform.wasm32 else 0
+    var pid: i64 = 0
+    if platform.windows:
+        pid = (i64)GetCurrentProcessId()
+    elif platform.posix and not platform.wasm32:
+        pid = (i64)getpid()
     let file_name = try format(stamp, f"{kept}-{started}-{pid}.crash")
     let path = try paths.join(folder.value, file_name)
     defer strings.release(path)
@@ -63,6 +80,9 @@ pub func enable(app: str, version: str = "") -> !:
         discard(install_signal(arithmetic_signal, fatal_signal))
         discard(install_signal(segmentation_signal, fatal_signal))
         discard(install_signal(bus_signal(), fatal_signal))
+    if platform.windows:
+        # every thread's unhandled exception, where POSIX has signals
+        discard(SetUnhandledExceptionFilter(fatal_exception))
 
 let illegal_signal: i32 = 4
 let abort_signal: i32 = 6
@@ -83,6 +103,21 @@ func fatal_signal(number: i32):
     if number == abort_signal:
         core.report_fatal_signal("SIGABRT (abort)", number)
     core.report_fatal_signal("SIGBUS (bus error)", number)
+
+## A Windows exception nothing handled: named in the report as a signal is on POSIX.
+func fatal_exception(exception: WindowsException*) -> i32:
+    let code = exception.record.code
+    if code == 0xC0000005:
+        core.report_fatal_signal("EXCEPTION_ACCESS_VIOLATION (invalid memory access)", 11)
+    if code == 0xC000001D:
+        core.report_fatal_signal("EXCEPTION_ILLEGAL_INSTRUCTION", 4)
+    if code == 0xC0000094 or code == 0xC0000095 or code == 0xC000008E or code == 0xC0000090:
+        core.report_fatal_signal("EXCEPTION_INT_DIVIDE_BY_ZERO or a floating-point fault (arithmetic fault)", 8)
+    if code == 0xC00000FD:
+        core.report_fatal_signal("EXCEPTION_STACK_OVERFLOW", 11)
+    if code == 0xC0000409:
+        core.report_fatal_signal("STATUS_STACK_BUFFER_OVERRUN (fast fail)", 6)
+    core.report_fatal_signal("an unhandled Windows exception", 6)
 
 ## `app` with anything but letters, digits, `-` and `_` replaced by `-`, into `buffer`.
 func safe_name(app: str, buffer: u8[]) -> str:
