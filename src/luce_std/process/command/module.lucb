@@ -92,6 +92,9 @@ pub struct Command:
         self.state().lock.lock()
         defer self.state().lock.unlock()
         with memory.heap:
+            # a child that has printed nothing has no buffer yet
+            if self.state().used == 0:
+                return try interop.copy_text("")
             var text = try strings.Builder.create(self.state().used)
             defer text.destroy()
             var offset: usize = 0
