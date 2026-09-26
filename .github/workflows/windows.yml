@@ -46,6 +46,7 @@ jobs:
         run: |
           python tools/test_windows_native.py --compiler ../luce-base/build/luce-base.exe
           python tests/programs/net_protocols/run.py ../luce-base/build/luce-base.exe
+          python tests/programs/crash_report/run.py ../luce-base/build/luce-base.exe
       - name: Retain diagnostics
         if: always()
         uses: actions/upload-artifact@v7
