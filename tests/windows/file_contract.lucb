@@ -68,10 +68,10 @@ pub func main(arguments: c.str[]) -> i32!:
     try files.remove_file("published")
     # A temporary file keeps its name while open and the system deletes it with
     # the last handle (FILE_FLAG_DELETE_ON_CLOSE).
-    var temporary = try files.File.open("temporary", files.OpenMode.create_temporary, permissions = 384)
-    try io.write_all(&temporary, "scratch".bytes)
-    assert(files.exists("temporary"))
-    try temporary.close()
-    assert(not files.exists("temporary"))
+    var scratch = try files.File.open("scratch", files.OpenMode.create_temporary, permissions = 384)
+    try io.write_all(&scratch, "scratch".bytes)
+    assert(files.exists("scratch"))
+    try scratch.close()
+    assert(not files.exists("scratch"))
     print("ok seek, truncate, times, attributes, open rename, hard links, relative files, publication, temporary")
     return 0
