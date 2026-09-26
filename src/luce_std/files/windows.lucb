@@ -174,12 +174,13 @@ func windows_error(number: u32) -> ErrorCode:
     if number == 267: return not_directory
     return failed
 
-func windows_open(path: c.str, flags: i32, permissions: u32, follow: bool = true, nonblocking: bool = false) -> i32!:
+func windows_open(path: c.str, flags: i32, permissions: u32, follow: bool = true, nonblocking: bool = false, delete_on_close: bool = false) -> i32!:
     let text = try wide_path(path)
     defer free(text)
     let desired_access: u32 = 3221225472 if (flags & 3) == 2 else (1073741824 if (flags & 3) == 1 else 2147483648)
     let disposition: u32 = (1 if (flags & exclusive_flag) != 0 else 4) if (flags & create) != 0 else 3
-    let attributes: u32 = (1 if (permissions & 146) == 0 else 128) | (0 if follow else 2097152)
+    # FILE_FLAG_DELETE_ON_CLOSE: the system removes the file with its last handle.
+    let attributes: u32 = (1 if (permissions & 146) == 0 else 128) | (0 if follow else 2097152) | (67108864 if delete_on_close else 0)
     let handle = CreateFileW(text.data, desired_access, 7, none, disposition, attributes, none)
     if (usize)handle == ~(usize)0:
         error(windows_error(GetLastError()), "the file could not be opened")

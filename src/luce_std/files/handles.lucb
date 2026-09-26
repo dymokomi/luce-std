@@ -10,7 +10,11 @@
 
 ## File opening policy. `replace` creates or truncates; `create_new` refuses an
 ## existing path; `create_new_read_write` also permits reads. `append` creates if
-## needed and makes each write append atomically.
+## needed and makes each write append atomically. `create_temporary` is
+## `create_new_read_write` for a file nobody else should find: it goes away with
+## its last handle, even when the process is killed. On POSIX its name is removed
+## as soon as it is open; on Windows the system deletes it when the last handle
+## closes (FILE_FLAG_DELETE_ON_CLOSE).
 ## Creation permissions are filtered by the process umask, never changed afterward.
 pub enum OpenMode as u8:
     read = 0
@@ -19,6 +23,7 @@ pub enum OpenMode as u8:
     create_new = 3
     append = 4
     create_new_read_write = 5
+    create_temporary = 6
 
 ## Where a seek offset is measured from.
 pub enum SeekOrigin as u8:
@@ -37,13 +42,17 @@ pub struct File: io.Reader, io.Writer:
 
     ## Open a close-on-exec descriptor. Only the named creation modes create paths.
     pub static func open(path: c.str, mode: OpenMode = OpenMode.read, permissions: u32 = 420) -> File!:
-        let flags = try file_open_flags(mode, permissions)
-        var fd = try open_descriptor(path, flags, permissions)
+        let temporary = mode == OpenMode.create_temporary
+        let flags = try file_open_flags(OpenMode.create_new_read_write if temporary else mode, permissions)
+        var fd = try open_descriptor(path, flags, permissions, temporary)
         while fd < 0 and c.errno() == c.interrupted:
-            fd = try open_descriptor(path, flags, permissions)
+            fd = try open_descriptor(path, flags, permissions, temporary)
         if fd < 0:
             error(classify_error(c.errno()), "the file could not be opened")
-        return File(handle = fd)
+        var opened = File(handle = fd)
+        if temporary:
+            try forget_name(path, &opened)
+        return opened
 
     ## Borrow the descriptor for OS interoperability; none after close. The caller
     ## must not close it or retain it past this owner's lifetime.
@@ -229,11 +238,21 @@ func classify_wasi_error(number: i32) -> ErrorCode:
     return failed
 
 ## Shared mode validation for path-based and directory-relative file opening.
-func open_descriptor(path: c.str, flags: i32, permissions: u32) -> i32!:
+func open_descriptor(path: c.str, flags: i32, permissions: u32, temporary: bool = false) -> i32!:
     if platform.windows:
-        return try windows_open(path, flags, permissions)
+        return try windows_open(path, flags, permissions, delete_on_close = temporary)
     else:
         return open(path, flags, permissions)
+
+## A temporary file's name goes once it is open (POSIX); Windows deletes it when
+## its last handle closes, so the name stays until then.
+func forget_name(path: c.str, opened: File*) -> !:
+    if platform.windows:
+        return
+    else:
+        remove_file(path) catch failure:
+            opened.destroy()
+            error(failure.code, failure.message)
 
 func file_open_flags(mode: OpenMode, permissions: u32) -> i32!:
     if permissions > 4095:

@@ -18,3 +18,17 @@ test "a file round trip":
     assert(info.size == 9)
     try files.remove_file((c.str)path)
     assert(not files.exists((c.str)path))
+
+test "a temporary file loses its name once open and still reads back":
+    let directory = io.path.temp()
+    let path = try strings.join([directory, "/luce-base-files-temporary.bin"], "")
+    defer strings.release(path)
+    var opened = try files.File.open((c.str)path, files.OpenMode.create_temporary, permissions = 384)
+    # POSIX: no name left to find; the open file lives on until it closes.
+    assert(not files.exists((c.str)path))
+    assert((try opened.write("scratch".bytes)) == 7)
+    var back: u8[7]
+    discard(try opened.seek(0, files.SeekOrigin.start))
+    assert((try opened.read(back)) == 7)
+    assert((str)back[..<7] == "scratch")
+    try opened.close()
