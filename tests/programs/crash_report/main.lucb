@@ -1,0 +1,38 @@
+## A program that crashes on purpose, three calls deep: a null write on the
+## main thread (`main`) or on a second thread (`thread`), or a trap (`trap`).
+## run.py reads its crash report and checks the three functions are named in order.
+import crash
+import strings
+import thread
+
+noinline func crash_depth_three(address: usize, mode: str) -> usize:
+    if mode == "trap":
+        trap("a deliberate trap three calls deep")
+    let target = (usize*)(void*)address
+    target[0] = 7
+    return target[0]
+
+noinline func crash_depth_two(address: usize, mode: str) -> usize:
+    let result = crash_depth_three(address, mode)
+    return result + 1
+
+noinline func crash_depth_one(address: usize, mode: str) -> usize:
+    let result = crash_depth_two(address, mode)
+    return result + 1
+
+func crash_thread(context: void*?):
+    discard(context)
+    discard(crash_depth_one(0, "thread"))
+
+pub func main(arguments: str[]) -> i32!:
+    try crash.enable("crashcheck", version = "1")
+    let mode = arguments[1] if arguments.length > 1 else "main"
+    if mode == "thread":
+        let handle = try thread.spawn(crash_thread, none, name = "crasher")
+        try handle.join()
+        return 0
+    # Read from the arguments, so the null address is not known when compiling.
+    let parsed = strings.parse_u64(arguments[2] if arguments.length > 2 else "0") else 0
+    let address = (usize)parsed
+    discard(crash_depth_one(address, mode))
+    return 0
