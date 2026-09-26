@@ -26,15 +26,16 @@ func set_nonblocking(descriptor: platform.SocketDescriptor, enabled: bool) -> !:
         if ioctlsocket(descriptor, -2147195266, &flag) != 0:
             error(socket_error(socket_errno()), "socket nonblocking mode could not be changed")
         return
-    let before = try socket_status_flags(descriptor)
-    let after = before | nonblocking_flag if enabled else before & ~nonblocking_flag
-    if after == before:
-        return
-    var result = fcntl(descriptor, 4, after)
-    while result < 0 and socket_errno() == socket_interrupted:
-        result = fcntl(descriptor, 4, after)
-    if result < 0:
-        error(socket_error(socket_errno()), "socket nonblocking mode could not be changed")
+    else:
+        let before = try socket_status_flags(descriptor)
+        let after = before | nonblocking_flag if enabled else before & ~nonblocking_flag
+        if after == before:
+            return
+        var result = fcntl(descriptor, 4, after)
+        while result < 0 and socket_errno() == socket_interrupted:
+            result = fcntl(descriptor, 4, after)
+        if result < 0:
+            error(socket_error(socket_errno()), "socket nonblocking mode could not be changed")
 
 func get_socket_integer(descriptor: platform.SocketDescriptor, level: i32, option: i32) -> i32!:
     var value: i32 = 0

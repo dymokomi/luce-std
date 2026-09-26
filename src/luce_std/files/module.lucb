@@ -27,12 +27,14 @@ extern func win_write as "_write"(descriptor: i32, buffer: const void*, count: u
 func c_read(descriptor: i32, buffer: void*, count: usize) -> isize:
     if platform.windows:
         return (isize)win_read(descriptor, buffer, (u32)(count if count < 2147483647 else 2147483647))
-    return posix_read(descriptor, buffer, count)
+    else:
+        return posix_read(descriptor, buffer, count)
 
 func c_write(descriptor: i32, buffer: const void*, count: usize) -> isize:
     if platform.windows:
         return (isize)win_write(descriptor, buffer, (u32)(count if count < 2147483647 else 2147483647))
-    return posix_write(descriptor, buffer, count)
+    else:
+        return posix_write(descriptor, buffer, count)
 
 extern func posix_lseek as "lseek"(descriptor: i32, offset: i64, whence: i32) -> i64
 extern func windows_lseek as "_lseeki64"(descriptor: i32, offset: i64, whence: i32) -> i64
@@ -56,7 +58,8 @@ func ftruncate(descriptor: i32, length: i64) -> i32:
             c.set_errno(result)
             return -1
         return 0
-    return posix_ftruncate(descriptor, length)
+    else:
+        return posix_ftruncate(descriptor, length)
 
 extern func fchmod_macos as "fchmod"(descriptor: i32, permissions: u16) -> i32
 extern func fchmod_linux as "fchmod"(descriptor: i32, permissions: u32) -> i32
@@ -106,29 +109,30 @@ extern struct WasiEntry:
 func next_entry(directory: void*) -> str?!:
     if platform.windows:
         return try windows_next((WinDirectory*)directory)
-    while true:
-        c.set_errno(0)
-        if platform.macos:
-            if let entry = readdir_macos(directory):
-                return (str)entry.name[..<(usize)entry.name_length]
-        elif platform.wasm32:
-            if let entry = readdir_wasi(directory):
-                var n: usize = 0
-                while n < entry.name.length and entry.name[n] != 0:
-                    n += 1
-                return (str)entry.name[..<n]
-        else:
-            if let entry = readdir_linux(directory):
-                var n: usize = 0
-                while n < entry.name.length and entry.name[n] != 0:
-                    n += 1
-                return (str)entry.name[..<n]
-        let number = c.errno()
-        if number == c.interrupted:
-            continue
-        if number != 0:
-            error(classify_error(number), "the directory could not be read")
-        return none
+    else:
+        while true:
+            c.set_errno(0)
+            if platform.macos:
+                if let entry = readdir_macos(directory):
+                    return (str)entry.name[..<(usize)entry.name_length]
+            elif platform.wasm32:
+                if let entry = readdir_wasi(directory):
+                    var n: usize = 0
+                    while n < entry.name.length and entry.name[n] != 0:
+                        n += 1
+                    return (str)entry.name[..<n]
+            else:
+                if let entry = readdir_linux(directory):
+                    var n: usize = 0
+                    while n < entry.name.length and entry.name[n] != 0:
+                        n += 1
+                    return (str)entry.name[..<n]
+            let number = c.errno()
+            if number == c.interrupted:
+                continue
+            if number != 0:
+                error(classify_error(number), "the directory could not be read")
+            return none
 
 ## `open` flags: macOS keeps the BSD values, Linux its own, and WASI its own again, where
 ## reading is a right asked for (§19.5).

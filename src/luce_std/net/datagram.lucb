@@ -61,39 +61,40 @@ pub struct Datagram:
         let descriptor = try self.socket.require()
         if platform.windows:
             return try windows_receive(descriptor, buffer)
-        var raw: NativeAddress
-        # macOS can return immediately without consuming a packet when receive
-        # capacity is zero. Probe into one scratch byte so even empty storage
-        # consumes exactly one packet and obtains its sender address.
-        var scratch: u8[1]
-        var vector = ReceiveVector(data = buffer.data, length = buffer.length)
-        if buffer.length == 0:
-            vector = ReceiveVector(data = &scratch[0], length = 1)
-        while true:
-            var received: isize = 0
-            var address_length: u32 = 0
-            var flags: i32 = 0
-            if platform.macos:
-                var message = MacMessage(address = &raw, address_length = 28, vectors = &vector, vector_count = 1)
-                received = receive_message_macos(descriptor, &message, 0)
-                address_length = message.address_length
-                flags = message.flags
-            else:
-                var message = LinuxMessage(address = &raw, address_length = 28, vectors = &vector, vector_count = 1)
-                received = receive_message_linux(descriptor, &message, 0)
-                address_length = message.address_length
-                flags = message.flags
-            if received < 0:
-                let number = socket_errno()
-                if number == socket_interrupted:
-                    continue
-                error(socket_error(number), "the datagram could not be received")
-            let truncated: i32 = 16 if platform.macos else 32
-            if (flags & truncated) != 0 or (usize)received > buffer.length:
-                error(message_too_large, "the receive buffer was too small for the datagram")
-            if address_length > 28:
-                error(failed, "the datagram sender address exceeds the supported storage")
-            return ((usize)received, try decode_address(&raw, address_length))
+        else:
+            var raw: NativeAddress
+            # macOS can return immediately without consuming a packet when receive
+            # capacity is zero. Probe into one scratch byte so even empty storage
+            # consumes exactly one packet and obtains its sender address.
+            var scratch: u8[1]
+            var vector = ReceiveVector(data = buffer.data, length = buffer.length)
+            if buffer.length == 0:
+                vector = ReceiveVector(data = &scratch[0], length = 1)
+            while true:
+                var received: isize = 0
+                var address_length: u32 = 0
+                var flags: i32 = 0
+                if platform.macos:
+                    var message = MacMessage(address = &raw, address_length = 28, vectors = &vector, vector_count = 1)
+                    received = receive_message_macos(descriptor, &message, 0)
+                    address_length = message.address_length
+                    flags = message.flags
+                else:
+                    var message = LinuxMessage(address = &raw, address_length = 28, vectors = &vector, vector_count = 1)
+                    received = receive_message_linux(descriptor, &message, 0)
+                    address_length = message.address_length
+                    flags = message.flags
+                if received < 0:
+                    let number = socket_errno()
+                    if number == socket_interrupted:
+                        continue
+                    error(socket_error(number), "the datagram could not be received")
+                let truncated: i32 = 16 if platform.macos else 32
+                if (flags & truncated) != 0 or (usize)received > buffer.length:
+                    error(message_too_large, "the receive buffer was too small for the datagram")
+                if address_length > 28:
+                    error(failed, "the datagram sender address exceeds the supported storage")
+                return ((usize)received, try decode_address(&raw, address_length))
 
     ## Wait for advisory readiness without allocating. Expiration reports timed_out;
     ## cancellation reports cancelled. Use nonblocking I/O after readiness because
@@ -112,7 +113,8 @@ pub struct Datagram:
         if platform.windows:
             discard(try self.socket.require())
             return self.socket.nonblocking
-        return (try socket_status_flags(try self.socket.require()) & nonblocking_flag) != 0
+        else:
+            return (try socket_status_flags(try self.socket.require()) & nonblocking_flag) != 0
 
     ## Request kernel buffering in bytes, not a guaranteed transfer size. The OS
     ## may cap or round the request; receive_buffer returns its reported setting.

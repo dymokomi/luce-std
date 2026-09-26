@@ -144,18 +144,20 @@ func poll_interest(interest: WaitInterest) -> i16!:
         if interest == WaitInterest.write: return 16
         if interest == WaitInterest.both: return 784
         error(invalid_options, "unknown readiness interest")
-    if interest == WaitInterest.read:
-        return 1
-    if interest == WaitInterest.write:
-        return 4
-    if interest == WaitInterest.both:
-        return 5
-    error(invalid_options, "unknown readiness interest")
+    else:
+        if interest == WaitInterest.read:
+            return 1
+        if interest == WaitInterest.write:
+            return 4
+        if interest == WaitInterest.both:
+            return 5
+        error(invalid_options, "unknown readiness interest")
 
 func poll_readiness(events: i16) -> Readiness:
     if platform.windows:
         return Readiness(readable = (events & 768) != 0, writable = (events & 16) != 0, hangup = (events & 2) != 0, failure = (events & 1) != 0, invalid = (events & 4) != 0)
-    return Readiness(readable = (events & 1) != 0, writable = (events & 4) != 0, hangup = (events & 16) != 0, failure = (events & 8) != 0, invalid = (events & 32) != 0)
+    else:
+        return Readiness(readable = (events & 1) != 0, writable = (events & 4) != 0, hangup = (events & 16) != 0, failure = (events & 8) != 0, invalid = (events & 32) != 0)
 
 func clear_poll(entries: NativePoll[]):
     var index: usize = 0

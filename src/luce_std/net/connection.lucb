@@ -103,13 +103,14 @@ pub struct Connection: Reader, Writer:
         if not platform.macos:
             self.guarded = true
             return true
-        var yes: i32 = 1
-        var result = setsockopt(descriptor, socket_level, no_sigpipe_option, &yes, 4)
-        while result < 0 and socket_errno() == socket_interrupted:
-            result = setsockopt(descriptor, socket_level, no_sigpipe_option, &yes, 4)
-        if result == 0:
-            self.guarded = true
-        return self.guarded
+        else:
+            var yes: i32 = 1
+            var result = setsockopt(descriptor, socket_level, no_sigpipe_option, &yes, 4)
+            while result < 0 and socket_errno() == socket_interrupted:
+                result = setsockopt(descriptor, socket_level, no_sigpipe_option, &yes, 4)
+            if result == 0:
+                self.guarded = true
+            return self.guarded
 
     ## Send some bytes, retrying interruption. Use io.write_all for a complete
     ## payload and its optional progress output to resume after a later failure.
@@ -179,7 +180,8 @@ pub struct Connection: Reader, Writer:
         if platform.windows:
             discard(try self.socket.require())
             return self.socket.nonblocking
-        return (try socket_status_flags(try self.socket.require()) & nonblocking_flag) != 0
+        else:
+            return (try socket_status_flags(try self.socket.require()) & nonblocking_flag) != 0
 
     ## Request kernel buffering in bytes, not a guaranteed transfer size. The OS
     ## may cap or round the request; receive_buffer returns its reported setting.

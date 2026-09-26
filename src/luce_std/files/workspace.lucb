@@ -36,9 +36,10 @@ pub func canonical(path: c.str) -> str!:
             if bytes[index] == 92:
                 bytes[index] = '/'
         return result
-    let resolved = realpath(path, none) else error(classify_error(c.errno()), "the filesystem path could not be resolved")
-    defer release_realpath((void*)resolved)
-    return try strings.copy((str)(c.str)resolved)
+    else:
+        let resolved = realpath(path, none) else error(classify_error(c.errno()), "the filesystem path could not be resolved")
+        defer release_realpath((void*)resolved)
+        return try strings.copy((str)(c.str)resolved)
 
 ## Atomically create an unused directory with 128 random filename bits. The
 ## returned path is owned by the caller. The parent must already exist.

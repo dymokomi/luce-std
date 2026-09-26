@@ -72,7 +72,8 @@ pub struct Listener:
         if platform.windows:
             discard(try self.socket.require())
             return self.socket.nonblocking
-        return (try socket_status_flags(try self.socket.require()) & nonblocking_flag) != 0
+        else:
+            return (try socket_status_flags(try self.socket.require()) & nonblocking_flag) != 0
 
     ## Request kernel buffering in bytes, not a guaranteed transfer size. The OS
     ## may cap or round the request; receive_buffer returns its reported setting.
@@ -107,4 +108,5 @@ pub struct Listener:
 func accept_socket(descriptor: platform.SocketDescriptor) -> platform.SocketDescriptor:
     if platform.macos or platform.windows:
         return accept(descriptor, none, none)
-    return accept4(descriptor, none, none, socket_close_on_exec)
+    else:
+        return accept4(descriptor, none, none, socket_close_on_exec)

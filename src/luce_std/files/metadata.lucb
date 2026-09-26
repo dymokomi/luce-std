@@ -220,102 +220,105 @@ pub func metadata(path: c.str, follow_symlinks: bool = true) -> Metadata!:
         let handle = try windows_path_handle(path, follow_symlinks)
         defer discard(CloseHandle(handle))
         return try windows_metadata(handle, follow_symlinks)
-    if platform.macos:
-        var raw: MacMetadata
-        while true:
-            let result = stat_macos(path, &raw) if follow_symlinks else lstat_macos(path, &raw)
-            if result == 0:
-                return mac_metadata(raw)
-            if c.errno() != c.interrupted:
-                error(classify_error(c.errno()), "file metadata could not be read")
-    elif platform.wasm32:
-        var wasi: WasiMetadata
-        while true:
-            let result = stat_wasi(path, &wasi) if follow_symlinks else lstat_wasi(path, &wasi)
-            if result == 0:
-                return wasi_metadata(wasi)
-            if c.errno() != c.interrupted:
-                error(classify_error(c.errno()), "file metadata could not be read")
-    elif platform.arm64:
-        var raw64: LinuxArm64Metadata
-        while true:
-            let result = stat_linux_arm64(path, &raw64) if follow_symlinks else lstat_linux_arm64(path, &raw64)
-            if result == 0:
-                return linux_arm64_metadata(raw64)
-            if c.errno() != c.interrupted:
-                error(classify_error(c.errno()), "file metadata could not be read")
     else:
-        var raw: LinuxMetadata
-        while true:
-            let result = stat_linux(path, &raw) if follow_symlinks else lstat_linux(path, &raw)
-            if result == 0:
-                return linux_metadata(raw)
-            if c.errno() != c.interrupted:
-                error(classify_error(c.errno()), "file metadata could not be read")
+        if platform.macos:
+            var raw: MacMetadata
+            while true:
+                let result = stat_macos(path, &raw) if follow_symlinks else lstat_macos(path, &raw)
+                if result == 0:
+                    return mac_metadata(raw)
+                if c.errno() != c.interrupted:
+                    error(classify_error(c.errno()), "file metadata could not be read")
+        elif platform.wasm32:
+            var wasi: WasiMetadata
+            while true:
+                let result = stat_wasi(path, &wasi) if follow_symlinks else lstat_wasi(path, &wasi)
+                if result == 0:
+                    return wasi_metadata(wasi)
+                if c.errno() != c.interrupted:
+                    error(classify_error(c.errno()), "file metadata could not be read")
+        elif platform.arm64:
+            var raw64: LinuxArm64Metadata
+            while true:
+                let result = stat_linux_arm64(path, &raw64) if follow_symlinks else lstat_linux_arm64(path, &raw64)
+                if result == 0:
+                    return linux_arm64_metadata(raw64)
+                if c.errno() != c.interrupted:
+                    error(classify_error(c.errno()), "file metadata could not be read")
+        else:
+            var raw: LinuxMetadata
+            while true:
+                let result = stat_linux(path, &raw) if follow_symlinks else lstat_linux(path, &raw)
+                if result == 0:
+                    return linux_metadata(raw)
+                if c.errno() != c.interrupted:
+                    error(classify_error(c.errno()), "file metadata could not be read")
 
 func metadata_descriptor(descriptor: i32) -> Metadata!:
     if platform.windows:
         return try windows_metadata((void*)win_handle(descriptor), true)
-    if platform.macos:
-        var raw: MacMetadata
-        while true:
-            if fstat_macos(descriptor, &raw) == 0:
-                return mac_metadata(raw)
-            if c.errno() != c.interrupted:
-                error(classify_error(c.errno()), "open-file metadata could not be read")
-    elif platform.wasm32:
-        var wasi: WasiMetadata
-        while true:
-            if fstat_wasi(descriptor, &wasi) == 0:
-                return wasi_metadata(wasi)
-            if c.errno() != c.interrupted:
-                error(classify_error(c.errno()), "open-file metadata could not be read")
-    elif platform.arm64:
-        var raw64: LinuxArm64Metadata
-        while true:
-            if fstat_linux_arm64(descriptor, &raw64) == 0:
-                return linux_arm64_metadata(raw64)
-            if c.errno() != c.interrupted:
-                error(classify_error(c.errno()), "open-file metadata could not be read")
     else:
-        var raw: LinuxMetadata
-        while true:
-            if fstat_linux(descriptor, &raw) == 0:
-                return linux_metadata(raw)
-            if c.errno() != c.interrupted:
-                error(classify_error(c.errno()), "open-file metadata could not be read")
+        if platform.macos:
+            var raw: MacMetadata
+            while true:
+                if fstat_macos(descriptor, &raw) == 0:
+                    return mac_metadata(raw)
+                if c.errno() != c.interrupted:
+                    error(classify_error(c.errno()), "open-file metadata could not be read")
+        elif platform.wasm32:
+            var wasi: WasiMetadata
+            while true:
+                if fstat_wasi(descriptor, &wasi) == 0:
+                    return wasi_metadata(wasi)
+                if c.errno() != c.interrupted:
+                    error(classify_error(c.errno()), "open-file metadata could not be read")
+        elif platform.arm64:
+            var raw64: LinuxArm64Metadata
+            while true:
+                if fstat_linux_arm64(descriptor, &raw64) == 0:
+                    return linux_arm64_metadata(raw64)
+                if c.errno() != c.interrupted:
+                    error(classify_error(c.errno()), "open-file metadata could not be read")
+        else:
+            var raw: LinuxMetadata
+            while true:
+                if fstat_linux(descriptor, &raw) == 0:
+                    return linux_metadata(raw)
+                if c.errno() != c.interrupted:
+                    error(classify_error(c.errno()), "open-file metadata could not be read")
 
 func metadata_at(directory: i32, path: c.str, follow_symlinks: bool) -> Metadata!:
     if platform.windows:
         let joined = try windows_relative(directory, path)
         defer strings.release(joined)
         return try metadata((c.str)joined, follow_symlinks)
-    let flags: i32 = 0 if follow_symlinks else at_no_follow_flag
-    if platform.macos:
-        var raw: MacMetadata
-        while true:
-            if fstatat_macos(directory, path, &raw, flags) == 0:
-                return mac_metadata(raw)
-            if c.errno() != c.interrupted:
-                error(classify_error(c.errno()), "directory-entry metadata could not be read")
-    elif platform.wasm32:
-        var wasi: WasiMetadata
-        while true:
-            if fstatat_wasi(directory, path, &wasi, flags) == 0:
-                return wasi_metadata(wasi)
-            if c.errno() != c.interrupted:
-                error(classify_error(c.errno()), "directory-entry metadata could not be read")
-    elif platform.arm64:
-        var raw64: LinuxArm64Metadata
-        while true:
-            if fstatat_linux_arm64(directory, path, &raw64, flags) == 0:
-                return linux_arm64_metadata(raw64)
-            if c.errno() != c.interrupted:
-                error(classify_error(c.errno()), "directory-entry metadata could not be read")
     else:
-        var raw: LinuxMetadata
-        while true:
-            if fstatat_linux(directory, path, &raw, flags) == 0:
-                return linux_metadata(raw)
-            if c.errno() != c.interrupted:
-                error(classify_error(c.errno()), "directory-entry metadata could not be read")
+        let flags: i32 = 0 if follow_symlinks else at_no_follow_flag
+        if platform.macos:
+            var raw: MacMetadata
+            while true:
+                if fstatat_macos(directory, path, &raw, flags) == 0:
+                    return mac_metadata(raw)
+                if c.errno() != c.interrupted:
+                    error(classify_error(c.errno()), "directory-entry metadata could not be read")
+        elif platform.wasm32:
+            var wasi: WasiMetadata
+            while true:
+                if fstatat_wasi(directory, path, &wasi, flags) == 0:
+                    return wasi_metadata(wasi)
+                if c.errno() != c.interrupted:
+                    error(classify_error(c.errno()), "directory-entry metadata could not be read")
+        elif platform.arm64:
+            var raw64: LinuxArm64Metadata
+            while true:
+                if fstatat_linux_arm64(directory, path, &raw64, flags) == 0:
+                    return linux_arm64_metadata(raw64)
+                if c.errno() != c.interrupted:
+                    error(classify_error(c.errno()), "directory-entry metadata could not be read")
+        else:
+            var raw: LinuxMetadata
+            while true:
+                if fstatat_linux(directory, path, &raw, flags) == 0:
+                    return linux_metadata(raw)
+                if c.errno() != c.interrupted:
+                    error(classify_error(c.errno()), "directory-entry metadata could not be read")

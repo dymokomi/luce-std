@@ -102,82 +102,83 @@ pub func run(program: c.str, arguments: const c.str[], directory: c.str = "", en
 func run_controlled(program: c.str, arguments: const c.str[], directory: c.str, environment: const c.str[]?, control: CommandState*?) -> (i32, str, str)!:
     if platform.windows:
         return try run_windows(program, arguments, directory, environment, control)
-    let slot = environment_address()
-    var selected: (c.str?)[]
-    if let overrides = environment:
-        selected = try environment_posix(overrides, *slot)
-    defer release_storage(selected)
-    let argv = try alloc void*?[arguments.length + 2]
-    argv[0] = (void*)program
-    var i: usize = 0
-    while i < arguments.length:
-        argv[i + 1] = (void*)arguments[i]
-        i += 1
-    argv[arguments.length + 1] = none
-    var out_pipe: i32[2]
-    var err_pipe: i32[2]
-    if pipe((i32*)&out_pipe) != 0:
-        free(argv)
-        error(failed, "run")
-    if pipe((i32*)&err_pipe) != 0:
-        discard(close(out_pipe[0]))
-        discard(close(out_pipe[1]))
-        free(argv)
-        error(failed, "run")
-    let pid = fork()
-    if pid < 0:
-        discard(close(out_pipe[0]))
-        discard(close(out_pipe[1]))
-        discard(close(err_pipe[0]))
-        discard(close(err_pipe[1]))
-        free(argv)
-        error(failed, "run")
-    if pid == 0:
-        if control != none:
-            if setpgid(0, 0) != 0:
-                _exit(127)
-            let input = open("/dev/null", 0)
-            if input < 0 or dup2(input, 0) < 0:
-                _exit(127)
-            if input > 2:
-                discard(close(input))
-        discard(close(out_pipe[0]))
-        discard(close(err_pipe[0]))
-        if dup2(out_pipe[1], 1) < 0 or dup2(err_pipe[1], 2) < 0:
-            _exit(127)
-        discard(close(out_pipe[1]))
-        discard(close(err_pipe[1]))
-        if ((str)directory).length > 0 and chdir(directory) != 0:
-            _exit(127)
-        if selected.length > 0:
-            *slot = selected.data
-        discard(execvp(program, argv.data))
-        _exit(127)
-    if control != none:
-        discard(setpgid(pid, pid))
-    free(argv)
-    discard(close(out_pipe[1]))
-    discard(close(err_pipe[1]))
-    var empty: u8[]
-    var out = Capture(descriptor = out_pipe[0], data = empty, used = 0, open = true)
-    var err = Capture(descriptor = err_pipe[0], data = empty, used = 0, open = true)
-    defer discard(close(out_pipe[0]))
-    defer discard(close(err_pipe[0]))
-    defer out.drop()
-    defer err.drop()
-    var status: i32 = 0
-    if let observer = control:
-        status = try capture_command(pid, &out, &err, observer)
     else:
-        try capture(pid, &out, &err)
-        status = try wait_for(pid)
-    if (status & 127) != 0:
-        error(failed, "the program was stopped by a signal")
-    let out_text = try out.take()
-    let err_text = err.take() catch failure:
-        release(out_text)
-        error(failure.code, failure.message)
-    return ((status >> 8) & 255, out_text, err_text)
+        let slot = environment_address()
+        var selected: (c.str?)[]
+        if let overrides = environment:
+            selected = try environment_posix(overrides, *slot)
+        defer release_storage(selected)
+        let argv = try alloc void*?[arguments.length + 2]
+        argv[0] = (void*)program
+        var i: usize = 0
+        while i < arguments.length:
+            argv[i + 1] = (void*)arguments[i]
+            i += 1
+        argv[arguments.length + 1] = none
+        var out_pipe: i32[2]
+        var err_pipe: i32[2]
+        if pipe((i32*)&out_pipe) != 0:
+            free(argv)
+            error(failed, "run")
+        if pipe((i32*)&err_pipe) != 0:
+            discard(close(out_pipe[0]))
+            discard(close(out_pipe[1]))
+            free(argv)
+            error(failed, "run")
+        let pid = fork()
+        if pid < 0:
+            discard(close(out_pipe[0]))
+            discard(close(out_pipe[1]))
+            discard(close(err_pipe[0]))
+            discard(close(err_pipe[1]))
+            free(argv)
+            error(failed, "run")
+        if pid == 0:
+            if control != none:
+                if setpgid(0, 0) != 0:
+                    _exit(127)
+                let input = open("/dev/null", 0)
+                if input < 0 or dup2(input, 0) < 0:
+                    _exit(127)
+                if input > 2:
+                    discard(close(input))
+            discard(close(out_pipe[0]))
+            discard(close(err_pipe[0]))
+            if dup2(out_pipe[1], 1) < 0 or dup2(err_pipe[1], 2) < 0:
+                _exit(127)
+            discard(close(out_pipe[1]))
+            discard(close(err_pipe[1]))
+            if ((str)directory).length > 0 and chdir(directory) != 0:
+                _exit(127)
+            if selected.length > 0:
+                *slot = selected.data
+            discard(execvp(program, argv.data))
+            _exit(127)
+        if control != none:
+            discard(setpgid(pid, pid))
+        free(argv)
+        discard(close(out_pipe[1]))
+        discard(close(err_pipe[1]))
+        var empty: u8[]
+        var out = Capture(descriptor = out_pipe[0], data = empty, used = 0, open = true)
+        var err = Capture(descriptor = err_pipe[0], data = empty, used = 0, open = true)
+        defer discard(close(out_pipe[0]))
+        defer discard(close(err_pipe[0]))
+        defer out.drop()
+        defer err.drop()
+        var status: i32 = 0
+        if let observer = control:
+            status = try capture_command(pid, &out, &err, observer)
+        else:
+            try capture(pid, &out, &err)
+            status = try wait_for(pid)
+        if (status & 127) != 0:
+            error(failed, "the program was stopped by a signal")
+        let out_text = try out.take()
+        let err_text = err.take() catch failure:
+            release(out_text)
+            error(failure.code, failure.message)
+        return ((status >> 8) & 255, out_text, err_text)
 
 ## Optional child state has no allocation when inherited unchanged.
 func release_storage[T](storage: T[]):

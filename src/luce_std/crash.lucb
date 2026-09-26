@@ -56,33 +56,34 @@ pub func directory() -> interop.Owned[str]!:
 pub func enable(app: str, version: str = "") -> !:
     if platform.wasm32:
         return
-    let folder = try directory()
-    defer folder.release()
-    try files.ensure_directory(folder.value)
-    var name: u8[64]
-    let kept = safe_name(app, name)
-    var stamp: u8[128]
-    let started = time.unix()
-    var pid: i64 = 0
-    if platform.windows:
-        pid = (i64)GetCurrentProcessId()
-    elif platform.posix and not platform.wasm32:
-        pid = (i64)getpid()
-    let file_name = try format(stamp, f"{kept}-{started}-{pid}.crash")
-    let path = try paths.join(folder.value, file_name)
-    defer strings.release(path)
-    var header: u8[1024]
-    let text = try format(header, f"luce crash report\napp: {app}\nversion: {version}\nplatform: {platform.name}\npid: {pid}\nstarted: {started}\n\n")
-    core.set_crash_report(path, text)
-    if platform.posix and not platform.wasm32:
-        discard(install_signal(illegal_signal, fatal_signal))
-        discard(install_signal(abort_signal, fatal_signal))
-        discard(install_signal(arithmetic_signal, fatal_signal))
-        discard(install_signal(segmentation_signal, fatal_signal))
-        discard(install_signal(bus_signal(), fatal_signal))
-    if platform.windows:
-        # every thread's unhandled exception, where POSIX has signals
-        discard(SetUnhandledExceptionFilter(fatal_exception))
+    else:
+        let folder = try directory()
+        defer folder.release()
+        try files.ensure_directory(folder.value)
+        var name: u8[64]
+        let kept = safe_name(app, name)
+        var stamp: u8[128]
+        let started = time.unix()
+        var pid: i64 = 0
+        if platform.windows:
+            pid = (i64)GetCurrentProcessId()
+        elif platform.posix and not platform.wasm32:
+            pid = (i64)getpid()
+        let file_name = try format(stamp, f"{kept}-{started}-{pid}.crash")
+        let path = try paths.join(folder.value, file_name)
+        defer strings.release(path)
+        var header: u8[1024]
+        let text = try format(header, f"luce crash report\napp: {app}\nversion: {version}\nplatform: {platform.name}\npid: {pid}\nstarted: {started}\n\n")
+        core.set_crash_report(path, text)
+        if platform.posix and not platform.wasm32:
+            discard(install_signal(illegal_signal, fatal_signal))
+            discard(install_signal(abort_signal, fatal_signal))
+            discard(install_signal(arithmetic_signal, fatal_signal))
+            discard(install_signal(segmentation_signal, fatal_signal))
+            discard(install_signal(bus_signal(), fatal_signal))
+        if platform.windows:
+            # every thread's unhandled exception, where POSIX has signals
+            discard(SetUnhandledExceptionFilter(fatal_exception))
 
 let illegal_signal: i32 = 4
 let abort_signal: i32 = 6

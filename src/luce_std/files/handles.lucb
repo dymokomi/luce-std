@@ -78,12 +78,13 @@ pub struct File: io.Reader, io.Writer:
         if platform.windows:
             try windows_permissions(descriptor, permissions)
             return
-        while true:
-            let result = fchmod_macos(descriptor, (u16)permissions) if platform.macos else fchmod_linux(descriptor, permissions)
-            if result == 0:
-                return
-            if c.errno() != c.interrupted:
-                error(classify_error(c.errno()), "file permissions could not be changed")
+        else:
+            while true:
+                let result = fchmod_macos(descriptor, (u16)permissions) if platform.macos else fchmod_linux(descriptor, permissions)
+                if result == 0:
+                    return
+                if c.errno() != c.interrupted:
+                    error(classify_error(c.errno()), "file permissions could not be changed")
 
     ## Set explicit access and modification times; creation/status-change times
     ## are not set by this operation. Validate nanoseconds before the OS call.
@@ -95,13 +96,14 @@ pub struct File: io.Reader, io.Writer:
         if platform.windows:
             try windows_set_times(descriptor, accessed, modified)
             return
-        let times: NativeFileTime[2] = [NativeFileTime(seconds = accessed.seconds, nanoseconds = (i64)accessed.nanoseconds),
-                                        NativeFileTime(seconds = modified.seconds, nanoseconds = (i64)modified.nanoseconds)]
-        var result = futimens(descriptor, &times[0])
-        while result != 0 and c.errno() == c.interrupted:
-            result = futimens(descriptor, &times[0])
-        if result != 0:
-            error(classify_error(c.errno()), "file timestamps could not be changed")
+        else:
+            let times: NativeFileTime[2] = [NativeFileTime(seconds = accessed.seconds, nanoseconds = (i64)accessed.nanoseconds),
+                                            NativeFileTime(seconds = modified.seconds, nanoseconds = (i64)modified.nanoseconds)]
+            var result = futimens(descriptor, &times[0])
+            while result != 0 and c.errno() == c.interrupted:
+                result = futimens(descriptor, &times[0])
+            if result != 0:
+                error(classify_error(c.errno()), "file timestamps could not be changed")
 
     ## Read some bytes, retrying interruption. Zero for nonempty storage is EOF;
     ## empty input makes no system call. The handle must be open even for empty I/O.
@@ -170,32 +172,33 @@ pub struct File: io.Reader, io.Writer:
 func classify_error(number: i32) -> ErrorCode:
     if platform.wasm32:
         return classify_wasi_error(number)
-    if number == 2:
-        return missing
-    if number == 1 or number == 13:
-        return permission_denied
-    if number == 17:
-        return already_exists
-    if number == 28:
-        return no_space
-    if number == 20:
-        return not_directory
-    if number == 21:
-        return is_directory
-    if number == 30:
-        return read_only_filesystem
-    # the UCRT numbers its errors its own way: `ENOTEMPTY` 41, `ENAMETOOLONG` 38, no `ELOOP`
-    if number == (66 if platform.macos else (41 if platform.windows else 39)):
-        return not_empty
-    if number == 18:
-        return cross_device
-    if number == (62 if platform.macos else 40) and not platform.windows:
-        return symlink_loop
-    if number == (63 if platform.macos else (38 if platform.windows else 36)):
-        return name_too_long
-    if number == would_block_errno:
-        return would_block
-    return failed
+    else:
+        if number == 2:
+            return missing
+        if number == 1 or number == 13:
+            return permission_denied
+        if number == 17:
+            return already_exists
+        if number == 28:
+            return no_space
+        if number == 20:
+            return not_directory
+        if number == 21:
+            return is_directory
+        if number == 30:
+            return read_only_filesystem
+        # the UCRT numbers its errors its own way: `ENOTEMPTY` 41, `ENAMETOOLONG` 38, no `ELOOP`
+        if number == (66 if platform.macos else (41 if platform.windows else 39)):
+            return not_empty
+        if number == 18:
+            return cross_device
+        if number == (62 if platform.macos else 40) and not platform.windows:
+            return symlink_loop
+        if number == (63 if platform.macos else (38 if platform.windows else 36)):
+            return name_too_long
+        if number == would_block_errno:
+            return would_block
+        return failed
 
 ## WASI numbers its errors alphabetically (§19.5).
 func classify_wasi_error(number: i32) -> ErrorCode:
@@ -229,7 +232,8 @@ func classify_wasi_error(number: i32) -> ErrorCode:
 func open_descriptor(path: c.str, flags: i32, permissions: u32) -> i32!:
     if platform.windows:
         return try windows_open(path, flags, permissions)
-    return open(path, flags, permissions)
+    else:
+        return open(path, flags, permissions)
 
 func file_open_flags(mode: OpenMode, permissions: u32) -> i32!:
     if permissions > 4095:

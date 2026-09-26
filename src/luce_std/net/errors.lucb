@@ -102,16 +102,17 @@ func resolver_error(number: i32) -> ErrorCode:
         if number == 8:
             return resource_exhausted
         return socket_error(number)
-    if number == (2 if platform.macos else -3):
-        return resolution_temporary
-    if number == (6 if platform.macos else -10):
-        return resource_exhausted
-    if number == (11 if platform.macos else -11):
-        return socket_error(socket_errno())
-    if number == (8 if platform.macos else -2) or number == (7 if platform.macos else -5) or number == (1 if platform.macos else -9):
-        return unknown_host
-    if number == (5 if platform.macos else -6) or number == (10 if platform.macos else -7):
-        return unsupported
-    if number == (3 if platform.macos else -1) or number == (9 if platform.macos else -8):
-        return invalid_options
-    return failed
+    else:
+        if number == (2 if platform.macos else -3):
+            return resolution_temporary
+        if number == (6 if platform.macos else -10):
+            return resource_exhausted
+        if number == (11 if platform.macos else -11):
+            return socket_error(socket_errno())
+        if number == (8 if platform.macos else -2) or number == (7 if platform.macos else -5) or number == (1 if platform.macos else -9):
+            return unknown_host
+        if number == (5 if platform.macos else -6) or number == (10 if platform.macos else -7):
+            return unsupported
+        if number == (3 if platform.macos else -1) or number == (9 if platform.macos else -8):
+            return invalid_options
+        return failed

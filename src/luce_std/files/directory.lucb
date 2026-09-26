@@ -23,10 +23,11 @@ pub struct Directory:
         let directory = self.handle else error(io.closed, "the directory is closed")
         if platform.windows:
             return ((WinDirectory*)directory).descriptor
-        let descriptor = dirfd(directory)
-        if descriptor < 0:
-            error(classify_error(c.errno()), "the directory has no usable descriptor")
-        return descriptor
+        else:
+            let descriptor = dirfd(directory)
+            if descriptor < 0:
+                error(classify_error(c.errno()), "the directory has no usable descriptor")
+            return descriptor
 
     ## Metadata for the opened directory, independent of its current pathname.
     pub func metadata() -> Metadata!:
@@ -56,16 +57,17 @@ pub struct Directory:
             let joined = try windows_relative(parent, path)
             defer strings.release(joined)
             return File(handle = try windows_open((c.str)joined, flags, permissions, follow_symlinks, nonblocking))
-        if not follow_symlinks:
-            flags |= no_follow_flag
-        if nonblocking:
-            flags |= nonblocking_open_flag
-        var descriptor = openat(parent, path, flags, permissions)
-        while descriptor < 0 and c.errno() == c.interrupted:
-            descriptor = openat(parent, path, flags, permissions)
-        if descriptor < 0:
-            error(classify_error(c.errno()), "the directory-relative file could not be opened")
-        return File(handle = descriptor)
+        else:
+            if not follow_symlinks:
+                flags |= no_follow_flag
+            if nonblocking:
+                flags |= nonblocking_open_flag
+            var descriptor = openat(parent, path, flags, permissions)
+            while descriptor < 0 and c.errno() == c.interrupted:
+                descriptor = openat(parent, path, flags, permissions)
+            if descriptor < 0:
+                error(classify_error(c.errno()), "the directory-relative file could not be opened")
+            return File(handle = descriptor)
 
     ## The next name excluding dot and dot-dot, or none at end. Names are raw path
     ## bytes, NUL-terminated but not guaranteed UTF-8. The view expires on the next
@@ -84,8 +86,9 @@ pub struct Directory:
         if platform.windows:
             try windows_directory_close((WinDirectory*)directory)
             return
-        if closedir(directory) != 0:
-            error(classify_error(c.errno()), "the directory could not be closed")
+        else:
+            if closedir(directory) != 0:
+                error(classify_error(c.errno()), "the directory could not be closed")
 
     ## Best-effort unwind cleanup; use close to observe an error on the success path.
     pub mutating func destroy():
@@ -97,19 +100,20 @@ pub struct Directory:
 func open_directory_at(parent: i32, path: c.str, follow_symlinks: bool) -> Directory!:
     if platform.windows:
         return try windows_directory_open(parent, path, follow_symlinks)
-    var flags = directory_flag | close_on_exec
-    if not follow_symlinks:
-        flags |= no_follow_flag
-    var descriptor = openat(parent, path, flags)
-    while descriptor < 0 and c.errno() == c.interrupted:
-        descriptor = openat(parent, path, flags)
-    if descriptor < 0:
-        error(classify_error(c.errno()), "the directory could not be opened")
-    if let stream = fdopendir(descriptor):
-        return Directory(handle = stream)
-    let number = c.errno()
-    discard(close(descriptor))
-    error(classify_error(number), "the directory stream could not be created")
+    else:
+        var flags = directory_flag | close_on_exec
+        if not follow_symlinks:
+            flags |= no_follow_flag
+        var descriptor = openat(parent, path, flags)
+        while descriptor < 0 and c.errno() == c.interrupted:
+            descriptor = openat(parent, path, flags)
+        if descriptor < 0:
+            error(classify_error(c.errno()), "the directory could not be opened")
+        if let stream = fdopendir(descriptor):
+            return Directory(handle = stream)
+        let number = c.errno()
+        discard(close(descriptor))
+        error(classify_error(number), "the directory stream could not be created")
 
 # mark: Listing ===============================================================================
 

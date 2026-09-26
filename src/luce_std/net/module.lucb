@@ -8,7 +8,6 @@
 #==============================================================================================
 
 import c
-import atomic
 import platform
 import memory
 import io
@@ -91,7 +90,8 @@ extern struct LinuxMessage:
 func family_word(family: i32, length: u8) -> u16:
     if platform.macos:
         return (u16)length | ((u16)family << 8)
-    return (u16)family
+    else:
+        return (u16)family
 
 ## `addrinfo`: macOS puts the canonical name before the address, Linux after it.
 extern struct AddressInfo:
@@ -131,24 +131,29 @@ let socket_interrupted: i32 = 10004 if platform.windows else c.interrupted
 func socket_errno() -> i32:
     if platform.windows:
         return WSAGetLastError()
-    return c.errno()
+    else:
+        return c.errno()
 
 func close(descriptor: platform.SocketDescriptor) -> i32:
     if platform.windows:
         return closesocket(descriptor)
-    return posix_close(descriptor)
+    else:
+        return posix_close(descriptor)
 
 func send(descriptor: platform.SocketDescriptor, data: const void*, length: usize, flags: i32) -> isize:
     if platform.windows:
         return (isize)windows_send(descriptor, data, (i32)length, flags)
-    return posix_send(descriptor, data, length, flags)
+    else:
+        return posix_send(descriptor, data, length, flags)
 
 func recv(descriptor: platform.SocketDescriptor, data: void*, length: usize, flags: i32) -> isize:
     if platform.windows:
         return (isize)windows_recv(descriptor, data, (i32)length, flags)
-    return posix_recv(descriptor, data, length, flags)
+    else:
+        return posix_recv(descriptor, data, length, flags)
 
 func sendto(descriptor: platform.SocketDescriptor, data: const void*, length: usize, flags: i32, address: const void*, address_length: u32) -> isize:
     if platform.windows:
         return (isize)windows_sendto(descriptor, data, (i32)length, flags, address, address_length)
-    return posix_sendto(descriptor, data, length, flags, address, address_length)
+    else:
+        return posix_sendto(descriptor, data, length, flags, address, address_length)

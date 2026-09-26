@@ -28,10 +28,14 @@ func last_separator(path: str) -> usize?:
     return none
 
 func drive_prefix(path: str) -> bool:
-    if not platform.windows or path.length < 2 or path.bytes[1] != ':':
+    # Each platform is a branch of its own, so neither leaves code unreachable.
+    if platform.windows:
+        if path.length < 2 or path.bytes[1] != ':':
+            return false
+        let drive = path.bytes[0]
+        return (drive >= 'A' and drive <= 'Z') or (drive >= 'a' and drive <= 'z')
+    else:
         return false
-    let drive = path.bytes[0]
-    return (drive >= 'A' and drive <= 'Z') or (drive >= 'a' and drive <= 'z')
 
 ## The volume and root prefix, preserved verbatim. A drive-relative `C:foo` has
 ## root `C:`; a UNC share is indivisible, including its optional trailing separator.
@@ -41,8 +45,16 @@ pub func root(path: str) -> str:
         return (str)path.bytes[..<count]
     if path.length == 0 or not separator(path.bytes[0]):
         return ""
-    if not platform.windows or path.length < 2 or not separator(path.bytes[1]):
+    if platform.windows:
+        if path.length < 2 or not separator(path.bytes[1]):
+            return (str)path.bytes[..<1]
+        return share_root(path)
+    else:
         return (str)path.bytes[..<1]
+
+## A Windows root beginning with two separators: a device namespace (`\\?\`,
+## `\\.\`) or a UNC share, which is indivisible.
+func share_root(path: str) -> str:
     var start: usize = 2
     # Extended DOS and UNC namespaces retain the prefix at the OS boundary.
     if path.length >= 4 and (path.bytes[2] == '?' or path.bytes[2] == '.') and separator(path.bytes[3]):
@@ -74,11 +86,16 @@ pub func is_absolute(path: str) -> bool:
         return path.length >= 3 and separator(path.bytes[2])
     if path.length == 0 or not separator(path.bytes[0]):
         return false
-    if not platform.windows:
+    if platform.windows:
+        return share_absolute(path)
+    else:
         return true
+
+## Whether a Windows path from a separator names a whole share: two separators,
+## then a nonempty server and share (or a device namespace component).
+func share_absolute(path: str) -> bool:
     if path.length < 2 or not separator(path.bytes[1]):
         return false
-    # Require a nonempty server and share (or a device namespace component).
     var index: usize = 2
     while index < path.length and not separator(path.bytes[index]):
         index += 1

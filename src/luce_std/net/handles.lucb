@@ -24,14 +24,16 @@ struct SocketHandle:
             if descriptor < 0:
                 error(socket_error(socket_errno()), "a socket could not be created")
             return SocketHandle(value = descriptor)
-        let flags: i32 = 0 if platform.macos else socket_close_on_exec
-        let family = inet if version == IpVersion.ipv4 else inet6
-        let descriptor = socket(family, kind | flags, 0)
-        if descriptor < 0:
-            error(socket_error(socket_errno()), "a socket could not be created")
-        if platform.macos:
-            return try SocketHandle.adopt(descriptor)
-        return SocketHandle(value = descriptor)
+        else:
+            let flags: i32 = 0 if platform.macos else socket_close_on_exec
+            let family = inet if version == IpVersion.ipv4 else inet6
+            let descriptor = socket(family, kind | flags, 0)
+            if descriptor < 0:
+                error(socket_error(socket_errno()), "a socket could not be created")
+            if platform.macos:
+                return try SocketHandle.adopt(descriptor)
+            else:
+                return SocketHandle(value = descriptor)
 
     ## Ownership transfers on entry, including failure. Preserve existing
     ## descriptor flags and close once if setting close-on-exec fails.
@@ -46,22 +48,23 @@ struct SocketHandle:
                 error(failed, "socket inheritance could not be disabled")
             try set_nonblocking(descriptor, false)
             return owned
-        var flags = fcntl(descriptor, get_descriptor_flags)
-        while flags < 0 and socket_errno() == socket_interrupted:
-            flags = fcntl(descriptor, get_descriptor_flags)
-        if flags < 0:
-            let code = socket_error(socket_errno())
-            discard(close(descriptor))
-            error(code, "socket descriptor flags could not be queried")
-        if (flags & descriptor_close_on_exec) == 0:
-            var result = fcntl(descriptor, set_descriptor_flags, flags | descriptor_close_on_exec)
-            while result < 0 and socket_errno() == socket_interrupted:
-                result = fcntl(descriptor, set_descriptor_flags, flags | descriptor_close_on_exec)
-            if result < 0:
+        else:
+            var flags = fcntl(descriptor, get_descriptor_flags)
+            while flags < 0 and socket_errno() == socket_interrupted:
+                flags = fcntl(descriptor, get_descriptor_flags)
+            if flags < 0:
                 let code = socket_error(socket_errno())
                 discard(close(descriptor))
-                error(code, "the socket could not be marked close-on-exec")
-        return SocketHandle(value = descriptor)
+                error(code, "socket descriptor flags could not be queried")
+            if (flags & descriptor_close_on_exec) == 0:
+                var result = fcntl(descriptor, set_descriptor_flags, flags | descriptor_close_on_exec)
+                while result < 0 and socket_errno() == socket_interrupted:
+                    result = fcntl(descriptor, set_descriptor_flags, flags | descriptor_close_on_exec)
+                if result < 0:
+                    let code = socket_error(socket_errno())
+                    discard(close(descriptor))
+                    error(code, "the socket could not be marked close-on-exec")
+            return SocketHandle(value = descriptor)
 
     func require() -> platform.SocketDescriptor!:
         let descriptor = self.value else error(closed, "the socket is closed")

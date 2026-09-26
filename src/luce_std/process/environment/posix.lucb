@@ -15,7 +15,8 @@ extern func chdir(path: c.str) -> i32
 func environment_address() -> (c.str?)**:
     if platform.macos:
         return _NSGetEnviron()
-    return &environ
+    else:
+        return &environ
 
 func environment_name(entry: c.str) -> str!:
     let text = (str)entry
