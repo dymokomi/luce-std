@@ -2,6 +2,7 @@
 """Crash on purpose and check the report names the faulting function and its callers."""
 from pathlib import Path
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -9,6 +10,31 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[3]
 COMPILER = Path(sys.argv[1]).resolve()
 CHAIN = ["crash_depth_three", "crash_depth_two", "crash_depth_one"]
+
+def symbolicated(stack: str, executable: Path) -> str:
+    """Windows reports give module+offset (no dladdr there); name the program's frames
+    from its symbol table, as a debugger would, so the order can be checked."""
+    listing = subprocess.run(["nm", "-n", "--defined-only", executable], capture_output=True, text=True, check=True).stdout
+    symbols = []
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[1] in "tT":
+            symbols.append((int(parts[0], 16), parts[2]))
+    names = []
+    for line in stack.splitlines():
+        found = re.search(re.escape(executable.name) + r"\+0x([0-9a-f]+)", line)
+        if not found:
+            continue
+        # A 64-bit PE's image base: nm lists addresses from it.
+        address = 0x140000000 + int(found.group(1), 16)
+        best = None
+        for start, name in symbols:
+            if start <= address:
+                best = name
+            else:
+                break
+        names.append(best or "?")
+    return "\n".join(names)
 
 def report(home: Path) -> str:
     reports = sorted((home / ".luce" / "crashes").glob("crashcheck-*.crash"))
@@ -31,6 +57,8 @@ with tempfile.TemporaryDirectory(prefix="std-crash-") as temporary:
             assert result.returncode != 0, f"{mode}: the program did not crash"
             text = report(home)
             stack = text.split("stack:", 1)[1] if "stack:" in text else ""
+            if os.name == "nt":
+                stack = symbolicated(stack, executable)
             places = [stack.find(name) for name in CHAIN]
             if any(place < 0 for place in places) or places != sorted(places):
                 print(text)
