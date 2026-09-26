@@ -175,6 +175,11 @@ func join_write(b: core.FormatBuffer*, left: str, right: str):
 pub func join_into(buffer: u8[], left: str, right: str) -> str:
     var b = core.FormatBuffer(data = buffer.data, capacity = buffer.length, used = 0)
     join_write(&b, left, right)
+    # A path cut short names another file: one that does not fit (with its NUL) is "".
+    if b.used >= b.capacity:
+        if buffer.length > 0:
+            buffer[0] = 0
+        return ""
     return core.format_finish(&b)
 
 ## Lexically remove dot components, redundant separators and cancellable parent
