@@ -10,6 +10,12 @@
 
 extern func realpath(path: c.str, output: u8*?) -> u8*?
 extern func release_realpath as "free"(path: void*)
+extern func fcntl(descriptor: i32, command: i32, ...) -> i32
+
+## macOS: `open` for a descriptor that only names the entry (no read access needed, and a
+## FIFO does not block), and `fcntl`'s question for the path the descriptor names.
+let event_only: i32 = 32768
+let get_path: i32 = 50
 
 ## Resolve an existing entry through symlinks to its absolute filesystem path.
 ## Windows extended DOS/UNC prefixes are normalized to ordinary UTF-8 paths with
@@ -36,6 +42,23 @@ pub func canonical(path: c.str) -> str!:
             if bytes[index] == 92:
                 bytes[index] = '/'
         return result
+    elif platform.macos:
+        # realpath lists every directory on the way to learn each name's case; the
+        # descriptor's path is the same answer from the kernel at once
+        # (an entry that cannot be opened so, such as a socket, goes to realpath, whose
+        # answer or failure stands)
+        let descriptor = open(path, event_only)
+        if descriptor >= 0:
+            defer discard(close(descriptor))
+            var buffer: u8[1024] = ---
+            if fcntl(descriptor, get_path, &buffer[0]) >= 0:
+                var length: usize = 0
+                while length < buffer.length and buffer[length] != 0:
+                    length += 1
+                return try strings.copy((str)buffer[..<length])
+        let resolved = realpath(path, none) else error(classify_error(c.errno()), "the filesystem path could not be resolved")
+        defer release_realpath((void*)resolved)
+        return try strings.copy((str)(c.str)resolved)
     else:
         let resolved = realpath(path, none) else error(classify_error(c.errno()), "the filesystem path could not be resolved")
         defer release_realpath((void*)resolved)

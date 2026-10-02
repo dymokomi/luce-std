@@ -32,3 +32,26 @@ test "a temporary file loses its name once open and still reads back":
     assert((try opened.read(back)) == 7)
     assert((str)back[..<7] == "scratch")
     try opened.close()
+
+test "canonical paths resolve links, and a missing entry is missing":
+    let base = try files.canonical((c.str)io.path.temp())
+    let root = try files.create_temporary_directory((c.str)base)
+    defer files.remove_tree((c.str)root) catch ignored:
+        discard(ignored)
+    let real = try strings.join([root, "/real"], "")
+    try files.create_directory((c.str)real)
+    let file = try strings.join([real, "/file.txt"], "")
+    try files.write((c.str)file, "x".bytes)
+    let link = try strings.join([root, "/link"], "")
+    try files.create_symlink((c.str)real, (c.str)link, true)
+    # through the link, and through a `..` that leaves it, the file's own path comes back
+    let through = try strings.join([link, "/file.txt"], "")
+    assert((try files.canonical((c.str)through)) == file)
+    let around = try strings.join([link, "/../real/file.txt"], "")
+    assert((try files.canonical((c.str)around)) == file)
+    assert((try files.canonical((c.str)link)) == real)
+    let absent = try strings.join([root, "/absent.txt"], "")
+    let answer = files.canonical((c.str)absent) catch failure:
+        assert(failure.code == files.missing)
+        recover "missing"
+    assert(answer == "missing")
