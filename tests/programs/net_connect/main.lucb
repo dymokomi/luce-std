@@ -1,6 +1,6 @@
 import sync
 import c
-import luce_std.net
+from luce_std import net
 
 extern func reference_begin(kind: i32)
 extern func reference_end() -> i32

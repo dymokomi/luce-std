@@ -1,6 +1,6 @@
 import c
 import memory
-import luce_std.net
+from luce_std import net
 
 extern func reference_released() -> i32
 

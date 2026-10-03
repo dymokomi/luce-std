@@ -1,6 +1,6 @@
 import c
 import io
-import luce_std.net
+from luce_std import net
 
 extern func reference_endpoint(fd: i32, peer: i32, bytes: u8*, port: u16*, scope: u32*) -> i32
 extern func reference_scope_closed() -> i32

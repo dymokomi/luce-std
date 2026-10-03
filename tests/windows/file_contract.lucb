@@ -1,5 +1,5 @@
 import c
-import luce_std.files
+from luce_std import files
 import io
 import os
 import strings
