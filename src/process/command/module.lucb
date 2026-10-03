@@ -11,7 +11,7 @@
 import interop
 import thread
 import strings
-import luce_std.utf8 as utf8
+import utf8
 
 struct CommandState:
     var cancelled: @bool

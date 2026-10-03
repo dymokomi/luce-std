@@ -16,10 +16,10 @@
 
 import c
 import core
-import luce_std.files as files
+import files
 import interop
 import memory
-import luce_std.paths as paths
+import paths
 import platform
 import strings
 import time

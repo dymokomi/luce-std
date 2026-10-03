@@ -1,6 +1,6 @@
 import c
 import io
-import net
+import luce_std.net
 
 extern func reference_count() -> i32
 extern func reference_category(index: i32) -> i32

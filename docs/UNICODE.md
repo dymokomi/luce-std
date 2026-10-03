@@ -25,7 +25,7 @@ return false/zero for these queries. Existing `strings` byte and ASCII helpers
 retain their original semantics.
 
 The implementation and generated tables live in separate fragments under
-`src/luce_std/unicode`. The generator checks hashes of the vendored upstream data;
+`src/unicode`. The generator checks hashes of the vendored upstream data;
 normal builds and tests require no network access. Mapping tests use the pinned
 UnicodeData, SpecialCasing and CaseFolding records, with independent Python
 context tests for established characters. They cover expansion, NUL, unassigned

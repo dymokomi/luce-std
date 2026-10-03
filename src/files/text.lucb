@@ -9,7 +9,7 @@
 #==============================================================================================
 
 import interop
-import luce_std.utf8 as utf8
+import utf8
 
 func text_path(path: str) -> str!:
     if path.length == 0 or not utf8.valid(path.bytes):

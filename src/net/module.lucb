@@ -12,7 +12,7 @@ import platform
 import memory
 import io
 import strings
-import luce_std.utf8 as utf8
+import utf8
 import sync
 import os
 from io import Reader, Writer

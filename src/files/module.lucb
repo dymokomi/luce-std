@@ -13,7 +13,7 @@ import memory
 import windows_text
 import platform
 import io
-import luce_std.paths as paths
+import paths
 import strings
 import os
 extern func open(path: c.str, flags: i32, ...) -> i32

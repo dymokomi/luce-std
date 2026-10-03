@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data/unicode/17.0.0"
-OUTPUT = ROOT / "src/luce_std/unicode/tables.lucb"
+OUTPUT = ROOT / "src/unicode/tables.lucb"
 
 
 def records(name):

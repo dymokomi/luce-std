@@ -1,6 +1,6 @@
 import c
 import io
-import net
+import luce_std.net
 
 extern func reference_wait_readable(fd: i32)
 extern func reference_option(fd: i32, option: i32) -> i32

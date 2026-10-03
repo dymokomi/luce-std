@@ -2,7 +2,7 @@ import sync
 import c
 import io
 import memory
-import net
+import luce_std.net
 import thread
 
 extern func reference_begin(kind: i32)

@@ -4,8 +4,8 @@ The `net` standard module contains transport-independent HTTP/1.1 and WebSocket
 codecs alongside its existing TCP/UDP sockets, readiness polling, deadlines and
 cancellation. Import `net`; the public names are `HttpHead`, `HttpBodyDecoder`,
 `HttpBodyWriter`, `WebSocketDecoder`, `WebSocketEncoder`, and the `http_*` and
-`websocket_*` helpers. Source fragments are organized under `src/luce_std/net/http/`
-and `src/luce_std/net/websocket/`; those directories share the `net` module namespace.
+`websocket_*` helpers. Source fragments are organized under `src/net/http/`
+and `src/net/websocket/`; those directories share the `net` module namespace.
 
 These are protocol primitives. Listeners, worker scheduling, request queues,
 routing, static mounts and application lifecycle belong to the separate server

@@ -1,5 +1,5 @@
 import c
-import files
+import luce_std.files
 import io
 
 extern func metadata_prepare(descriptor: i32)

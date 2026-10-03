@@ -8,7 +8,7 @@
 #
 #==============================================================================================
 
-import luce_std.paths as paths
+import paths
 # mark: Windows process calls =================================================================
 
 from windows_abi import MultiByteToWideChar, GetLastError, CloseHandle, GetCurrentProcess, GetTempPathW, CreateFileW

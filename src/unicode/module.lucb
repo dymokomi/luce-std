@@ -14,7 +14,7 @@
 
 import memory
 import strings
-import luce_std.utf8 as utf8
+import utf8
 ## The Unicode version this module's data is generated from.
 pub let version: str = "17.0.0"
 

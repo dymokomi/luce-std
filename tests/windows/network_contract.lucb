@@ -1,6 +1,6 @@
 import sync
 import io
-import net
+import luce_std.net
 
 func tcp(version: net.IpVersion, dual: bool) -> !:
     let binding = net.SocketAddress.any(0, version) if dual else net.SocketAddress.loopback(0, version)
