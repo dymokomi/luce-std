@@ -1,0 +1,179 @@
+#==============================================================================================
+#
+#   random - Pseudo-random numbers
+#
+#   DESCRIPTION:
+#       A seeded xoshiro256** generator: whole numbers in a range, list indexes, floats,
+#       coin flips, normally distributed values and random bytes. Not for secrets: use the
+#       operating system's entropy (`os.random_bytes`) or a cryptography package for those.
+#
+#==============================================================================================
+
+import interop
+import math
+import os
+import owned
+
+## A range or count is empty or invalid.
+pub let invalid: ErrorCode = ErrorCode.package(50)
+
+## A pseudo-random generator: xoshiro256** (Blackman and Vigna), seeded through splitmix64.
+## The same seed gives the same numbers on every platform. A Luce program keeps one in a
+## `var`; drawing a number changes it.
+pub struct Random:
+    var a: u64
+    var b: u64
+    var c: u64
+    var d: u64
+
+    ## A generator seeded with `seed`, or from the operating system's entropy without one.
+    pub func init(seed: i64? = none) -> !:
+        var state: u64 = 0
+        if let chosen = seed:
+            state = (u64)chosen
+        else:
+            var entropy: u8[8]
+            try os.random_bytes(entropy)
+            for byte in entropy:
+                state = (state << 8) | (u64)byte
+        self.a = splitmix(&state)
+        self.b = splitmix(&state)
+        self.c = splitmix(&state)
+        self.d = splitmix(&state)
+
+    ## The next 64 random bits.
+    mutating func next() -> u64:
+        let result = rotate(self.b *% 5, 7) *% 9
+        let shifted = self.b << 17
+        self.c ^= self.a
+        self.d ^= self.b
+        self.b ^= self.c
+        self.a ^= self.d
+        self.c ^= shifted
+        self.d = rotate(self.d, 45)
+        return result
+
+    ## A number below `bound`, every one equally likely.
+    mutating func below(bound: u64) -> u64:
+        # draws under the threshold would favour the low numbers; there are fewer than
+        # `bound` of them, so a redraw is rare
+        let threshold = (~(u64)0 - bound + 1) % bound
+        while true:
+            let drawn = self.next()
+            if drawn >= threshold:
+                return drawn % bound
+
+    ## A whole number from `low` to `high`, both included, every one equally likely.
+    pub mutating func int(low: i64, high: i64) -> i64!:
+        if high < low:
+            error(invalid, "a range needs its low end at or below its high end")
+        let span = (u64)high -% (u64)low
+        if span == ~(u64)0:
+            return (i64)self.next()
+        return (i64)((u64)low +% self.below(span + 1))
+
+    ## An index into a list of `count` items, 0 to count - 1: `items[random.index(items.length)]`.
+    pub mutating func index(count: i64) -> i64!:
+        if count < 1:
+            error(invalid, "an index needs a nonempty list")
+        return (i64)self.below((u64)count)
+
+    ## A float from 0.0 up to, but not including, 1.0.
+    pub mutating func float() -> f64:
+        return (f64)(self.next() >> 11) * 0.00000000000000011102230246251565
+
+    ## A float from `low` up to, but not including, `high`.
+    pub mutating func uniform(low: f64, high: f64) -> f64:
+        return low + (high - low) * self.float()
+
+    ## True with probability `probability`, from 0.0 (never) to 1.0 (always).
+    pub mutating func chance(probability: f64) -> bool:
+        return self.float() < probability
+
+    ## A value from the normal distribution with `mean` and standard `deviation`.
+    pub mutating func normal(mean: f64 = 0.0, deviation: f64 = 1.0) -> f64:
+        # Box-Muller: two uniform draws, the first kept off zero for its logarithm
+        let first = 1.0 - self.float()
+        let second = self.float()
+        return mean + deviation * math.sqrt(-2.0 * math.log(first)) * math.cos(6.283185307179586 * second)
+
+    ## `count` random bytes. The result owns them: Luce copies them into `bytes`.
+    pub mutating func bytes(count: i64) -> interop.Owned[const u8[]]!:
+        if count < 0:
+            error(invalid, "a byte count cannot be negative")
+        let data = try alloc u8[(usize)count]
+        self.fill(data)
+        return try owned.adopt_bytes(data)
+
+    ## Fill `buffer` with random bytes.
+    pub mutating func fill(buffer: u8[]):
+        var index: usize = 0
+        while index < buffer.length:
+            var bits = self.next()
+            var lane: usize = 0
+            while lane < 8 and index < buffer.length:
+                buffer[index] = (u8)bits
+                bits >>= 8
+                index += 1
+                lane += 1
+
+func rotate(value: u64, count: u64) -> u64:
+    return (value << count) | (value >> (64 - count))
+
+func splitmix(state: u64*) -> u64:
+    *state +%= 11400714819323198485
+    var z = *state
+    z = (z ^ (z >> 30)) *% 13787848793156543929
+    z = (z ^ (z >> 27)) *% 10723151780598845931
+    return z ^ (z >> 31)
+
+test "a seed gives the same numbers, all within their ranges":
+    var first = try Random(42)
+    var second = try Random(42)
+    for draw in 0..<1000:
+        discard(draw)
+        let die = try first.int(1, 6)
+        assert(die == try second.int(1, 6) and die >= 1 and die <= 6)
+        let fraction = first.float()
+        assert(fraction == second.float() and fraction >= 0.0 and fraction < 1.0)
+    assert(try first.index(1) == 0)
+    assert(try first.int(-5, -5) == -5)
+    let extreme = try first.int(-9223372036854775807 - 1, 9223372036854775807)
+    discard(extreme)
+    let refused = first.int(2, 1) catch failure:
+        assert(failure.code == invalid)
+        recover 0
+    assert(refused == 0)
+
+test "every face of a die comes up about as often":
+    var generator = try Random(7)
+    var counts: i64[6]
+    for draw in 0..<60000:
+        discard(draw)
+        counts[(usize)(try generator.int(1, 6) - 1)] += 1
+    for count in counts:
+        assert(count > 9500 and count < 10500)
+    var total: f64 = 0.0
+    for draw in 0..<10000:
+        discard(draw)
+        total += generator.normal(10.0, 2.0)
+    assert(math.abs(total / 10000.0 - 10.0) < 0.1)
+
+test "entropy seeds differ and bytes are owned":
+    var one = try Random()
+    var two = try Random()
+    assert(one.float() != two.float())
+    let data = try one.bytes(33)
+    defer data.release()
+    assert(data.value.length == 33)
+
+test "the generator follows the xoshiro256** reference":
+    var generator = try Random(0)
+    generator.a = 1
+    generator.b = 2
+    generator.c = 3
+    generator.d = 4
+    assert(generator.next() == 11520 and generator.next() == 0)
+    assert(generator.next() == 1509978240 and generator.next() == 1215971899390074240)
+    var state: u64 = 0
+    assert(splitmix(&state) == 16294208416658607535)

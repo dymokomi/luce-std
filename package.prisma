@@ -6,7 +6,7 @@ def package "luce-std" {
     str language = "luce-base"
     str description = "Luce's standard library: files and directories, paths, processes, networking, math, UTF-8 and Unicode, and crash reports. The language runtime ships with the compiler; everything else a program imports lives here."
     str readme = "README.md"
-    str[] public = ["clock", "crash", "files", "math", "math32", "net", "paths", "process", "unicode", "utf8"]
+    str[] public = ["clock", "crash", "files", "math", "math32", "net", "paths", "process", "random", "unicode", "utf8"]
 
     def native "windows" {
         str[] libraries = ["ws2_32"]
