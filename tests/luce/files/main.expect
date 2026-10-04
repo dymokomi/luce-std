@@ -1,0 +1,15 @@
+[a.txt, b.bin, deep]
+[a.txt, b.bin, deep, deep/er]
+[first, second, third] b"\x00\x01\x02"
+line: first
+line: second
+line: third
+one
+ two
+
+8 FileKind.regular true FileKind.directory
+false true
+[a.txt, b.bin, log.txt] notes
+missing: true
+true
+false

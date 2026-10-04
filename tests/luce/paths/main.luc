@@ -1,0 +1,8 @@
+# paths: lexical joining, normalizing and splitting, without touching the disk.
+from luce_std import paths
+
+pub func main(arguments: list[str]) -> int!:
+    print(paths.join("a", "b.txt"), paths.join("/usr/", "lib"), paths.join("a", "/etc"))
+    print(paths.normalize("a/./b/../c"), paths.normalize("../x/.."), paths.normalize(""))
+    print(paths.base("/a/b/c.txt"), paths.directory("/a/b/c.txt"), paths.stem("c.tar.gz"), paths.extension("c.tar.gz"))
+    return 0

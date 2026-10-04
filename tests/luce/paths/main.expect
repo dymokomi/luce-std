@@ -1,0 +1,3 @@
+a/b.txt /usr/lib /etc
+a/c .. .
+c.txt /a/b c.tar .gz

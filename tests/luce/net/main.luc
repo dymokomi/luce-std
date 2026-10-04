@@ -1,0 +1,30 @@
+# net: a listener and a connection to it in one program: lines, text and bytes each way,
+# addresses as text, and name lookup.
+from luce_std import net
+
+pub func main(arguments: list[str]) -> int!:
+    with net.listen("127.0.0.1", 0) as listener:
+        let port = listener.port()
+        with net.connect("localhost", port, timeout = 5.0) as client:
+            with listener.accept_connection() as server:
+                client.write_text("hello\nwörld\r\n")
+                print(server.read_line(), server.read_line())
+                server.write_bytes(b"\x01\x02")
+                print(client.read_bytes(16))
+                print(server.peer_address().ip.text(), client.peer_address().port == port)
+                client.write_text("é")
+                print(server.read_text())
+                client.shutdown(net.ShutdownDirection.write)
+                print(server.read_line(), server.read_bytes())
+    # a port nothing listens on any more refuses
+    let listener = net.listen("127.0.0.1", 0)
+    let free_port = listener.port()
+    listener.close()
+    print(refused(free_port), "127.0.0.1" in net.lookup("localhost"))
+    return 0
+
+func refused(port: int) -> bool!:
+    let connection = net.connect("127.0.0.1", port, timeout = 2.0) catch failure:
+        return failure.code == net.connection_refused
+    connection.close()
+    return false

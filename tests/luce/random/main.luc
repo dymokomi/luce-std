@@ -1,0 +1,23 @@
+# random: a seeded generator gives the same numbers everywhere; one seeded from the system
+# gives numbers within the same ranges.
+from luce_std import random
+
+pub func main(arguments: list[str]) -> int!:
+    var seeded = random.Random(2026)
+    var rolls: list[int] = []
+    for i in 0..<10:
+        rolls.append(seeded.int(1, 6))
+    print(rolls)
+    let names = ["ada", "grace", "linus"]
+    print(names[seeded.index(names.length)], seeded.float(), seeded.chance(0.0), seeded.chance(1.0))
+    var system = random.Random()
+    var within = true
+    for i in 0..<1000:
+        let value = system.int(-3, 3)
+        let fraction = system.uniform(2.0, 4.0)
+        within = within and value >= -3 and value <= 3 and fraction >= 2.0 and fraction < 4.0
+    print(within, system.bytes(5).length)
+    let refused = system.int(5, 1) catch failure:
+        recover -1
+    print(refused)
+    return 0

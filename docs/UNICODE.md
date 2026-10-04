@@ -12,8 +12,9 @@ folding; its `turkic` option selects the Unicode CaseFolding.txt T mappings.
 Folding and lowercasing are different operations. None of these operations
 normalizes the result or applies a locale's collation rules.
 
-Results are fresh owned, NUL-terminated text, including unchanged or empty output.
-Release them with `unicode.release` under the allocator that created them. An
+Results are fresh NUL-terminated text, including unchanged or empty output, answered
+as `interop.Owned[str]`: Luce copies it into a `str`; a Base caller reads `.value` and
+calls `release()`. The text comes from the allocator current at the call. An
 optional `max_bytes` bounds result bytes and reports `strings.output_too_large`.
 Preflight measures the result before allocation, and size overflow reports
 `memory.exhausted`. No caller input is modified. Invalid input or a byte limit

@@ -1,0 +1,38 @@
+# files: whole-file text and bytes, File objects, listings and walks, metadata, copying,
+# renaming and removing, inside a temporary directory that removes itself.
+from luce_std import files, paths
+
+pub func main(arguments: list[str]) -> int!:
+    var kept = ""
+    with files.TemporaryDirectory() as directory:
+        kept = directory.path()
+        let notes = paths.join(kept, "notes")
+        files.ensure_directory(paths.join(notes, "deep/er"))
+        files.write_text(paths.join(notes, "a.txt"), "first\nsecond\r\nthird")
+        files.write(paths.join(notes, "b.bin"), b"\x00\x01\x02")
+        print(files.list(notes))
+        print(files.walk(notes))
+        print(files.read_text(paths.join(notes, "a.txt")).lines(), files.read(paths.join(notes, "b.bin")))
+        with files.open(paths.join(notes, "a.txt")) as file:
+            while let line = file.read_line():
+                print(f"line: {line}")
+        with files.open(paths.join(notes, "log.txt"), files.OpenMode.append) as log:
+            log.write_text("one\n")
+            log.write_bytes(b"two\n")
+        with files.open(paths.join(notes, "log.txt")) as log:
+            print(log.read_text(4), log.read_text())
+        let info = files.metadata(paths.join(notes, "log.txt"))
+        print(info.size, info.kind, info.modified.seconds > 0, files.metadata(notes).kind)
+        files.copy(paths.join(notes, "a.txt"), paths.join(notes, "c.txt"))
+        files.rename(paths.join(notes, "c.txt"), paths.join(notes, "d.txt"))
+        print(files.exists(paths.join(notes, "c.txt")), files.exists(paths.join(notes, "d.txt")))
+        files.remove_file(paths.join(notes, "d.txt"))
+        files.remove_tree(paths.join(notes, "deep"))
+        print(files.list(notes), paths.base(files.canonical(notes)))
+        let missing = files.read_text(paths.join(kept, "nowhere")) catch failure:
+            recover f"missing: {failure.code == files.missing}"
+        print(missing)
+        files.create_text(paths.join(notes, "a.txt"), "again") catch failure:
+            print(failure.code == files.already_exists)
+    print(files.exists(kept))
+    return 0

@@ -1,0 +1,20 @@
+# clock: durations, the monotonic clock and sleeping, and calendar dates as ISO 8601.
+from luce_std import clock
+
+pub func main(arguments: list[str]) -> int!:
+    let half = clock.Duration.of_seconds(0.5)
+    let span = half.plus(clock.Duration.of_milliseconds(250)).times(2.0)
+    print(span.seconds(), span.milliseconds(), half.minus(span).is_negative())
+    let start = clock.now()
+    clock.sleep(0.02)
+    print(start.elapsed().milliseconds() >= 20, clock.timestamp() > 1.7e9)
+    let moment = clock.DateTime(2026, 10, 4, 9, 30, 15, nanosecond = 250000000, offset = 7200)
+    print(moment.text(), moment.date_text(), moment.weekday(), moment.day_of_year())
+    print(moment.to_utc().text(), moment.at_offset(-18000).text(), moment.unix_seconds())
+    let parsed = clock.DateTime.parse("2026-10-04 07:30:15.25Z")
+    print(parsed.since(moment).seconds(), parsed.is_before(moment), parsed.plus(clock.Duration.of_seconds(86400.0)).text())
+    print(clock.DateTime.from_timestamp(0.0).text(), clock.DateTime.from_timestamp(-1.5).text())
+    let bad = clock.DateTime.parse("2026-02-30") catch failure:
+        recover clock.DateTime(1, 1, 1)
+    print(bad.year, clock.DateTime.now().year >= 2026, clock.DateTime.now_utc().offset)
+    return 0

@@ -1,0 +1,23 @@
+# process: running a program to completion, a background command waited for, environment
+# variables and the working directory.
+from luce_std import process
+
+pub func main(arguments: list[str]) -> int!:
+    let done = process.run("sh", ["-c", "echo out; echo err 1>&2; exit 3"])
+    print(done.exit_code, done.output, done.error_output)
+    print(process.run("echo", ["-n", "hi"]).output)
+    with process.Command("sh", ["-c", "echo first; exit 7"]) as command:
+        print(command.wait(), command.output(), command.is_finished())
+    process.set_variable("LUCE_STD_SURFACE", "value=with=equals")
+    print(process.variable("LUCE_STD_SURFACE"), process.variable("LUCE_STD_NOT_SET"))
+    var listed = false
+    for entry in process.variables():
+        listed = listed or entry == "LUCE_STD_SURFACE=value=with=equals"
+    process.unset_variable("LUCE_STD_SURFACE")
+    print(listed, process.variable("LUCE_STD_SURFACE"))
+    let start = process.current_directory()
+    process.change_directory("/")
+    print(process.current_directory())
+    process.change_directory(start)
+    print(process.current_directory() == start, process.id() > 0)
+    return 0

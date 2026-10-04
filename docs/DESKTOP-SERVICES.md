@@ -5,17 +5,17 @@ text on the UI thread. macOS uses NSPasteboard and Windows uses CF_UNICODETEXT.
 Clipboard contention is recoverable. Text is bounded to 1 MiB; writes reject NUL
 and malformed UTF-8. Linux clipboard support awaits the Linux window backend.
 
-The file module now also exposes counted-text APIs directly usable from Luce:
-`read_text`, `write_text`, `absolute_path`, `path_kind`, `ensure_directory`, and
-`Entries(path)` with `count`, `name`, and `close`. File contents and entry names
-returned by these APIs own their storage. Atomic text replacement preserves
+The file module's counted-text APIs, `read_text`, `write_text`, `create_text` and
+`ensure_directory`, take a path as a Luce `str`; contents, listings (`list`, `walk`) and
+paths (`canonical`) are answered as owned results. Atomic text replacement preserves
 existing permission bits and resolves existing symlinks to their targets.
 Applications are responsible for detecting external changes before replacing
 files. `read_text` defaults to a 4 MiB limit; names must be valid UTF-8.
 
 `process.Command(program, arguments, directory = "", output_limit = 1048576,
 environment = none)` starts a background worker without a shell. `is_finished`,
-`revision`, `output`, `exit_code`, and `error_message` are nonblocking observations.
+`revision`, `output`, `exit_code`, and `error_message` are nonblocking observations;
+`wait` blocks until the program ends and answers its exit code.
 `output` copies a stable snapshot under a mutex and replaces malformed bytes for
 display. Stdout/stderr are merged in observation order, not a guaranteed total
 ordering of child writes. `cancel` requests termination; `close` cancels and joins.

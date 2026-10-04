@@ -1,10 +1,10 @@
 #prisma 4.0
 def package "luce-std" {
     str owner = "dymokomi"
-    str version = "0.2.1"
+    str version = "0.3.0"
     str kind = "package"
     str language = "luce-base"
-    str description = "Luce's standard library: files and directories, paths, processes, networking, math, UTF-8 and Unicode, and crash reports. The language runtime ships with the compiler; everything else a program imports lives here."
+    str description = "Luce's standard library: files and directories, paths, processes and the environment, networking, time and dates, random numbers, math, UTF-8 and Unicode, and crash reports. The language runtime ships with the compiler; everything else a program imports lives here."
     str readme = "README.md"
     str[] public = ["clock", "crash", "files", "math", "math32", "net", "paths", "process", "random", "unicode", "utf8"]
 

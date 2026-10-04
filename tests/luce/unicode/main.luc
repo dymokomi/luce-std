@@ -1,0 +1,7 @@
+# unicode: full case mapping and normalization, answered as Luce strings.
+from luce_std import unicode
+
+pub func main(arguments: list[str]) -> int!:
+    print(unicode.to_upper("straße"), unicode.to_lower("ΟΔΟΣ"), unicode.case_fold("Straße"))
+    print(unicode.normalize("e\u{301}") == "é", unicode.normalize("ﬁ", unicode.NormalizationForm.nfkc))
+    return 0
