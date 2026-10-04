@@ -4,7 +4,8 @@ from luce_std import clock
 pub func main(arguments: list[str]) -> int!:
     let half = clock.Duration.of_seconds(0.5)
     let span = half.plus(clock.Duration.of_milliseconds(250)).times(2.0)
-    print(span.seconds(), span.milliseconds(), half.minus(span).is_negative())
+    print(span, span.seconds(), span.milliseconds(), half.minus(span).is_negative())
+    print(clock.Duration(nanoseconds = 250).nanoseconds)
     let start = clock.now()
     clock.sleep(0.02)
     print(start.elapsed().milliseconds() >= 20, clock.timestamp() > 1.7e9)

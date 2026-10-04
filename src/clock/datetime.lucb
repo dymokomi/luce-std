@@ -118,19 +118,19 @@ pub struct DateTime:
 
     ## The date and time `span` later, or earlier for a negative span, at the same offset.
     pub func plus(span: Duration) -> DateTime!:
-        let total = (i64)self.nanosecond + span.count % nanoseconds_per_second
+        let total = (i64)self.nanosecond + span.nanoseconds % nanoseconds_per_second
         let carry = floor_divide(total, nanoseconds_per_second)
-        let seconds = self.unix_seconds() + span.count // nanoseconds_per_second + carry
+        let seconds = self.unix_seconds() + span.nanoseconds // nanoseconds_per_second + carry
         return try instant_at(seconds, (u32)(total - carry * nanoseconds_per_second), self.offset)
 
     ## The time from `earlier` to this one; negative when `earlier` is later.
     pub func since(earlier: DateTime) -> Duration:
         let seconds = self.unix_seconds() - earlier.unix_seconds()
-        return Duration(count = seconds * nanoseconds_per_second + (i64)self.nanosecond - (i64)earlier.nanosecond)
+        return Duration(nanoseconds = seconds * nanoseconds_per_second + (i64)self.nanosecond - (i64)earlier.nanosecond)
 
     ## Whether this is an earlier instant than `other`, whatever their offsets.
     pub func is_before(other: DateTime) -> bool:
-        return self.since(other).count < 0
+        return self.since(other).nanoseconds < 0
 
     ## ISO 8601 text: `2026-10-04T09:30:15Z`, with a fraction of a second when there is one
     ## and the offset as `+02:00` when it is not UTC.
@@ -321,7 +321,7 @@ test "instants move between offsets and timestamps":
     let before = try DateTime.from_timestamp(-0.5)
     assert(before.year == 1969 and before.second == 59 and before.nanosecond == 500000000)
     let shifted = try epoch.at_offset(-18000)
-    assert(shifted.day == 31 and shifted.hour == 19 and shifted.since(epoch).count == 0)
+    assert(shifted.day == 31 and shifted.hour == 19 and shifted.since(epoch).nanoseconds == 0)
     let later = try epoch.plus(try Duration.of_seconds(86400.25))
     assert(later.day == 2 and later.nanosecond == 250000000 and epoch.is_before(later))
     let current = try DateTime.now()

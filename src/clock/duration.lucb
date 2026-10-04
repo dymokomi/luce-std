@@ -9,44 +9,38 @@
 #==============================================================================================
 
 ## A span of time in whole nanoseconds, positive or negative: about 292 years either way.
-## Arithmetic past that traps, as integer arithmetic does.
+## Arithmetic past that traps, as integer arithmetic does. `Duration(nanoseconds = n)`
+## makes one from nanoseconds.
 pub struct Duration:
-    var count: i64
+    ## The span in nanoseconds.
+    pub let nanoseconds: i64
 
     ## `seconds` seconds, rounded to the nearest nanosecond.
     pub static func of_seconds(seconds: f64) -> Duration!:
         let nanoseconds = seconds * 1000000000.0
         if not (nanoseconds >= -9.2e18 and nanoseconds <= 9.2e18):
             error(invalid, "a duration must be a finite number of seconds within 292 years")
-        return Duration(count = (i64)(nanoseconds + (0.5 if nanoseconds >= 0.0 else -0.5)))
+        return Duration(nanoseconds = (i64)(nanoseconds + (0.5 if nanoseconds >= 0.0 else -0.5)))
 
     ## `milliseconds` milliseconds.
     pub static func of_milliseconds(milliseconds: i64) -> Duration:
-        return Duration(count = milliseconds * 1000000)
-
-    ## `nanoseconds` nanoseconds.
-    pub static func of_nanoseconds(nanoseconds: i64) -> Duration:
-        return Duration(count = nanoseconds)
+        return Duration(nanoseconds = milliseconds * 1000000)
 
     ## The span in seconds, with its fraction.
     pub func seconds() -> f64:
-        return (f64)self.count / 1000000000.0
+        return (f64)self.nanoseconds / 1000000000.0
 
     ## The span in whole milliseconds, rounded toward zero.
     pub func milliseconds() -> i64:
-        return self.count // 1000000
-
-    ## The span in nanoseconds.
-    pub func nanoseconds() -> i64:
-        return self.count
+        return self.nanoseconds // 1000000
 
     ## This span and `other` together.
     pub func plus(other: Duration) -> Duration:
-        return Duration(count = self.count + other.count)
+        return Duration(nanoseconds = self.nanoseconds + other.nanoseconds)
 
     ## This span less `other`.
     pub func minus(other: Duration) -> Duration:
-        return Duration(count = self.count - other.count)
+        return Duration(nanoseconds = self.nanoseconds - other.nanoseconds)
 
     ## This span scaled by `factor`, rounded to the nearest nanosecond.
     pub func times(factor: f64) -> Duration!:
@@ -54,8 +48,8 @@ pub struct Duration:
 
     ## Whether the span is shorter than `other`.
     pub func is_shorter(other: Duration) -> bool:
-        return self.count < other.count
+        return self.nanoseconds < other.nanoseconds
 
     ## Whether the span runs backwards.
     pub func is_negative() -> bool:
-        return self.count < 0
+        return self.nanoseconds < 0

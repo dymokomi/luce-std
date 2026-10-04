@@ -20,14 +20,14 @@ pub struct Instant:
     ## The time from `earlier` to this instant; negative when `earlier` is later.
     pub func since(earlier: Instant) -> Duration:
         if self.count >= earlier.count:
-            return Duration(count = (i64)(self.count - earlier.count))
-        return Duration(count = -(i64)(earlier.count - self.count))
+            return Duration(nanoseconds = (i64)(self.count - earlier.count))
+        return Duration(nanoseconds = -(i64)(earlier.count - self.count))
 
     ## The instant `span` after this one, or before it for a negative span.
     pub func plus(span: Duration) -> Instant:
-        if span.count >= 0:
-            return Instant(count = self.count + (u64)span.count)
-        return Instant(count = self.count - (u64)(-span.count))
+        if span.nanoseconds >= 0:
+            return Instant(count = self.count + (u64)span.nanoseconds)
+        return Instant(count = self.count - (u64)(-span.nanoseconds))
 
 ## The current instant on the monotonic clock.
 pub func now() -> Instant:
@@ -61,12 +61,12 @@ pub func sleep(seconds: f64) -> !:
 
 ## Sleep for `span`, at least; a span of zero or less returns at once.
 pub func sleep_for(span: Duration):
-    if span.count <= 0:
+    if span.nanoseconds <= 0:
         return
     if platform.windows or platform.wasm32:
-        thread.sleep((u64)((span.count + 999999) // 1000000))
+        thread.sleep((u64)((span.nanoseconds + 999999) // 1000000))
     else:
-        var request = Timespec(seconds = span.count // nanoseconds_per_second, nanoseconds = (c.long)(span.count % nanoseconds_per_second))
+        var request = Timespec(seconds = span.nanoseconds // nanoseconds_per_second, nanoseconds = (c.long)(span.nanoseconds % nanoseconds_per_second))
         var remaining = Timespec(seconds = 0, nanoseconds = 0)
         while nanosleep(&request, &remaining) != 0 and c.errno() == c.interrupted:
             request = remaining
