@@ -21,6 +21,22 @@ jobs:
         id: pins
         run: |
           echo "base=$(cat luce-std/bootstrap/BASE)" >> "$GITHUB_OUTPUT"
+      # the compiler is built apart, with the luce-std it pins, so that this commit's API
+      # changes test this package rather than the compiler's own use of an older one
+      - uses: actions/checkout@v7
+        with:
+          repository: dymokomi/luce-base
+          ref: ${{ steps.pins.outputs.base }}
+          path: compiler/luce-base
+      - name: Read the compiler's luce-std pin
+        id: compiler
+        run: echo "std=$(cat compiler/luce-base/bootstrap/STD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: dymokomi/luce-std
+          ref: ${{ steps.compiler.outputs.std }}
+          path: compiler/luce-std
+      # the package's program checks use luce-base's tools beside this checkout
       - uses: actions/checkout@v7
         with:
           repository: dymokomi/luce-base
@@ -32,11 +48,11 @@ jobs:
           ln -s "$(command -v clang)" "$RUNNER_TEMP/luce-bin/cc"
           echo "$RUNNER_TEMP/luce-bin" >> "$GITHUB_PATH"
       - name: Build the compiler
-        working-directory: luce-base
+        working-directory: compiler/luce-base
         run: ./build.sh
       - name: Package gate
         working-directory: luce-std
-        run: ./test.sh
+        run: LUCE_BASE="$GITHUB_WORKSPACE/compiler/luce-base/build/luce-base" ./test.sh
       - name: Retain diagnostics
         if: always()
         uses: actions/upload-artifact@v7

@@ -17,6 +17,22 @@ jobs:
         shell: pwsh
         run: |
           "base=$(Get-Content luce-std/bootstrap/BASE)" >> $env:GITHUB_OUTPUT
+      # the compiler is built apart, with the luce-std it pins (correctness.yml says why)
+      - uses: actions/checkout@v7
+        with:
+          repository: dymokomi/luce-base
+          ref: ${{ steps.pins.outputs.base }}
+          path: compiler/luce-base
+      - name: Read the compiler's luce-std pin
+        id: compiler
+        shell: pwsh
+        run: |
+          "std=$(Get-Content compiler/luce-base/bootstrap/STD)" >> $env:GITHUB_OUTPUT
+      - uses: actions/checkout@v7
+        with:
+          repository: dymokomi/luce-std
+          ref: ${{ steps.compiler.outputs.std }}
+          path: compiler/luce-std
       - uses: actions/checkout@v7
         with:
           repository: dymokomi/luce-base
@@ -33,20 +49,20 @@ jobs:
         shell: msys2 {0}
         run: echo "LIBRARY_PATH=$(cygpath -m /ucrt64/lib)" >> "$GITHUB_ENV"
       - name: Build the compiler
-        working-directory: luce-base
+        working-directory: compiler/luce-base
         shell: msys2 {0}
         run: python tools/build_windows.py
       - name: Module tests through both backends
         working-directory: luce-std
         shell: msys2 {0}
-        run: python tests/run.py --base ../luce-base/build/luce-base.exe --skip-programs
+        run: python tests/run.py --base ../compiler/luce-base/build/luce-base.exe --skip-programs
       - name: Windows contracts
         working-directory: luce-std
         shell: msys2 {0}
         run: |
-          python tools/test_windows_native.py --compiler ../luce-base/build/luce-base.exe
-          python tests/programs/net_protocols/run.py ../luce-base/build/luce-base.exe
-          python tests/programs/crash_report/run.py ../luce-base/build/luce-base.exe
+          python tools/test_windows_native.py --compiler ../compiler/luce-base/build/luce-base.exe
+          python tests/programs/net_protocols/run.py ../compiler/luce-base/build/luce-base.exe
+          python tests/programs/crash_report/run.py ../compiler/luce-base/build/luce-base.exe
       - name: Retain diagnostics
         if: always()
         uses: actions/upload-artifact@v7
