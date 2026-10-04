@@ -1,0 +1,30 @@
+#==============================================================================================
+#
+#   clock - Time: instants, durations, sleeping and calendar dates
+#
+#   DESCRIPTION:
+#       A monotonic Instant for measuring, a Duration between instants, sleeping, and the
+#       wall clock as a DateTime in UTC or local time, with ISO 8601 text both ways.
+#
+#==============================================================================================
+
+import c
+import interop
+import owned
+import platform
+import thread
+import time
+
+## A value is out of range, or text is not a date and time.
+pub let invalid: ErrorCode = ErrorCode.package(49)
+
+## `struct timespec`, as nanosleep and clock_gettime take it.
+extern struct Timespec:
+    seconds: i64
+    nanoseconds: c.long
+
+extern func clock_gettime(clock: i32, out_time: Timespec*) -> i32
+extern func nanosleep(request: const Timespec*, remaining: Timespec*?) -> i32
+extern func windows_system_time as "GetSystemTimePreciseAsFileTime"(out_time: u64*)
+
+let nanoseconds_per_second: i64 = 1000000000

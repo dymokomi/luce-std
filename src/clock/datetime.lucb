@@ -1,0 +1,328 @@
+#==============================================================================================
+#
+#   datetime - Calendar dates and times of day
+#
+#   DESCRIPTION:
+#       A DateTime: a date and time of day at a fixed offset from UTC, from the wall clock or
+#       a timestamp, moved between offsets, compared, and written and read as ISO 8601.
+#
+#==============================================================================================
+
+## A day of the week, numbered as ISO 8601 numbers them.
+pub enum Weekday as u8:
+    monday = 1
+    tuesday = 2
+    wednesday = 3
+    thursday = 4
+    friday = 5
+    saturday = 6
+    sunday = 7
+
+## A date and time of day, in the years 1 to 9999, at a fixed offset from UTC. Two values
+## for the same instant at different offsets differ as values; compare instants with
+## `is_before` or `since`.
+pub struct DateTime:
+    ## The year, 1 to 9999.
+    pub let year: i32
+    ## The month, 1 to 12.
+    pub let month: u8
+    ## The day of the month, from 1.
+    pub let day: u8
+    ## The hour, 0 to 23.
+    pub let hour: u8
+    ## The minute, 0 to 59.
+    pub let minute: u8
+    ## The second, 0 to 59.
+    pub let second: u8
+    ## The nanoseconds past the second.
+    pub let nanosecond: u32
+    ## The offset east of UTC in seconds: 0 for UTC, 7200 for UTC+02:00.
+    pub let offset: i32
+
+    ## The given date and time, refusing one the calendar does not have.
+    pub func init(year: i64, month: i64, day: i64, hour: i64 = 0, minute: i64 = 0, second: i64 = 0, nanosecond: i64 = 0, offset: i64 = 0) -> !:
+        if year < 1 or year > 9999 or month < 1 or month > 12 or day < 1 or day > days_in_month(year, month):
+            error(invalid, "the calendar has no such date")
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59 or second < 0 or second > 59 or nanosecond < 0 or nanosecond >= 1000000000:
+            error(invalid, "a day has no such time")
+        if offset <= -86400 or offset >= 86400:
+            error(invalid, "an offset from UTC is less than a day")
+        self.year = (i32)year
+        self.month = (u8)month
+        self.day = (u8)day
+        self.hour = (u8)hour
+        self.minute = (u8)minute
+        self.second = (u8)second
+        self.nanosecond = (u32)nanosecond
+        self.offset = (i32)offset
+
+    ## Now, in the system's local time zone.
+    pub static func now() -> DateTime!:
+        let (seconds, nanoseconds) = wall_clock()
+        return try instant_at(seconds, nanoseconds, try local_offset(seconds))
+
+    ## Now, in UTC.
+    pub static func now_utc() -> DateTime!:
+        let (seconds, nanoseconds) = wall_clock()
+        return try instant_at(seconds, nanoseconds, 0)
+
+    ## The UTC date and time `seconds` after 1970-01-01 00:00 UTC, as `timestamp` counts.
+    pub static func from_timestamp(seconds: f64) -> DateTime!:
+        if not (seconds >= -62135596800.0 and seconds < 253402300800.0):
+            error(invalid, "the timestamp is outside the years 1 to 9999")
+        let whole = (i64)seconds
+        var floor = whole - 1 if (f64)whole > seconds else whole
+        var nanoseconds = (i64)((seconds - (f64)floor) * 1000000000.0 + 0.5)
+        if nanoseconds >= 1000000000:
+            floor += 1
+            nanoseconds -= 1000000000
+        return try instant_at(floor, (u32)nanoseconds, 0)
+
+    ## Read ISO 8601 text: `2026-10-04`, `2026-10-04T09:30`, `2026-10-04 09:30:15.25`, each
+    ## with an optional `Z`, `+02:00` or `-0700`. A time without an offset is taken as UTC.
+    pub static func parse(text: str) -> DateTime!:
+        return try parse_iso(text)
+
+    ## The day of the week.
+    pub func weekday() -> Weekday:
+        let days = days_from_civil((i64)self.year, (i64)self.month, (i64)self.day)
+        return Weekday((u8)((days + 3) % 7 + 7) % 7 + 1)
+
+    ## The day of the year, from 1.
+    pub func day_of_year() -> i64:
+        return days_from_civil((i64)self.year, (i64)self.month, (i64)self.day) - days_from_civil((i64)self.year, 1, 1) + 1
+
+    ## Whole seconds since 1970-01-01 00:00 UTC, rounded down.
+    pub func unix_seconds() -> i64:
+        let days = days_from_civil((i64)self.year, (i64)self.month, (i64)self.day)
+        return days * 86400 + (i64)self.hour * 3600 + (i64)self.minute * 60 + (i64)self.second - (i64)self.offset
+
+    ## Seconds since 1970-01-01 00:00 UTC, with their fraction.
+    pub func timestamp() -> f64:
+        return (f64)self.unix_seconds() + (f64)self.nanosecond / 1000000000.0
+
+    ## The same instant in UTC.
+    pub func to_utc() -> DateTime!:
+        return try instant_at(self.unix_seconds(), self.nanosecond, 0)
+
+    ## The same instant in the system's local time zone.
+    pub func to_local() -> DateTime!:
+        let seconds = self.unix_seconds()
+        return try instant_at(seconds, self.nanosecond, try local_offset(seconds))
+
+    ## The same instant at `offset` seconds east of UTC.
+    pub func at_offset(offset: i64) -> DateTime!:
+        if offset <= -86400 or offset >= 86400:
+            error(invalid, "an offset from UTC is less than a day")
+        return try instant_at(self.unix_seconds(), self.nanosecond, (i32)offset)
+
+    ## The date and time `span` later, or earlier for a negative span, at the same offset.
+    pub func plus(span: Duration) -> DateTime!:
+        let total = (i64)self.nanosecond + span.count % nanoseconds_per_second
+        let carry = floor_divide(total, nanoseconds_per_second)
+        let seconds = self.unix_seconds() + span.count // nanoseconds_per_second + carry
+        return try instant_at(seconds, (u32)(total - carry * nanoseconds_per_second), self.offset)
+
+    ## The time from `earlier` to this one; negative when `earlier` is later.
+    pub func since(earlier: DateTime) -> Duration:
+        let seconds = self.unix_seconds() - earlier.unix_seconds()
+        return Duration(count = seconds * nanoseconds_per_second + (i64)self.nanosecond - (i64)earlier.nanosecond)
+
+    ## Whether this is an earlier instant than `other`, whatever their offsets.
+    pub func is_before(other: DateTime) -> bool:
+        return self.since(other).count < 0
+
+    ## ISO 8601 text: `2026-10-04T09:30:15Z`, with a fraction of a second when there is one
+    ## and the offset as `+02:00` when it is not UTC.
+    pub func text() -> interop.Owned[str]!:
+        var buffer: u8[48]
+        var used: usize = 0
+        put_date(buffer, &used, self)
+        buffer[used] = 'T'
+        used += 1
+        put_time(buffer, &used, self)
+        put_offset(buffer, &used, self.offset)
+        return try owned.copy_text((str)buffer[..<used])
+
+    ## The date alone: `2026-10-04`.
+    pub func date_text() -> interop.Owned[str]!:
+        var buffer: u8[16]
+        var used: usize = 0
+        put_date(buffer, &used, self)
+        return try owned.copy_text((str)buffer[..<used])
+
+## The date and time at `offset` of the instant `seconds` and `nanoseconds` past 1970 UTC.
+func instant_at(seconds: i64, nanoseconds: u32, offset: i32) -> DateTime!:
+    let shifted = seconds + (i64)offset
+    let days = floor_divide(shifted, 86400)
+    let rest = shifted - days * 86400
+    let (year, month, day) = civil_from_days(days)
+    if year < 1 or year > 9999:
+        error(invalid, "the date is outside the years 1 to 9999")
+    return try DateTime(year, month, day, rest // 3600, rest % 3600 // 60, rest % 60, (i64)nanoseconds, (i64)offset)
+
+# mark: ISO 8601 text =========================================================================
+
+func put_digits(buffer: u8[], used: usize*, value: i64, width: usize):
+    var index = width
+    var rest = value
+    while index > 0:
+        index -= 1
+        buffer[*used + index] = (u8)(rest % 10) + '0'
+        rest = rest // 10
+    *used += width
+
+func put_date(buffer: u8[], used: usize*, value: DateTime):
+    put_digits(buffer, used, (i64)value.year, 4)
+    buffer[*used] = '-'
+    *used += 1
+    put_digits(buffer, used, (i64)value.month, 2)
+    buffer[*used] = '-'
+    *used += 1
+    put_digits(buffer, used, (i64)value.day, 2)
+
+func put_time(buffer: u8[], used: usize*, value: DateTime):
+    put_digits(buffer, used, (i64)value.hour, 2)
+    buffer[*used] = ':'
+    *used += 1
+    put_digits(buffer, used, (i64)value.minute, 2)
+    buffer[*used] = ':'
+    *used += 1
+    put_digits(buffer, used, (i64)value.second, 2)
+    if value.nanosecond != 0:
+        buffer[*used] = '.'
+        *used += 1
+        let fraction = (i64)value.nanosecond
+        if fraction % 1000000 == 0:
+            put_digits(buffer, used, fraction // 1000000, 3)
+        elif fraction % 1000 == 0:
+            put_digits(buffer, used, fraction // 1000, 6)
+        else:
+            put_digits(buffer, used, fraction, 9)
+
+func put_offset(buffer: u8[], used: usize*, offset: i32):
+    if offset == 0:
+        buffer[*used] = 'Z'
+        *used += 1
+        return
+    buffer[*used] = '+' if offset > 0 else '-'
+    *used += 1
+    let minutes = (i64)(offset if offset > 0 else -offset) // 60
+    put_digits(buffer, used, minutes // 60, 2)
+    buffer[*used] = ':'
+    *used += 1
+    put_digits(buffer, used, minutes % 60, 2)
+
+## Reads ISO 8601 text left to right.
+struct Reader:
+    var text: const u8[]
+    var at: usize
+
+    func done() -> bool:
+        return self.at == self.text.length
+
+    func peek() -> u8:
+        return self.text[self.at] if self.at < self.text.length else 0
+
+    mutating func take(byte: u8) -> bool:
+        if self.peek() != byte or self.done():
+            return false
+        self.at += 1
+        return true
+
+    ## Exactly `width` digits.
+    mutating func digits(width: usize) -> i64!:
+        var value: i64 = 0
+        for index in 0..<width:
+            discard(index)
+            let byte = self.peek()
+            if self.done() or byte < '0' or byte > '9':
+                error(invalid, "the text is not an ISO 8601 date and time")
+            value = value * 10 + (i64)(byte - '0')
+            self.at += 1
+        return value
+
+func parse_iso(text: str) -> DateTime!:
+    var reader = Reader(text = text.bytes, at = 0)
+    let year = try reader.digits(4)
+    var month: i64 = 1
+    var day: i64 = 1
+    if not reader.take('-'):
+        error(invalid, "the text is not an ISO 8601 date and time")
+    month = try reader.digits(2)
+    if not reader.take('-'):
+        error(invalid, "the text is not an ISO 8601 date and time")
+    day = try reader.digits(2)
+    var hour: i64 = 0
+    var minute: i64 = 0
+    var second: i64 = 0
+    var nanosecond: i64 = 0
+    var offset: i64 = 0
+    if reader.take('T') or reader.take('t') or reader.take(' '):
+        hour = try reader.digits(2)
+        if not reader.take(':'):
+            error(invalid, "the text is not an ISO 8601 date and time")
+        minute = try reader.digits(2)
+        if reader.take(':'):
+            second = try reader.digits(2)
+            if reader.take('.') or reader.take(','):
+                var scale: i64 = 100000000
+                var count: usize = 0
+                while not reader.done() and reader.peek() >= '0' and reader.peek() <= '9':
+                    nanosecond += (i64)(reader.peek() - '0') * scale
+                    scale = scale // 10
+                    reader.at += 1
+                    count += 1
+                if count == 0 or count > 9:
+                    error(invalid, "a fraction of a second has one to nine digits")
+        if reader.take('Z') or reader.take('z'):
+            offset = 0
+        elif reader.peek() == '+' or reader.peek() == '-':
+            let sign: i64 = 1 if reader.peek() == '+' else -1
+            reader.at += 1
+            let hours = try reader.digits(2)
+            var minutes: i64 = 0
+            if reader.take(':'):
+                minutes = try reader.digits(2)
+            elif not reader.done():
+                minutes = try reader.digits(2)
+            if hours > 23 or minutes > 59:
+                error(invalid, "an offset from UTC is less than a day")
+            offset = sign * (hours * 3600 + minutes * 60)
+    if not reader.done():
+        error(invalid, "the text is not an ISO 8601 date and time")
+    return try DateTime(year, month, day, hour, minute, second, nanosecond, offset)
+
+test "dates format and parse as ISO 8601":
+    let moment = try DateTime(2026, 10, 4, 9, 30, 15, 250000000, 7200)
+    let text = try moment.text()
+    defer text.release()
+    assert(text.value == "2026-10-04T09:30:15.250+02:00")
+    let back = try DateTime.parse(text.value)
+    assert(back == moment and back.unix_seconds() == 1791099015)
+    assert(try DateTime.parse("2026-10-04") == try DateTime(2026, 10, 4))
+    let parsed = try (try DateTime.parse("2026-10-04 07:30Z")).to_utc()
+    assert(parsed == try (try moment.to_utc()).plus(Duration.of_milliseconds(-15250)))
+    assert((try DateTime.parse("1969-12-31T23:59:59-0700")).unix_seconds() == 25199)
+    assert(moment.weekday() == Weekday.sunday and moment.day_of_year() == 277)
+    var refused = 0
+    for bad in ["2026-02-30", "2026-10-04T24:00", "2026-10-4", "2026-10-04T09:30:15.", "2026-10-04 extra"]:
+        discard(DateTime.parse(bad) catch failure:
+            assert(failure.code == invalid)
+            refused += 1
+            recover moment)
+    assert(refused == 5)
+
+test "instants move between offsets and timestamps":
+    let epoch = try DateTime.from_timestamp(0.0)
+    let epoch_text = try epoch.text()
+    defer epoch_text.release()
+    assert(epoch_text.value == "1970-01-01T00:00:00Z" and epoch.weekday() == Weekday.thursday)
+    let before = try DateTime.from_timestamp(-0.5)
+    assert(before.year == 1969 and before.second == 59 and before.nanosecond == 500000000)
+    let shifted = try epoch.at_offset(-18000)
+    assert(shifted.day == 31 and shifted.hour == 19 and shifted.since(epoch).count == 0)
+    let later = try epoch.plus(try Duration.of_seconds(86400.25))
+    assert(later.day == 2 and later.nanosecond == 250000000 and epoch.is_before(later))
+    let current = try DateTime.now()
+    assert(current.year >= 2026 and (try current.to_utc()).offset == 0)

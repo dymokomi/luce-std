@@ -1,0 +1,72 @@
+#==============================================================================================
+#
+#   instant - The monotonic clock and sleeping
+#
+#   DESCRIPTION:
+#       Instants on a clock that never goes backwards, for measuring how long something took,
+#       the wall clock as seconds since 1970, and sleeping.
+#
+#==============================================================================================
+
+## A moment on the monotonic clock: it never goes backwards and is unaffected by changes to
+## the system's time, but it means nothing outside this run. Measure with `elapsed`.
+pub struct Instant:
+    var count: u64
+
+    ## The time since this instant.
+    pub func elapsed() -> Duration:
+        return now().since(self)
+
+    ## The time from `earlier` to this instant; negative when `earlier` is later.
+    pub func since(earlier: Instant) -> Duration:
+        if self.count >= earlier.count:
+            return Duration(count = (i64)(self.count - earlier.count))
+        return Duration(count = -(i64)(earlier.count - self.count))
+
+    ## The instant `span` after this one, or before it for a negative span.
+    pub func plus(span: Duration) -> Instant:
+        if span.count >= 0:
+            return Instant(count = self.count + (u64)span.count)
+        return Instant(count = self.count - (u64)(-span.count))
+
+## The current instant on the monotonic clock.
+pub func now() -> Instant:
+    return Instant(count = time.now())
+
+## Seconds since 1970-01-01 00:00 UTC on the system's clock, with their fraction, as
+## Python's `time.time()` answers them.
+pub func timestamp() -> f64:
+    let (seconds, nanoseconds) = wall_clock()
+    return (f64)seconds + (f64)nanoseconds / 1000000000.0
+
+## The wall clock: whole seconds since 1970 UTC and the nanoseconds past them.
+func wall_clock() -> (i64, u32):
+    if platform.windows:
+        var ticks: u64 = 0
+        windows_system_time(&ticks)
+        # 100-nanosecond ticks since 1601
+        let since_1970 = (i64)(ticks // 10) - 11644473600000000
+        let seconds = since_1970 // 1000000
+        return (seconds, (u32)((since_1970 - seconds * 1000000) * 1000))
+    else:
+        var stamp = Timespec(seconds = 0, nanoseconds = 0)
+        discard(clock_gettime(0, &stamp))
+        return (stamp.seconds, (u32)stamp.nanoseconds)
+
+## Sleep for `seconds`, at least; zero or less returns at once.
+pub func sleep(seconds: f64) -> !:
+    if seconds <= 0.0:
+        return
+    sleep_for(try Duration.of_seconds(seconds))
+
+## Sleep for `span`, at least; a span of zero or less returns at once.
+pub func sleep_for(span: Duration):
+    if span.count <= 0:
+        return
+    if platform.windows or platform.wasm32:
+        thread.sleep((u64)((span.count + 999999) // 1000000))
+    else:
+        var request = Timespec(seconds = span.count // nanoseconds_per_second, nanoseconds = (c.long)(span.count % nanoseconds_per_second))
+        var remaining = Timespec(seconds = 0, nanoseconds = 0)
+        while nanosleep(&request, &remaining) != 0 and c.errno() == c.interrupted:
+            request = remaining
