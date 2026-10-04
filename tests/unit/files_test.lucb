@@ -12,8 +12,8 @@ test "a file round trip":
     try files.write((c.str)path, "one line\n".bytes)
     assert(files.exists((c.str)path))
     let back = try files.read((c.str)path)
-    defer free(back)
-    assert((str)back == "one line\n")
+    defer back.release()
+    assert((str)back.value == "one line\n")
     let info = try files.metadata((c.str)path)
     assert(info.size == 9)
     try files.remove_file((c.str)path)
@@ -35,7 +35,10 @@ test "a temporary file loses its name once open and still reads back":
 
 test "canonical paths resolve links, and a missing entry is missing":
     let base = try files.canonical((c.str)io.path.temp())
-    let root = try files.create_temporary_directory((c.str)base)
+    defer base.release()
+    let created = try files.create_temporary_directory((c.str)base.value)
+    defer created.release()
+    let root = created.value
     defer files.remove_tree((c.str)root) catch ignored:
         discard(ignored)
     let real = try strings.join([root, "/real"], "")
@@ -46,12 +49,51 @@ test "canonical paths resolve links, and a missing entry is missing":
     try files.create_symlink((c.str)real, (c.str)link, true)
     # through the link, and through a `..` that leaves it, the file's own path comes back
     let through = try strings.join([link, "/file.txt"], "")
-    assert((try files.canonical((c.str)through)) == file)
+    assert(try canonical_text((c.str)through) == file)
     let around = try strings.join([link, "/../real/file.txt"], "")
-    assert((try files.canonical((c.str)around)) == file)
-    assert((try files.canonical((c.str)link)) == real)
+    assert(try canonical_text((c.str)around) == file)
+    assert(try canonical_text((c.str)link) == real)
     let absent = try strings.join([root, "/absent.txt"], "")
-    let answer = files.canonical((c.str)absent) catch failure:
+    let answer = canonical_text((c.str)absent) catch failure:
         assert(failure.code == files.missing)
         recover "missing"
     assert(answer == "missing")
+
+test "a listing and a walk own their names and sort them":
+    var temporary = try files.TemporaryDirectory()
+    defer temporary.destroy()
+    let root = temporary.path()
+    let inner = try strings.join([root, "/b"], "")
+    try files.create_directory((c.str)inner)
+    let deep = try strings.join([root, "/b/c.txt"], "")
+    try files.write((c.str)deep, "".bytes)
+    let top = try strings.join([root, "/a.txt"], "")
+    try files.write((c.str)top, "".bytes)
+    let names = try files.list((c.str)root)
+    defer names.release()
+    assert(names.value.length == 2 and names.value[0] == "a.txt" and names.value[1] == "b")
+    let found = try files.walk((c.str)root)
+    defer found.release()
+    assert(found.value.length == 3 and found.value[1] == "b" and found.value[2] == "b/c.txt")
+
+test "a file reads lines, text and bytes, and writes where the reader stands":
+    var temporary = try files.TemporaryDirectory()
+    defer temporary.destroy()
+    let path = try strings.join([temporary.path(), "/lines.txt"], "")
+    try files.write((c.str)path, "one\r\ntwo\nthree".bytes)
+    var file = try files.File.open((c.str)path, files.OpenMode.read_write)
+    defer file.destroy()
+    assert(try file.read_line() == "one")
+    assert(try file.read_text(2) == "tw")
+    try file.write_text("O")
+    assert(try file.read_line() == "")
+    assert(try file.read_line() == "three")
+    assert(try file.read_line() == none)
+    discard(try file.seek(0))
+    assert((str)(try file.read_bytes()) == "one\r\ntwO\nthree")
+
+## A canonical path as a text of the current allocator, for comparing.
+func canonical_text(path: c.str) -> str!:
+    let resolved = try files.canonical(path)
+    defer resolved.release()
+    return try strings.copy(resolved.value)

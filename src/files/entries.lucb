@@ -145,12 +145,12 @@ pub func create_hard_link(source: c.str, destination: c.str) -> !:
         if linkat(current_directory_fd, source, current_directory_fd, destination, 0) != 0:
             error(classify_error(c.errno()), "the hard link could not be created")
 
-## Read a final symlink's raw target bytes without following it. Return a
-## NUL-terminated current-allocator allocation released with strings.release.
+## Read a final symlink's raw target bytes without following it, as an owned
+## NUL-terminated text: Base callers read `.value` and call `release()`.
 ## At most limit bytes are accepted; excess reports too_large, never truncates.
 ## One extra byte detects excess without trusting metadata. Interrupted reads
 ## retry; concurrent replacement may therefore change the observed link target.
-pub func read_symlink(path: c.str, limit: usize = 4096) -> str!:
+pub func read_symlink(path: c.str, limit: usize = 4096) -> interop.Owned[str]!:
     if platform.windows:
         return try windows_read_symlink(path, limit)
     else:
@@ -164,8 +164,4 @@ pub func read_symlink(path: c.str, limit: usize = 4096) -> str!:
             error(classify_error(c.errno()), "the symbolic link could not be read")
         if (usize)count > limit:
             error(too_large, "the link target exceeds the requested limit")
-        let length = (usize)count
-        let exact = try alloc u8[length + 1]
-        memory.copy(exact, buffer, length)
-        exact[length] = 0
-        return (str)exact[..<length]
+        return try owned.copy_text((str)buffer[..<(usize)count])

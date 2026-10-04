@@ -21,10 +21,12 @@ pub enum NormalizationForm as u8:
 ## Normalize complete UTF-8 text. NFC/NFD preserve canonical equivalence;
 ## NFKC/NFKD also apply compatibility mappings and can erase distinctions such as
 ## presentation forms. No case folding, BOM removal or replacement is performed.
-## Return fresh owned text, even when unchanged. Temporary scalar storage and an
-## optional sorting buffer use the current allocator and are released on return.
+## Return fresh owned text, even when unchanged; temporary storage is released on return.
 ## max_bytes bounds the final result after composition, not intermediate storage.
-pub func normalize(text: str, form: NormalizationForm = NormalizationForm.nfc, max_bytes: usize? = none) -> str!:
+pub func normalize(text: str, form: NormalizationForm = NormalizationForm.nfc, max_bytes: usize? = none) -> interop.Owned[str]!:
+    return try owned.adopt_text(try normalized(text, form, max_bytes))
+
+func normalized(text: str, form: NormalizationForm, max_bytes: usize?) -> str!:
     let compatibility = form == NormalizationForm.nfkc or form == NormalizationForm.nfkd
     var empty: u32[]
     let count = try decompose_pass(text, compatibility, empty, false)

@@ -11,6 +11,8 @@
 import strings
 import platform
 import core
+import interop
+import owned
 
 ## Whether `byte` separates path components on the target.
 # mark: Paths =================================================================================
@@ -132,9 +134,13 @@ pub func stem(path: str) -> str:
     return (str)name.bytes[..<name.length - ext.length]
 
 ## Join with a separator only when needed; an absolute right path wins. This is
-## lexical joining, without normalization or filesystem access. The result is a
-## NUL-terminated current-allocator allocation, released with strings.release.
-pub func join(left: str, right: str) -> str!:
+## lexical joining, without normalization or filesystem access. The result owns its
+## NUL-terminated text: a Base caller passes `.value` on (as a `c.str` too) and calls
+## `release()`; `join_into` joins into the caller's own storage instead.
+pub func join(left: str, right: str) -> interop.Owned[str]!:
+    return try owned.adopt_text(try join_text(left, right))
+
+func join_text(left: str, right: str) -> str!:
     if is_absolute(right) or drive_prefix(right) or left.length == 0:
         return try strings.copy(right)
     if platform.windows and is_rooted(right):
@@ -185,8 +191,9 @@ pub func join_into(buffer: u8[], left: str, right: str) -> str:
 ## Lexically remove dot components, redundant separators and cancellable parent
 ## components. This does not resolve symbolic links; use filesystem resolution
 ## when identity matters. Roots cannot be crossed. Relative leading parents and
-## Windows drive-relative prefixes are retained. Release with strings.release.
-pub func normalize(path: str) -> str!:
+## Windows drive-relative prefixes are retained. The result owns its NUL-terminated
+## text, as `join`'s does.
+pub func normalize(path: str) -> interop.Owned[str]!:
     let prefix = root(path)
     let buffer = try alloc u8[path.length + 2]
     defer free(buffer)
@@ -221,5 +228,4 @@ pub func normalize(path: str) -> str!:
         for byte in component.bytes:
             buffer[used] = byte
             used += 1
-    if used == 0: return try strings.copy(".")
-    return try strings.copy((str)buffer[..<used])
+    return try owned.copy_text("." if used == 0 else (str)buffer[..<used])

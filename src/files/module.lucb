@@ -9,6 +9,7 @@
 #==============================================================================================
 
 import c
+import interop
 import memory
 import windows_text
 import platform
@@ -16,7 +17,9 @@ import io
 import paths
 import strings
 import os
-extern func open(path: c.str, flags: i32, ...) -> i32
+import owned
+import readahead
+extern func posix_open as "open"(path: c.str, flags: i32, ...) -> i32
 extern func openat(directory: i32, path: c.str, flags: i32, ...) -> i32
 extern func close(descriptor: i32) -> i32
 extern func posix_read as "read"(descriptor: i32, buffer: void*, count: usize) -> isize

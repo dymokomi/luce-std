@@ -12,11 +12,9 @@
 
 ## A temporary file and its owned pathname. The zero value is closed. Copying does
 ## not duplicate ownership. Borrow the object for I/O and serialize its use.
-## The pathname allocator is retained, so cleanup may occur outside its with block.
 pub struct TemporaryFile: io.Reader, io.Writer:
     var file: File
-    var name: str
-    var owner: memory.Allocator?
+    var name: interop.Owned[str]?
 
     ## Create an exclusive close-on-exec file in directory, with permissions
     ## filtered by umask. The OS supplies 128 random filename bits per attempt;
@@ -24,10 +22,10 @@ pub struct TemporaryFile: io.Reader, io.Writer:
     ## existing entry is opened or overwritten, and failure retains no allocation.
     pub static func create(directory: c.str, permissions: u32 = 384) -> TemporaryFile!:
         let candidate = try paths.join((str)directory, ".luce-00000000000000000000000000000000")
-        errdefer strings.release(candidate)
+        errdefer candidate.release()
         let digits = "0123456789abcdef"
-        let data = (u8*)candidate.bytes.data
-        let suffix = candidate.length - 32
+        let data = (u8*)candidate.value.bytes.data
+        let suffix = candidate.value.length - 32
         var attempt: usize = 0
         while attempt < 128:
             var random: u8[16]
@@ -36,17 +34,18 @@ pub struct TemporaryFile: io.Reader, io.Writer:
             for i in 0..<random.length:
                 data[suffix + i * 2] = digits.bytes[random[i] >> 4]
                 data[suffix + i * 2 + 1] = digits.bytes[random[i] & 15]
-            let file = File.open((c.str)candidate, OpenMode.create_new_read_write, permissions) catch failure:
+            let file = File.open((c.str)candidate.value, OpenMode.create_new_read_write, permissions) catch failure:
                 if failure.code == already_exists:
                     attempt += 1
                     continue
                 error(failure.code, failure.message)
-            return TemporaryFile(file = file, name = candidate, owner = memory.allocator)
+            return TemporaryFile(file = file, name = candidate)
         error(already_exists, "no unused temporary filename was found")
 
     ## Borrowed NUL-terminated pathname, valid until publication or cleanup.
     pub func path() -> str:
-        return self.name
+        let name = self.name else return ""
+        return name.value
 
     ## Read into `buffer`; the bytes read.
     pub mutating func read(buffer: u8[]) -> usize!:
@@ -72,24 +71,19 @@ pub struct TemporaryFile: io.Reader, io.Writer:
     ## request write-through rename semantics on Windows. Other callers must sync
     ## data and the destination directory themselves when those guarantees matter.
     pub mutating func publish(destination: c.str, replace: bool = true, synchronize: bool = false) -> !:
-        if self.name.length == 0:
-            error(io.closed, "the temporary file has no owned pathname")
+        let name = self.name else error(io.closed, "the temporary file has no owned pathname")
         try self.file.close()
-        try rename((c.str)self.name, destination, replace, synchronize)
+        try rename((c.str)name.value, destination, replace, synchronize)
         self.release_name()
 
     mutating func release_name():
-        if self.name.length > 0:
-            let owner = self.owner else trap("a temporary pathname lost its allocator")
-            with owner:
-                strings.release(self.name)
-            self.name = ""
-            self.owner = none
+        if let name = self.name:
+            name.release()
+            self.name = none
 
     mutating func remove_name() -> !:
-        if self.name.length == 0:
-            return
-        remove_file((c.str)self.name) catch failure:
+        let name = self.name else return
+        remove_file((c.str)name.value) catch failure:
             if failure.code != missing:
                 error(failure.code, failure.message)
         self.release_name()

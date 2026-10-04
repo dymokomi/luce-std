@@ -1,11 +1,12 @@
 import c
 import files
+import interop
 import memory
 import strings
 import unicode
 import utf8
 
-func convert(text: str, kind: u32, limit: usize? = none) -> str!:
+func convert(text: str, kind: u32, limit: usize? = none) -> interop.Owned[str]!:
     match kind:
         0: return try unicode.to_upper(text, limit)
         1: return try unicode.to_lower(text, limit)
@@ -15,10 +16,12 @@ func convert(text: str, kind: u32, limit: usize? = none) -> str!:
 
 pub func main(arguments: c.str[]) -> i32!:
     assert(unicode.version == "17.0.0")
-    let corpus = try files.read(arguments[1])
-    defer free(corpus)
-    let properties = try files.read(arguments[2])
-    defer free(properties)
+    let corpus_file = try files.read(arguments[1])
+    defer corpus_file.release()
+    let corpus = corpus_file.value
+    let properties_file = try files.read(arguments[2])
+    defer properties_file.release()
+    let properties = properties_file.value
     var position: usize = 0
     var count: usize = 0
     while position < corpus.length:
@@ -30,18 +33,20 @@ pub func main(arguments: c.str[]) -> i32!:
         position += input_length
         let expected = (str)corpus[position..<position + output_length]
         position += output_length
-        let actual = try convert(input, kind, expected.length)
+        let converted = try convert(input, kind, expected.length)
+        defer converted.release()
+        let actual = converted.value
         if actual != expected:
             print(f"casing record {count}, operation {kind}")
             trap("Unicode casing differs from the reference")
         assert(actual.bytes.data[actual.length] == 0)
-        unicode.release(actual)
         if output_length > 0:
             var rejected = false
-            discard(convert(input, kind, output_length - 1) catch failure:
+            let refused = convert(input, kind, output_length - 1) catch failure:
                 assert(failure.code == strings.output_too_large)
                 rejected = true
-                recover "")
+                recover interop.Owned[str]("")
+            refused.release()
             assert(rejected)
         count += 1
     assert(count > 20000)
@@ -56,19 +61,21 @@ pub func main(arguments: c.str[]) -> i32!:
     var malformed: u8[4] = [65, 237, 160, 128]
     var empty: u8[]
     var refusing = memory.FixedBuffer.over(empty)
-    with refusing:
-        for kind in 0..<4:
-            var rejected = false
-            discard(convert((str)malformed, (u32)kind) catch failure:
-                assert(failure.code == utf8.invalid_sequence)
-                rejected = true
-                recover "")
-            assert(rejected)
-            rejected = false
-            discard(convert("abc", (u32)kind) catch failure:
+    for kind in 0..<4:
+        var rejected = false
+        let refused = convert((str)malformed, (u32)kind) catch failure:
+            assert(failure.code == utf8.invalid_sequence)
+            rejected = true
+            recover interop.Owned[str]("")
+        refused.release()
+        assert(rejected)
+        rejected = false
+        with refusing:
+            let exhausted = convert("abc", (u32)kind) catch failure:
                 assert(failure.code == memory.exhausted)
                 rejected = true
-                recover "")
-            assert(rejected)
+                recover interop.Owned[str]("")
+            exhausted.release()
+        assert(rejected)
     print("ok Unicode casing and scalar properties")
     return 0

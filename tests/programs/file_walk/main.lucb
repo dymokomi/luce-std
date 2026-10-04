@@ -30,7 +30,7 @@ struct Visitor: files.WalkVisitor:
 
 pub func main(arguments: c.str[]) -> i32!:
     var visitor = Visitor(root = arguments[1], moved = arguments[2])
-    try files.walk(arguments[1], &visitor)
+    try files.walk_with(arguments[1], &visitor)
     assert(visitor.renamed and visitor.directories == 27)
     assert(visitor.regular == 3 and visitor.symlinks == 3 and visitor.deepest == 25)
     assert(not (try files.exists_checked(arguments[1])))

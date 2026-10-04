@@ -1,5 +1,6 @@
 import c
 import files
+import interop
 import io
 import strings
 
@@ -24,8 +25,8 @@ pub func main(arguments: c.str[]) -> i32!:
     try files.create_symlink("data", link)
     try files.create_hard_link(link, link_alias)
     let target = try files.read_symlink(link_alias, 4)
-    defer strings.release(target)
-    assert(target == "data", "hard-link creation followed the source symlink")
+    defer target.release()
+    assert(target.value == "data", "hard-link creation followed the source symlink")
     assert(try files.exists_checked(link))
     try files.create_symlink("missing", dangling)
     assert(not (try files.exists_checked(dangling)))
@@ -35,23 +36,26 @@ pub func main(arguments: c.str[]) -> i32!:
         rejected = true
     assert(rejected)
     rejected = false
-    discard(files.read_symlink(dangling, 3) catch failure:
+    let excess = files.read_symlink(dangling, 3) catch failure:
         assert(failure.code == files.too_large)
         rejected = true
-        recover "")
+        recover interop.Owned[str]("")
+    excess.release()
     assert(rejected)
     let missing = try files.read_symlink(dangling, 7)
-    defer strings.release(missing)
-    assert(missing == "missing")
+    defer missing.release()
+    assert(missing.value == "missing")
     var published = false
     try files.write_atomic(dangling, "atomic".bytes, published = &published)
     assert(published)
-    let published_contents = try files.read(dangling)
-    defer free(published_contents)
+    let published_contents_file = try files.read(dangling)
+    defer published_contents_file.release()
+    let published_contents = published_contents_file.value
     assert((str)published_contents == "atomic")
     try files.write_atomic(dangling, "".bytes)
-    let empty_contents = try files.read(dangling)
-    defer free(empty_contents)
+    let empty_contents_file = try files.read(dangling)
+    defer empty_contents_file.release()
+    let empty_contents = empty_contents_file.value
     assert(empty_contents.length == 0)
     rejected = false
     files.remove_directory(directory) catch failure:
@@ -67,8 +71,9 @@ pub func main(arguments: c.str[]) -> i32!:
     try files.rename(original, renamed)
     assert(not (try files.exists_checked(original)))
     assert(not (try files.exists_checked(link)))
-    let contents = try files.read(renamed)
-    defer free(contents)
+    let contents_file = try files.read(renamed)
+    defer contents_file.release()
+    let contents = contents_file.value
     assert((str)contents == "original")
     try files.remove_file(hard)
     try files.remove_file(renamed)

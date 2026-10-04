@@ -3,22 +3,17 @@
 #   contents - Whole-file reads and writes
 #
 #   DESCRIPTION:
-#       Read a file through EOF or up to a limit, and create-or-truncate write; the result is
-#       an owned allocation of the current allocator, freed there.
+#       Read a file through EOF or up to a limit, as an owned result, and create-or-truncate
+#       write.
 #
 #==============================================================================================
 
-## Read through EOF, including files whose size changes or cannot be sought. The
-## result is an allocation of the current allocator; free the returned span there.
-## Use read_limit for untrusted or potentially unbounded input.
-pub func read(path: c.str) -> u8[]!:
-    return try read_limit(path, ~(usize)0)
-
-## Read a whole file up to `limit` bytes. One extra byte may be read to distinguish
-## an exact fit from excess input; excess fails with too_large, never truncates.
-## All allocations and the descriptor are released on failure. An empty result is
-## still an owned zero-length allocation, following read's existing free contract.
-pub func read_limit(path: c.str, limit: usize) -> u8[]!:
+## A whole file's bytes, read through EOF even when its size changes or cannot be sought.
+## At most `limit` bytes are accepted: one extra byte may be read to tell an exact fit from
+## excess, which fails with too_large rather than truncating. Pass a limit for untrusted or
+## possibly unbounded input. The result owns its storage: Luce copies it into `bytes`; a
+## Base caller reads `.value` and calls `release()`. On failure nothing is kept.
+pub func read(path: c.str, limit: usize = ~(usize)0) -> interop.Owned[const u8[]]!:
     var file = try File.open(path)
     defer file.destroy()
     var bytes: u8[]
@@ -49,12 +44,12 @@ pub func read_limit(path: c.str, limit: usize) -> u8[]!:
         memory.copy(bytes[used..], scratch, count)
         used += count
     try file.close()
-    if used == bytes.length and used > 0:
-        return bytes
-    let exact = try alloc u8[used]
-    memory.copy(exact, bytes, used)
-    release_buffer(bytes)
-    return exact
+    if used < bytes.length:
+        let exact = try alloc u8[used]
+        memory.copy(exact, bytes, used)
+        release_buffer(bytes)
+        bytes = exact
+    return try owned.adopt_bytes(bytes)
 
 ## Create or truncate and write all bytes, reporting write and close failures.
 ## This is neither atomic replacement nor durable sync; use those operations

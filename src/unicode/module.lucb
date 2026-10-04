@@ -12,15 +12,14 @@
 #
 #==============================================================================================
 
+import interop
 import memory
+import owned
 import strings
 import utf8
 ## The Unicode version this module's data is generated from.
 pub let version: str = "17.0.0"
 
-## Release text returned by this module, using its original current allocator.
-pub func release(text: str):
-    strings.release(text)
 
 ## Unicode White_Space property; false for unassigned or invalid scalar values.
 pub func is_whitespace(scalar: u32) -> bool:

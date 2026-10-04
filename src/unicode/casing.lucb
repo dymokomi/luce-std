@@ -10,21 +10,25 @@
 
 ## Full default uppercase mapping, including multi-scalar expansions. This is
 ## locale-independent Unicode casing, without normalization or language tailoring.
-pub func to_upper(text: str, max_bytes: usize? = none) -> str!:
+pub func to_upper(text: str, max_bytes: usize? = none) -> interop.Owned[str]!:
     return try convert_case(text, 0, false, max_bytes)
 
 ## Full default lowercase mapping, including contextual final Greek sigma and
 ## multi-scalar expansions. Turkish/Azeri/Lithuanian language tailoring is excluded.
-pub func to_lower(text: str, max_bytes: usize? = none) -> str!:
+pub func to_lower(text: str, max_bytes: usize? = none) -> interop.Owned[str]!:
     return try convert_case(text, 1, false, max_bytes)
 
 ## Full Unicode case folding for caseless comparison. Optional turkic selects the
 ## T mappings in CaseFolding.txt; this is not locale-aware lowercasing. Folding does
 ## not normalize text, so canonically equivalent inputs can still differ in bytes.
-pub func case_fold(text: str, turkic: bool = false, max_bytes: usize? = none) -> str!:
+pub func case_fold(text: str, turkic: bool = false, max_bytes: usize? = none) -> interop.Owned[str]!:
     return try convert_case(text, 2, turkic, max_bytes)
 
-func convert_case(text: str, kind: u8, turkic: bool, max_bytes: usize?) -> str!:
+## The converted text, owned by the result.
+func convert_case(text: str, kind: u8, turkic: bool, max_bytes: usize?) -> interop.Owned[str]!:
+    return try owned.adopt_text(try cased(text, kind, turkic, max_bytes))
+
+func cased(text: str, kind: u8, turkic: bool, max_bytes: usize?) -> str!:
     var empty: u8[]
     let length = try case_pass(text, kind, turkic, empty, false, max_bytes)
     let capacity = length +? 1 else error(memory.exhausted, "the cased text size overflowed")

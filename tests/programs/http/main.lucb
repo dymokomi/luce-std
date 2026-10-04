@@ -125,13 +125,14 @@ func serve_file(connection: net.Connection*, request: http.Request*, route: str)
     let relative = "index.html" if route == "/" else (str)route.bytes[1..]
     var name: u8[1024]
     let path = try format(name, f"{server.root}/{relative}")
-    let data = files.read((c.str)path) catch failure:
+    let file = files.read((c.str)path) catch failure:
         if failure.code == files.missing:
             try http.respond(connection, 404, "text/plain", "not found\n".bytes, request.keep_alive)
             return
         try http.respond(connection, 500, "text/plain", "cannot read\n".bytes, request.keep_alive)
         return
-    defer free(data)
+    defer file.release()
+    let data = file.value
     let body = data[..<0] if request.method == "HEAD" else data[0..]
     try http.respond(connection, 200, http.content_type(route), body, request.keep_alive)
     discard(server.stats.bytes_out.add((u64)body.length, .relaxed))

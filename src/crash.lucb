@@ -76,10 +76,8 @@ pub func directory() -> interop.Owned[str]!:
     let home = try files.home_directory()
     defer home.release()
     let luce = try paths.join(home.value, ".luce")
-    defer strings.release(luce)
-    let joined = try paths.join(luce, "crashes")
-    defer strings.release(joined)
-    return try interop.copy_text(joined)
+    defer luce.release()
+    return try paths.join(luce.value, "crashes")
 
 ## Turn crash reports on for this process. `app` names the program in the file
 ## name and header (letters, digits, `-` and `_` are kept; anything else becomes
@@ -102,10 +100,10 @@ pub func enable(app: str, version: str = "") -> !:
             pid = (i64)getpid()
         let file_name = try format(stamp, f"{kept}-{started}-{pid}.crash")
         let path = try paths.join(folder.value, file_name)
-        defer strings.release(path)
+        defer path.release()
         var header: u8[1024]
         let text = try format(header, f"luce crash report\napp: {app}\nversion: {version}\nplatform: {platform.name}\npid: {pid}\nstarted: {started}\n\n")
-        core.set_crash_report(path, text)
+        core.set_crash_report(path.value, text)
         if platform.posix and not platform.wasm32:
             try install_alternate_stack()
             for number in [illegal_signal, abort_signal, arithmetic_signal, segmentation_signal, bus_signal()]:
@@ -209,15 +207,13 @@ pub func take_report(app: str) -> interop.Owned[str]!:
     defer folder.release()
     var name: u8[64]
     let prefix = safe_name(app, name)
-    let folder_path = try strings.copy(folder.value)
-    defer strings.release(folder_path)
-    let names = files.list((c.str)folder_path) catch _:
+    let names = files.list((c.str)folder.value) catch _:
         return try interop.copy_text("")
-    defer files.release_list(names)
+    defer names.release()
     # Names are app-started-pid.crash; the newest start is the largest number.
     var newest: str = ""
     var newest_started: i64 = -1
-    for entry in names:
+    for entry in names.value:
         if entry.length > prefix.length + 7 and strings.starts_with(entry, prefix) and entry.bytes[prefix.length] == 45 and strings.ends_with(entry, ".crash"):
             let rest = (str)entry.bytes[prefix.length + 1..]
             let dash = strings.find(rest, "-") else continue
@@ -228,14 +224,14 @@ pub func take_report(app: str) -> interop.Owned[str]!:
     if newest.length == 0:
         return try interop.copy_text("")
     let path = try paths.join(folder.value, newest)
-    defer strings.release(path)
-    let text = try files.read_text(path, limit = 262144)
+    defer path.release()
+    let text = try files.read_text(path.value, limit = 262144)
     var seen: u8[1100]
-    let seen_path = try format(seen, f"{path}.seen")
+    let seen_path = try format(seen, f"{path.value}.seen")
     let target = try strings.copy(seen_path)
     defer strings.release(target)
     # A report that cannot be marked may show again; that is better than losing it.
-    files.rename((c.str)path, (c.str)target) catch failure:
+    files.rename((c.str)path.value, (c.str)target) catch failure:
         discard(failure)
     return text
 

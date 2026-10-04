@@ -4,7 +4,8 @@
 #
 #   DESCRIPTION:
 #       A File over an OS descriptor, opened by policy (replace, create_new, append), with
-#       read, write, seek, sync, truncate, metadata and permission operations.
+#       read, write, seek, sync, truncate, metadata and permission operations, and the line,
+#       text and byte reads a Luce program uses through `files.open`.
 #
 #==============================================================================================
 
@@ -37,8 +38,12 @@ pub enum SeekOrigin as u8:
 ## io interface; copying this value does not duplicate ownership or the OS handle.
 ## A copied value must not be independently closed. Calls on one handle require
 ## external synchronization. `close` reports errors; `destroy` is unwind cleanup.
+## Luce sees a File as an object, opened by `files.open` and closed by `with` or `close()`.
 pub struct File: io.Reader, io.Writer:
     var handle: i32?
+    ## Bytes `read_line` and `read_text` fetched beyond what they answered; `read` and
+    ## `seek` account for them.
+    var ahead: readahead.ReadAhead
 
     ## Open a close-on-exec descriptor. Only the named creation modes create paths.
     pub static func open(path: c.str, mode: OpenMode = OpenMode.read, permissions: u32 = 420) -> File!:
@@ -118,15 +123,9 @@ pub struct File: io.Reader, io.Writer:
     ## empty input makes no system call. The handle must be open even for empty I/O.
     pub mutating func read(buffer: u8[]) -> usize!:
         let fd = self.handle else error(io.closed, "the file is closed")
-        if buffer.length == 0:
-            return 0
-        let count = buffer.length if buffer.length < transfer_limit else transfer_limit
-        var received = c_read(fd, buffer.data, count)
-        while received < 0 and c.errno() == c.interrupted:
-            received = c_read(fd, buffer.data, count)
-        if received < 0:
-            error(classify_error(c.errno()), "the file could not be read")
-        return (usize)received
+        if self.ahead.count() > 0:
+            return self.ahead.take(buffer)
+        return try read_descriptor(fd, buffer)
 
     ## Write some bytes, retrying interruption. Use io.write_all for a full payload.
     ## Success confirms an OS write, not durable storage; call sync when required.
@@ -134,6 +133,9 @@ pub struct File: io.Reader, io.Writer:
         let fd = self.handle else error(io.closed, "the file is closed")
         if data.length == 0:
             return 0
+        if self.ahead.count() > 0:
+            # bytes read ahead were not answered yet: write where the reader stands
+            discard(try self.seek(0, SeekOrigin.current))
         let count = data.length if data.length < transfer_limit else transfer_limit
         var written = c_write(fd, data.data, count)
         while written < 0 and c.errno() == c.interrupted:
@@ -146,11 +148,14 @@ pub struct File: io.Reader, io.Writer:
     ## unseekable descriptors report failure instead of pretending their size is zero.
     pub mutating func seek(offset: i64, origin: SeekOrigin = SeekOrigin.start) -> i64!:
         let fd = self.handle else error(io.closed, "the file is closed")
-        var position = lseek(fd, offset, (i32)origin)
+        # the descriptor stands past the bytes read ahead; a relative seek starts before them
+        let target = offset - (i64)self.ahead.count() if origin == SeekOrigin.current else offset
+        var position = lseek(fd, target, (i32)origin)
         while position < 0 and c.errno() == c.interrupted:
-            position = lseek(fd, offset, (i32)origin)
+            position = lseek(fd, target, (i32)origin)
         if position < 0:
             error(classify_error(c.errno()), "the file could not be positioned")
+        self.ahead.clear()
         return position
 
     ## Request the OS's fsync durability boundary for this file; this does not sync
@@ -163,12 +168,42 @@ pub struct File: io.Reader, io.Writer:
         if result < 0:
             error(classify_error(c.errno()), "the file could not be synchronized")
 
+    # mark: Lines, text and bytes ============================================================
+
+    ## The next line without its `\n` or `\r\n`; the unfinished last line at the end, and
+    ## none after it. A line that is not UTF-8 is invalid_text. The view lasts until the
+    ## next read.
+    pub mutating func read_line() -> str?!:
+        var source = Descriptor(handle = self.handle else error(io.closed, "the file is closed"))
+        return try self.ahead.line(&source)
+
+    ## Up to `maximum` bytes, or all the rest with a negative maximum; empty at the end. The
+    ## view lasts until the next read.
+    pub mutating func read_bytes(maximum: i64 = -1) -> const u8[]!:
+        var source = Descriptor(handle = self.handle else error(io.closed, "the file is closed"))
+        return try self.ahead.bytes(&source, read_limit(maximum), true)
+
+    ## Up to `maximum` bytes as text, or all the rest with a negative maximum, ending on a
+    ## whole character; empty at the end. Text that is not UTF-8 is invalid_text.
+    pub mutating func read_text(maximum: i64 = -1) -> str!:
+        var source = Descriptor(handle = self.handle else error(io.closed, "the file is closed"))
+        return try self.ahead.text(&source, read_limit(maximum), true)
+
+    ## Write all of `data`.
+    pub mutating func write_bytes(data: const u8[]) -> !:
+        try io.write_all(&self, data)
+
+    ## Write all of `text`.
+    pub mutating func write_text(text: str) -> !:
+        try io.write_all(&self, text.bytes)
+
     ## Consume ownership before closing, so repeated calls on this value are safe
     ## even after failure. Never retry close: a reused descriptor may belong to
     ## another thread. A reported failure must not be retried using descriptor().
     pub mutating func close() -> !:
         let fd = self.handle else return
         self.handle = none
+        self.ahead.release()
         if close(fd) != 0:
             error(classify_error(c.errno()), "the file could not be closed")
 
@@ -177,6 +212,47 @@ pub struct File: io.Reader, io.Writer:
     pub mutating func destroy():
         self.close() catch failure:
             discard(failure)
+
+## Open `path` as a File object for Luce: `files.open("notes.txt")` reads, and a mode
+## such as `files.OpenMode.replace` or `.append` writes. It closes with `with` or `close()`.
+## Base programs use `File.open`, which answers the File as a value.
+pub func open(path: c.str, mode: OpenMode = OpenMode.read, permissions: u32 = 420) -> interop.Reference[File]!:
+    var reservation = try interop.Reservation[File](file_type)
+    errdefer reservation.cancel()
+    var opened = try File.open(path, mode, permissions)
+    let native = new File(handle = opened.handle) catch failure:
+        opened.destroy()
+        error(failure.code, failure.message)
+    return reservation.publish(native)
+
+## The interop type of an open file.
+pub let file_type: interop.Type[File] = interop.Type[File]("File", File.destroy, closeable = true)
+
+## The text read is not valid UTF-8.
+pub let invalid_text: ErrorCode = readahead.invalid_text
+
+## A descriptor read directly, under the file's read-ahead bytes.
+struct Descriptor: io.Reader:
+    var handle: i32
+
+    mutating func read(buffer: u8[]) -> usize!:
+        return try read_descriptor(self.handle, buffer)
+
+## Read some bytes, retrying interruption; zero at the end.
+func read_descriptor(fd: i32, buffer: u8[]) -> usize!:
+    if buffer.length == 0:
+        return 0
+    let count = buffer.length if buffer.length < transfer_limit else transfer_limit
+    var received = c_read(fd, buffer.data, count)
+    while received < 0 and c.errno() == c.interrupted:
+        received = c_read(fd, buffer.data, count)
+    if received < 0:
+        error(classify_error(c.errno()), "the file could not be read")
+    return (usize)received
+
+## A Luce read maximum: a negative one is everything.
+func read_limit(maximum: i64) -> usize:
+    return ~(usize)0 if maximum < 0 else (usize)maximum
 
 func classify_error(number: i32) -> ErrorCode:
     if platform.wasm32:
@@ -242,7 +318,7 @@ func open_descriptor(path: c.str, flags: i32, permissions: u32, temporary: bool 
     if platform.windows:
         return try windows_open(path, flags, permissions, delete_on_close = temporary)
     else:
-        return open(path, flags, permissions)
+        return posix_open(path, flags, permissions)
 
 ## A temporary file's name goes once it is open (POSIX); Windows deletes it when
 ## its last handle closes, so the name stays until then.

@@ -48,11 +48,13 @@ func malformed_cases(corpus: const u8[]):
         offset += length
 
 pub func main(arguments: c.str[]) -> i32!:
-    let reference = try files.read(arguments[1])
-    defer free(reference)
+    let reference_file = try files.read(arguments[1])
+    defer reference_file.release()
+    let reference = reference_file.value
     scalar_cases(reference)
-    let corpus = try files.read(arguments[2])
-    defer free(corpus)
+    let corpus_file = try files.read(arguments[2])
+    defer corpus_file.release()
+    let corpus = corpus_file.value
     malformed_cases(corpus)
     print("ok utf8: every scalar and malformed corpus")
     return 0

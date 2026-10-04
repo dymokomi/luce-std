@@ -290,8 +290,8 @@ func metadata_descriptor(descriptor: i32) -> Metadata!:
 func metadata_at(directory: i32, path: c.str, follow_symlinks: bool) -> Metadata!:
     if platform.windows:
         let joined = try windows_relative(directory, path)
-        defer strings.release(joined)
-        return try metadata((c.str)joined, follow_symlinks)
+        defer joined.release()
+        return try metadata((c.str)joined.value, follow_symlinks)
     else:
         let flags: i32 = 0 if follow_symlinks else at_no_follow_flag
         if platform.macos:

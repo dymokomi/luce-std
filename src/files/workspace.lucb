@@ -3,8 +3,8 @@
 #   workspace - Canonical paths and temporary trees
 #
 #   DESCRIPTION:
-#       Filesystem identity and owned temporary directory trees. Path allocations use the
-#       current allocator; owners retain that allocator for eventual cleanup.
+#       Filesystem identity and owned temporary directory trees. Paths are answered as owned
+#       results, which Luce copies and Base callers release.
 #
 #==============================================================================================
 
@@ -20,8 +20,8 @@ let get_path: i32 = 50
 ## Resolve an existing entry through symlinks to its absolute filesystem path.
 ## Windows extended DOS/UNC prefixes are normalized to ordinary UTF-8 paths with
 ## forward slashes. This resolves identity; it does not fold case or authorize access.
-## Release the returned NUL-terminated allocation with strings.release.
-pub func canonical(path: c.str) -> str!:
+## The result owns its NUL-terminated text: Base callers read `.value` and call `release()`.
+pub func canonical(path: c.str) -> interop.Owned[str]!:
     if platform.windows:
         let handle = try windows_path_handle(path, true)
         defer discard(CloseHandle(handle))
@@ -41,13 +41,13 @@ pub func canonical(path: c.str) -> str!:
         for index in 0..<result.length:
             if bytes[index] == 92:
                 bytes[index] = '/'
-        return result
+        return try owned.adopt_text(result)
     elif platform.macos:
         # realpath lists every directory on the way to learn each name's case; the
         # descriptor's path is the same answer from the kernel at once
         # (an entry that cannot be opened so, such as a socket, goes to realpath, whose
         # answer or failure stands)
-        let descriptor = open(path, event_only)
+        let descriptor = posix_open(path, event_only)
         if descriptor >= 0:
             defer discard(close(descriptor))
             var buffer: u8[1024] = ---
@@ -55,23 +55,23 @@ pub func canonical(path: c.str) -> str!:
                 var length: usize = 0
                 while length < buffer.length and buffer[length] != 0:
                     length += 1
-                return try strings.copy((str)buffer[..<length])
+                return try owned.copy_text((str)buffer[..<length])
         let resolved = realpath(path, none) else error(classify_error(c.errno()), "the filesystem path could not be resolved")
         defer release_realpath((void*)resolved)
-        return try strings.copy((str)(c.str)resolved)
+        return try owned.copy_text((str)(c.str)resolved)
     else:
         let resolved = realpath(path, none) else error(classify_error(c.errno()), "the filesystem path could not be resolved")
         defer release_realpath((void*)resolved)
-        return try strings.copy((str)(c.str)resolved)
+        return try owned.copy_text((str)(c.str)resolved)
 
-## Atomically create an unused directory with 128 random filename bits. The
-## returned path is owned by the caller. The parent must already exist.
-pub func create_temporary_directory(parent: c.str, permissions: u32 = 448) -> str!:
+## Atomically create an unused directory with 128 random filename bits, answering its
+## path as an owned text. The parent must already exist.
+pub func create_temporary_directory(parent: c.str, permissions: u32 = 448) -> interop.Owned[str]!:
     let candidate = try paths.join((str)parent, ".luce-00000000000000000000000000000000")
-    errdefer strings.release(candidate)
+    errdefer candidate.release()
     let digits = "0123456789abcdef"
-    let data = (u8*)candidate.bytes.data
-    let suffix = candidate.length - 32
+    let data = (u8*)candidate.value.bytes.data
+    let suffix = candidate.value.length - 32
     var attempt: usize = 0
     while attempt < 128:
         var random: u8[16]
@@ -79,7 +79,7 @@ pub func create_temporary_directory(parent: c.str, permissions: u32 = 448) -> st
         for index in 0..<random.length:
             data[suffix + index * 2] = digits.bytes[random[index] >> 4]
             data[suffix + index * 2 + 1] = digits.bytes[random[index] & 15]
-        create_directory((c.str)candidate, permissions) catch failure:
+        create_directory((c.str)candidate.value, permissions) catch failure:
             if failure.code == already_exists:
                 attempt += 1
                 continue
@@ -98,37 +98,42 @@ pub func remove_tree(path: c.str) -> !:
         try remove_file(path)
         return
     let names = try list(path)
-    defer release_list(names)
-    for name in names:
+    defer names.release()
+    for name in names.value:
         let child = try paths.join((str)path, name)
-        defer strings.release(child)
-        try remove_tree((c.str)child)
+        defer child.release()
+        try remove_tree((c.str)child.value)
     try remove_directory(path)
 
-## Own one directory tree. Borrow this owner; copying it does not copy ownership.
-## close reports cleanup failures and retains ownership for a retry. destroy makes
-## a final cleanup attempt and always releases the pathname allocation.
+## Own one directory tree, removed with everything in it on close. Borrow this owner;
+## copying it does not copy ownership. close reports cleanup failures and keeps ownership
+## for a retry; destroy makes a final attempt and always releases the pathname. Luce sees
+## it as an object, `with files.TemporaryDirectory() as directory:`, removed on close.
 pub struct TemporaryDirectory:
     var name: str
-    var owner: memory.Allocator?
 
-    ## Create a temporary directory under `parent`, or the system default.
+    ## Create a temporary directory under `parent`, or the system's temporary directory.
     pub func init(parent: c.str = "") -> !:
         let directory = (str)parent if ((str)parent).length > 0 else io.path.temp()
-        self.name = try create_temporary_directory((c.str)directory)
-        self.owner = memory.allocator
+        let created = try create_temporary_directory((c.str)directory)
+        defer created.release()
+        var name: str
+        with memory.heap:
+            name = strings.copy(created.value) catch failure:
+                remove_directory((c.str)created.value) catch cleanup:
+                    discard(cleanup)
+                error(failure.code, failure.message)
+        self.name = name
 
-    ## Borrowed NUL-terminated pathname, valid until close or destroy.
+    ## The directory's path, NUL-terminated, valid until close or destroy.
     pub func path() -> str:
         return self.name
 
     mutating func release_name():
         if self.name.length > 0:
-            let owner = self.owner else trap("a temporary directory lost its allocator")
-            with owner:
+            with memory.heap:
                 strings.release(self.name)
             self.name = ""
-            self.owner = none
 
     ## Remove the directory tree; reports the first failure.
     pub mutating func close() -> !:
@@ -142,3 +147,6 @@ pub struct TemporaryDirectory:
         self.close() catch failure:
             discard(failure)
         self.release_name()
+
+## The interop type of a temporary directory.
+pub let temporary_directory_type: interop.Type[TemporaryDirectory] = interop.Type[TemporaryDirectory]("TemporaryDirectory", TemporaryDirectory.destroy, closeable = true)

@@ -1,5 +1,6 @@
 import c
 from luce_std import files
+import interop
 import io
 
 extern func file_fault_watch(fd: i32)
@@ -80,26 +81,26 @@ pub func main(arguments: str[]) -> i32!:
     assert(caught)
     file_fault_watch(original_fd)
     file_fault_arm(1)
-    let bytes = try files.read_limit(path, 8)
-    defer free(bytes)
-    assert((str)bytes == "abcd12xy" and file_fault_hits() == 1)
+    let bytes = try files.read(path, 8)
+    defer bytes.release()
+    assert((str)bytes.value == "abcd12xy" and file_fault_hits() == 1)
     caught = false
-    files.read_limit(path, 7) catch failure:
+    let excess = files.read(path, 7) catch failure:
         assert(failure.code == files.too_large)
         caught = true
-        var empty: u8[]
-        recover empty
+        recover interop.Owned[const u8[]]("".bytes)
+    excess.release()
     assert(caught and fcntl(original_fd, 1) == -1)
     file_fault_arm(4)
     caught = false
-    files.read_limit(path, 8) catch failure:
+    let faulted = files.read(path, 8) catch failure:
         assert(failure.code == files.failed)
         caught = true
-        var empty: u8[]
-        recover empty
+        recover interop.Owned[const u8[]]("".bytes)
+    faulted.release()
     assert(caught and file_fault_hits() == 1 and fcntl(original_fd, 1) == -1)
-    let streamed = try files.read_limit((c.str)arguments[2], 8)
-    defer free(streamed)
-    assert((str)streamed == "streamed")
+    let streamed = try files.read((c.str)arguments[2], 8)
+    defer streamed.release()
+    assert((str)streamed.value == "streamed")
     print("ok file handles and injected failures")
     return 0

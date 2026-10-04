@@ -4,7 +4,7 @@
 #
 #   DESCRIPTION:
 #       An owned directory stream that yields entry names, opens children, and reads their
-#       metadata, plus the whole-listing helper.
+#       metadata, plus the whole listing as an owned result.
 #
 #==============================================================================================
 
@@ -55,8 +55,8 @@ pub struct Directory:
         var flags = try file_open_flags(mode, permissions)
         if platform.windows:
             let joined = try windows_relative(parent, path)
-            defer strings.release(joined)
-            return File(handle = try windows_open((c.str)joined, flags, permissions, follow_symlinks, nonblocking))
+            defer joined.release()
+            return File(handle = try windows_open((c.str)joined.value, flags, permissions, follow_symlinks, nonblocking))
         else:
             if not follow_symlinks:
                 flags |= no_follow_flag
@@ -117,39 +117,20 @@ func open_directory_at(parent: i32, path: c.str, follow_symlinks: bool) -> Direc
 
 # mark: Listing ===============================================================================
 
-## The names in a directory, sorted by bytes, without `.` and `..`: each name and the
-## array holding them, exactly as long as the names, are allocations of the current
-## allocator, which `release_list` returns together. On a failure nothing allocated is
-## kept and the directory is closed.
-pub func list(path: c.str) -> str[]!:
+## The names in a directory, sorted by bytes, without `.` and `..`. The result owns the
+## names: Luce copies them into a `list[str]`; a Base caller reads `.value` and calls
+## `release()`. Each name is NUL-terminated, so it may be passed on as a `c.str`. On a
+## failure nothing allocated is kept and the directory is closed.
+pub func list(path: c.str) -> interop.Owned[const str[]]!:
     var directory = try Directory.open(path)
     defer directory.destroy()
-    var names = try alloc str[16]
-    var count: usize = 0
-    errdefer release_entries(names, count)
+    var names: owned.Gathered
+    errdefer names.release()
     while let name = try directory.next():
-        if count == names.length:
-            let capacity = names.length *? 2 else error(memory.exhausted, "the directory listing is too large")
-            let grown = try alloc str[capacity]
-            memory.copy(grown, names, count)
-            free(names)
-            names = grown
-        let copy = try alloc u8[name.length + 1]
-        memory.copy(copy, name.bytes, name.length)
-        copy[name.length] = 0
-        names[count] = (str)copy[..<name.length]
-        count += 1
+        try names.add(name)
     try directory.close()
-    sort_names(names[..<count])
-    # the array as long as the names, so that `release_list` returns what was allocated
-    if count == 0:
-        free(names)
-        var empty: str[]
-        return empty
-    let exact = try alloc str[count]
-    memory.copy(exact, names, count)
-    free(names)
-    return exact
+    sort_names(names.view())
+    return try names.finish()
 
 ## In-place heapsort gives large directories O(n log n) comparisons without a
 ## second allocation or a recursion depth dependent on filesystem enumeration order.
@@ -178,16 +159,3 @@ func sift_names(names: str[], start: usize, end: usize):
         names[parent] = names[child]
         names[child] = saved
         parent = child
-
-## Return what `list` allocated: every name, then the array, to the allocator that is
-## current, which must be the one `list` allocated from. The names are one byte longer
-## than they read, the NUL after each (§5.5).
-pub func release_list(names: str[]):
-    release_entries(names, names.length)
-
-## Partial lists still own the whole array allocation, including its unfilled capacity.
-func release_entries(names: str[], count: usize):
-    for name in names[..<count]:
-        free(u8[]((u8*)name.bytes.data, name.length + 1))
-    if names.length > 0:
-        free(names)

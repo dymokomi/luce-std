@@ -4,8 +4,9 @@ import io
 import net
 
 pub func main(arguments: c.str[]) -> i32!:
-    let corpus = try files.read(arguments[1])
-    defer free(corpus)
+    let corpus_file = try files.read(arguments[1])
+    defer corpus_file.release()
+    let corpus = corpus_file.value
     var position: usize = 0
     var cases: usize = 0
     while position < corpus.length:

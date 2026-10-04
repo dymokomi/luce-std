@@ -10,9 +10,14 @@ test "paths split into their parts and join":
     assert(paths.extension("x.tar.gz") == ".gz" and paths.extension("x") == "")
     assert(paths.stem("/usr/lib/x.a") == "x" and paths.stem("noext") == "noext")
     let joined = try paths.join("/usr", "lib")
-    assert(joined == "/usr/lib")
+    defer joined.release()
+    assert(joined.value == "/usr/lib")
     let absolute_wins = try paths.join("/usr", "C:/etc" if platform.windows else "/etc")
-    assert(absolute_wins == ("C:/etc" if platform.windows else "/etc"))
+    defer absolute_wins.release()
+    assert(absolute_wins.value == ("C:/etc" if platform.windows else "/etc"))
+    let normal = try paths.normalize("a/./b/../c")
+    defer normal.release()
+    assert(normal.value == "a/c")
 
 test "join_into writes a path with no allocation":
     var buffer: u8[64] = ---

@@ -1,0 +1,166 @@
+#==============================================================================================
+#
+#   owned - Results that carry the owner of their storage
+#
+#   DESCRIPTION:
+#       Allocations handed to a caller as interop.Owned results, together with the object that
+#       frees them. Luce copies the value into its own and releases the owner; a Base caller
+#       reads `.value` and calls `release()` when done with it.
+#
+#==============================================================================================
+
+import interop
+import memory
+import ownership
+import strings
+
+## What a result's storage holds.
+enum Held:
+    bytes
+    text
+    texts
+
+## The storage behind one result, allocated from `allocator`, which frees it.
+struct Storage:
+    var header: ownership.Object
+    var allocator: memory.Allocator
+    var held: Held
+    var data: u8[]
+    var text: str
+    var texts: str[]
+
+func drop_storage(object: ownership.Object*):
+    let storage = (Storage*)object
+    with storage.allocator:
+        match storage.held:
+            .bytes:
+                if storage.data.length > 0:
+                    free(storage.data)
+            .text:
+                strings.release(storage.text)
+            .texts:
+                for text in storage.texts:
+                    strings.release(text)
+                if storage.texts.length > 0:
+                    free(storage.texts)
+
+func trace_storage(object: ownership.Object*, visit: func(ownership.Object*, void*) -> unit, context: void*):
+    discard(object)
+
+var storage_info: ownership.Info = ownership.Info(name = "owned result", size = sizeof(Storage),
+                                                  finish = none, drop = drop_storage,
+                                                  trace = trace_storage, acyclic = true)
+
+## Storage for a result whose allocations came from the current allocator.
+func new_storage(held: Held) -> Storage*!:
+    let storage = (Storage*)(try ownership.reserve(&storage_info, sizeof(Storage)))
+    storage.allocator = memory.allocator
+    storage.held = held
+    return storage
+
+## Own `data`, an allocation of the current allocator (or empty), as a byte result. The
+## span belongs to the result from the call on, also when making the owner fails.
+pub func adopt_bytes(data: u8[]) -> interop.Owned[const u8[]]!:
+    let owner = new_storage(Held.bytes) catch failure:
+        if data.length > 0:
+            free(data)
+        error(failure.code, failure.message)
+    owner.data = data
+    return interop.Owned[const u8[]](data, &owner.header)
+
+## Own `value`, a NUL-terminated text of the current allocator such as `strings.copy`
+## answers, as a text result a Base caller may also pass on as a `c.str`. It belongs to
+## the result from the call on, also when making the owner fails.
+pub func adopt_text(value: str) -> interop.Owned[str]!:
+    let owner = new_storage(Held.text) catch failure:
+        strings.release(value)
+        error(failure.code, failure.message)
+    owner.text = value
+    return interop.Owned[str](value, &owner.header)
+
+## Own `values`, an array of the current allocator (or empty) of NUL-terminated texts of it,
+## as a list result. Array and texts belong to the result from the call on.
+pub func adopt_texts(values: str[]) -> interop.Owned[const str[]]!:
+    let owner = new_storage(Held.texts) catch failure:
+        release_texts(values, values.length)
+        error(failure.code, failure.message)
+    owner.texts = values
+    return interop.Owned[const str[]](values, &owner.header)
+
+## A copy of `value` as an owned text, NUL-terminated for Base callers.
+pub func copy_text(value: str) -> interop.Owned[str]!:
+    return try adopt_text(try strings.copy(value))
+
+## Give back an array of texts that never became a result: its first `count` texts, then
+## the array.
+pub func release_texts(values: str[], count: usize):
+    for value in values[..<count]:
+        strings.release(value)
+    if values.length > 0:
+        free(values)
+
+## Texts gathered into a growing array of the current allocator, then handed to an owned
+## result exactly as long as they are.
+pub struct Gathered:
+    var texts: str[]
+    var count: usize
+
+    ## Add a copy of `text`.
+    pub mutating func add(text: str) -> !:
+        if self.count == self.texts.length:
+            let capacity = self.texts.length *? 2 else error(memory.exhausted, "too many texts")
+            try self.resize(capacity if capacity > 0 else 16)
+        self.texts[self.count] = try strings.copy(text)
+        self.count += 1
+
+    ## The texts gathered so far.
+    pub func view() -> str[]:
+        return self.texts[..<self.count]
+
+    mutating func resize(capacity: usize) -> !:
+        var resized: str[]
+        if capacity > 0:
+            resized = try alloc str[capacity]
+            memory.copy(resized, self.texts, self.count)
+        if self.texts.length > 0:
+            free(self.texts)
+        self.texts = resized
+
+    ## The texts as an owned result; the gathering is empty afterwards.
+    pub mutating func finish() -> interop.Owned[const str[]]!:
+        try self.resize(self.count)
+        let texts = self.texts
+        var empty: str[]
+        self.texts = empty
+        self.count = 0
+        return try adopt_texts(texts)
+
+    ## Give back whatever was gathered.
+    pub mutating func release():
+        release_texts(self.texts, self.count)
+        var empty: str[]
+        self.texts = empty
+        self.count = 0
+
+test "an owned result frees its storage when released":
+    let before = ownership.live_count()
+    var names: Gathered
+    errdefer names.release()
+    try names.add("ada")
+    try names.add("grace")
+    let list = try names.finish()
+    assert(list.value.length == 2 and list.value[1] == "grace")
+    let data = try adopt_bytes(try alloc u8[3])
+    let path = try copy_text("/tmp")
+    assert(path.value == "/tmp" and path.value.bytes.data[4] == 0)
+    assert(ownership.live_count() == before + 3)
+    list.release()
+    data.release()
+    path.release()
+    assert(ownership.live_count() == before)
+
+test "an empty gathering is an empty result":
+    var none_yet: Gathered
+    let empty = try none_yet.finish()
+    assert(empty.value.length == 0)
+    empty.release()

@@ -5,8 +5,9 @@ import unicode
 import utf8
 
 pub func main(arguments: c.str[]) -> i32!:
-    let corpus = try files.read(arguments[1])
-    defer free(corpus)
+    let corpus_file = try files.read(arguments[1])
+    defer corpus_file.release()
+    let corpus = corpus_file.value
     var empty: u8[]
     var refusing = memory.FixedBuffer.over(empty)
     with refusing:

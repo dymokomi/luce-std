@@ -1,14 +1,13 @@
 #==============================================================================================
 #
-#   text - Owned UTF-8 file operations
+#   text - Whole-file text and directories by counted path
 #
 #   DESCRIPTION:
-#       Owned UTF-8 file operations for managed consumers. Paths are counted text, validated
-#       before entering the native filesystem boundary.
+#       UTF-8 file text read, replaced and created whole, and directories ensured, for paths
+#       given as counted text (a Luce `str`), validated before they reach the filesystem.
 #
 #==============================================================================================
 
-import interop
 import utf8
 
 func text_path(path: str) -> str!:
@@ -21,15 +20,16 @@ func text_path(path: str) -> str!:
 
 # mark: Reading and writing text ==============================================================
 
-## Return an owned text, refusing oversized or malformed files before publication.
+## The file's text, refusing a file over `limit` bytes or one that is not UTF-8. The result
+## owns its storage: Luce copies it into a `str`; a Base caller calls `release()`.
 pub func read_text(path: str, limit: usize = 4194304) -> interop.Owned[str]!:
     let native = try text_path(path)
     defer strings.release(native)
-    let data = try read_limit((c.str)native, limit)
-    defer free(data)
-    if not utf8.valid(data):
+    let data = try read((c.str)native, limit)
+    if not utf8.valid(data.value):
+        data.release()
         error(invalid_options, "the file is not valid UTF-8")
-    return try interop.copy_text((str)data)
+    return interop.Owned[str]((str)data.value, data.owner)
 
 ## Replace atomically in the destination directory, preserving existing mode bits.
 ## Resolve an existing symlink to its target before replacement.
@@ -41,87 +41,15 @@ pub func write_text(path: str, text: str) -> !:
     let resolved = canonical((c.str)native) catch failure:
         if failure.code != missing:
             error(failure.code, failure.message)
-        recover try strings.copy(native)
-    defer strings.release(resolved)
-    let info = metadata((c.str)resolved) catch failure:
+        recover try owned.copy_text(native)
+    defer resolved.release()
+    let info = metadata((c.str)resolved.value) catch failure:
         if failure.code != missing:
             error(failure.code, failure.message)
         recover Metadata(kind = FileKind.regular, permissions = 420)
     if info.kind != FileKind.regular:
         error(invalid_options, "text can only replace a regular file")
-    try write_atomic((c.str)resolved, text.bytes, permissions = info.permissions)
-
-## The canonical absolute path of `path`, as owned text.
-pub func absolute_path(path: str) -> interop.Owned[str]!:
-    let native = try text_path(path)
-    defer strings.release(native)
-    let resolved = try canonical((c.str)native)
-    defer strings.release(resolved)
-    return try interop.copy_text(resolved)
-
-## The kind of the file at `path` (regular, directory, symlink…).
-pub func path_kind(path: str, follow_symlinks: bool = true) -> FileKind!:
-    let native = try text_path(path)
-    defer strings.release(native)
-    return (try metadata((c.str)native, follow_symlinks)).kind
-
-# mark: Directory entries =====================================================================
-
-## A sorted snapshot owns all entry names. Reading another entry never invalidates
-## an earlier owned name, and closing releases the complete snapshot.
-pub struct Entries:
-    var names: str[]
-
-    ## Open `path` for reading its bytes as text.
-    pub func init(path: str) -> !:
-        let native = try text_path(path)
-        defer strings.release(native)
-        self.names = try text_entries((c.str)native)
-
-    ## The number of entries in the snapshot.
-    pub func count() -> i64:
-        return (i64)self.names.length
-
-    ## The owned name of entry `index` in the snapshot.
-    pub func name(index: i64) -> interop.Owned[str]!:
-        if index < 0 or (usize)index >= self.names.length:
-            error(invalid_options, "the directory entry index is outside the snapshot")
-        let name = self.names[(usize)index]
-        if not utf8.valid(name.bytes):
-            error(invalid_options, "the directory entry is not valid UTF-8")
-        return try interop.copy_text(name)
-
-    ## Release the snapshot's names.
-    pub mutating func close():
-        with memory.heap:
-            release_list(self.names)
-        var empty: str[]
-        self.names = empty
-
-## The interop type of a directory-entries snapshot.
-pub let entries_type: interop.Type[Entries] = interop.Type[Entries]("Directory entries", Entries.close, closeable = true)
-
-func text_entries(path: c.str) -> str[]!:
-    with memory.heap:
-        return try list(path)
-
-## Ensure a single directory exists; its parent must already exist.
-pub func ensure_directory(path: str) -> !:
-    let native = try text_path(path)
-    defer strings.release(native)
-    create_directory((c.str)native) catch failure:
-        if failure.code != already_exists:
-            error(failure.code, failure.message)
-        if (try metadata((c.str)native)).kind != FileKind.directory:
-            error(not_directory, "the existing path is not a directory")
-
-## Owned home-directory text, independent of later environment reads. Uses the
-## same OS policy as io.path.user: HOME on POSIX, USERPROFILE on Windows.
-pub func home_directory() -> interop.Owned[str]!:
-    let home = try io.path.user()
-    if home.length == 0:
-        error(invalid_options, "the user home directory is empty")
-    return try interop.copy_text(home)
+    try write_atomic((c.str)resolved.value, text.bytes, permissions = info.permissions)
 
 ## Publish complete UTF-8 text only if the destination is unused. A racing
 ## creator is refused atomically; existing files and symlinks are never replaced.
@@ -135,38 +63,35 @@ pub func create_text(path: str, text: str = "") -> !:
     try io.write_all(&replacement.temporary, text.bytes)
     try replacement.finish((c.str)native, false, none)
 
-# mark: Path operations =======================================================================
+# mark: Directories ===========================================================================
 
-## Counted-path operations for managed consumers. Copy and move refuse existing
-## destinations; deletion removes a single entry unless recursive is explicit.
-pub func copy_path(source: str, destination: str) -> !:
-    let origin = try text_path(source)
-    defer strings.release(origin)
-    let target = try text_path(destination)
-    defer strings.release(target)
-    discard(try copy_file((c.str)origin, (c.str)target))
-
-## Rename `source` to `destination`, refusing an existing destination.
-pub func move_path(source: str, destination: str) -> !:
-    let origin = try text_path(source)
-    defer strings.release(origin)
-    let target = try text_path(destination)
-    defer strings.release(target)
-    try rename((c.str)origin, (c.str)target, replace = false)
-
-## Create a single directory; its parent must exist.
-pub func make_directory(path: str) -> !:
+## Make sure `path` is a directory, creating it and any missing parents, like `mkdir -p`.
+## An existing directory is fine; an existing file in the way is not_directory.
+pub func ensure_directory(path: str) -> !:
     let native = try text_path(path)
     defer strings.release(native)
-    try create_directory((c.str)native)
+    try ensure_tree((c.str)native)
 
-## Remove the entry at `path`; a directory only when `recursive`.
-pub func delete_path(path: str, recursive: bool = false) -> !:
-    let native = try text_path(path)
-    defer strings.release(native)
-    if recursive:
-        try remove_tree((c.str)native)
-    elif (try metadata((c.str)native, follow_symlinks = false)).kind == FileKind.directory:
-        try remove_directory((c.str)native)
-    else:
-        try remove_file((c.str)native)
+func ensure_tree(path: c.str) -> !:
+    create_directory(path) catch failure:
+        if failure.code == missing:
+            let parent = paths.directory((str)path)
+            if parent == "." or parent == (str)path or paths.root((str)path) == parent:
+                error(failure.code, failure.message)
+            let parent_name = try strings.copy(parent)
+            defer strings.release(parent_name)
+            try ensure_tree((c.str)parent_name)
+            create_directory(path) catch again:
+                if again.code != already_exists:
+                    error(again.code, again.message)
+        elif failure.code != already_exists:
+            error(failure.code, failure.message)
+    if (try metadata(path)).kind != FileKind.directory:
+        error(not_directory, "the existing path is not a directory")
+
+## The user's home directory: HOME on POSIX, USERPROFILE on Windows.
+pub func home_directory() -> interop.Owned[str]!:
+    let home = try io.path.user()
+    if home.length == 0:
+        error(invalid_options, "the user home directory is empty")
+    return try owned.copy_text(home)

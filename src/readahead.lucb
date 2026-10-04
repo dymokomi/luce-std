@@ -1,0 +1,207 @@
+#==============================================================================================
+#
+#   readahead - Bytes read ahead of the caller
+#
+#   DESCRIPTION:
+#       The buffer behind line, text and chunk reads over a file or a connection: what a read
+#       fetched beyond the line or text it answered waits here for the next read.
+#
+#==============================================================================================
+
+import io
+import memory
+import utf8
+
+## The text read is not valid UTF-8.
+pub let invalid_text: ErrorCode = ErrorCode.package(48)
+
+let smallest: usize = 4096
+let kept_capacity: usize = 65536
+
+## Bytes fetched but not yet answered, in a `memory.heap` allocation. The zero value is
+## empty; `release` gives the storage back. A view a read answers stays valid until the
+## next read through the same buffer.
+pub struct ReadAhead:
+    var data: u8[]
+    var start: usize
+    var end: usize
+
+    ## The bytes waiting.
+    pub func count() -> usize:
+        return self.end - self.start
+
+    ## Move up to `buffer.length` waiting bytes into `buffer`; the number moved.
+    pub mutating func take(buffer: u8[]) -> usize:
+        let available = self.count()
+        let count = buffer.length if buffer.length < available else available
+        memory.copy(buffer, self.data[self.start..], count)
+        self.start += count
+        return count
+
+    ## Forget the waiting bytes, as a seek does.
+    pub mutating func clear():
+        self.start = 0
+        self.end = 0
+
+    ## Give the storage back.
+    pub mutating func release():
+        if self.data.length > 0:
+            free(self.data) in memory.heap
+            var empty: u8[]
+            self.data = empty
+        self.clear()
+
+    ## Room for at least `minimum` more bytes after the waiting ones: the waiting bytes move
+    ## to the front, and the storage grows, or shrinks back after a large read.
+    mutating func space(minimum: usize) -> u8[]!:
+        let waiting = self.count()
+        if waiting == 0 and self.data.length > kept_capacity:
+            self.release()
+        if self.start > 0:
+            memory.move(self.data, self.data[self.start..], waiting)
+            self.start = 0
+            self.end = waiting
+        let needed = waiting +? minimum else error(memory.exhausted, "a read is too large")
+        if needed > self.data.length:
+            var capacity = self.data.length *? 2 else needed
+            if capacity < needed:
+                capacity = needed
+            if capacity < smallest:
+                capacity = smallest
+            with memory.heap:
+                if self.data.length == 0:
+                    self.data = try alloc u8[capacity]
+                else:
+                    self.data = try memory.grow(self.data, capacity)
+        return self.data[self.end..]
+
+    ## Read once from `source` into the space after the waiting bytes; false at the end.
+    mutating func fill(source: io.Reader, minimum: usize = smallest) -> bool!:
+        let room = try self.space(minimum)
+        let count = try source.read(room)
+        self.end += count
+        return count > 0
+
+    ## The next line, its `\n` or `\r\n` consumed and left out; at the end, the unfinished
+    ## last line, or none when nothing is left.
+    pub mutating func line(source: io.Reader) -> str?!:
+        var searched: usize = 0
+        while true:
+            let waiting = self.data[self.start..<self.end]
+            var index = searched
+            while index < waiting.length:
+                if waiting[index] == '\n':
+                    self.start += index + 1
+                    let ending = index - 1 if index > 0 and waiting[index - 1] == '\r' else index
+                    return try checked(waiting[..<ending])
+                index += 1
+            searched = waiting.length
+            if not try self.fill(source):
+                # filling moved the waiting bytes to the front
+                let rest = self.data[self.start..<self.end]
+                if rest.length == 0:
+                    return none
+                self.start = self.end
+                return try checked(rest)
+
+    ## Up to `maximum` bytes: with `whole`, as many as the source has up to `maximum`,
+    ## otherwise what one read brings when nothing is waiting. Empty at the end.
+    pub mutating func bytes(source: io.Reader, maximum: usize, whole: bool) -> const u8[]!:
+        if self.count() == 0 or whole:
+            while self.count() < maximum:
+                let wanted = maximum - self.count()
+                if not try self.fill(source, wanted if wanted < smallest else smallest):
+                    break
+                if not whole:
+                    break
+        let count = maximum if maximum < self.count() else self.count()
+        let view = self.data[self.start..<self.start + count]
+        self.start += count
+        return view
+
+    ## Up to `maximum` bytes as text, as `bytes` reads them, ending on a whole character: a
+    ## character the read cut in two waits for the next read, and a maximum too small for
+    ## the next character still answers it whole. Invalid UTF-8 is an error.
+    pub mutating func text(source: io.Reader, maximum: usize, whole: bool) -> str!:
+        if maximum == 0:
+            return ""
+        var limit = maximum
+        while true:
+            let view = try self.bytes(source, limit, whole)
+            let bad = utf8.invalid_offset(view) else return (str)view
+            if not cut_character(view[bad..]):
+                error(invalid_text, "the text read is not valid UTF-8")
+            self.start -= view.length - bad
+            if bad > 0:
+                return (str)view[..<bad]
+            # nothing but a cut character: reach its end, unless the source has ended
+            if limit < 4:
+                limit = 4
+            elif not try self.fill(source, 4):
+                error(invalid_text, "the text read ends inside a character")
+
+## Whether `tail` is the start of a character that more bytes could finish.
+func cut_character(tail: const u8[]) -> bool:
+    let lead = tail[0]
+    let width: usize = 2 if lead >= 194 and lead <= 223 else (3 if lead >= 224 and lead <= 239 else (4 if lead >= 240 and lead <= 244 else 0))
+    if width == 0 or tail.length >= width:
+        return false
+    for byte in tail[1..]:
+        if (byte & 192) != 128:
+            return false
+    return true
+
+func checked(line: const u8[]) -> str!:
+    if not utf8.valid(line):
+        error(invalid_text, "the line read is not valid UTF-8")
+    return (str)line
+
+## A reader over a span, handing out at most `step` bytes a read, for the tests.
+struct Chunks: io.Reader:
+    var data: const u8[]
+    var step: usize
+
+    mutating func read(buffer: u8[]) -> usize!:
+        var count = self.step if self.step < self.data.length else self.data.length
+        if count > buffer.length:
+            count = buffer.length
+        memory.copy(buffer, self.data, count)
+        self.data = self.data[count..]
+        return count
+
+test "lines come whole across reads and the last needs no newline":
+    var source = Chunks(data = "one\r\ntwo\n\nthree".bytes, step = 6)
+    var ahead: ReadAhead
+    defer ahead.release()
+    assert(try ahead.line(&source) == "one")
+    assert(try ahead.line(&source) == "two")
+    assert(try ahead.line(&source) == "")
+    assert(try ahead.line(&source) == "three")
+    assert(try ahead.line(&source) == none)
+
+test "text ends on a whole character and keeps the rest":
+    var source = Chunks(data = "aé€".bytes, step = 2)
+    var ahead: ReadAhead
+    defer ahead.release()
+    assert(try ahead.text(&source, 64, false) == "a")
+    assert(try ahead.text(&source, 64, false) == "é")
+    assert(try ahead.text(&source, 64, true) == "€")
+    assert(try ahead.text(&source, 64, true) == "")
+
+test "bytes stop at the maximum and the rest waits":
+    var source = Chunks(data = "abcdefgh".bytes, step = 8)
+    var ahead: ReadAhead
+    defer ahead.release()
+    assert((str)(try ahead.bytes(&source, 3, true)) == "abc")
+    var rest: u8[8]
+    assert(ahead.take(rest) == 5)
+
+test "invalid text is an error":
+    let data: u8[4] = ['a', 255, 'b', '\n']
+    var source = Chunks(data = data[..<4], step = 8)
+    var ahead: ReadAhead
+    defer ahead.release()
+    let failed = ahead.line(&source) catch failure:
+        assert(failure.code == invalid_text)
+        recover none
+    assert(failed == none)

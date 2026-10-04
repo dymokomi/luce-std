@@ -44,13 +44,14 @@ func normalize(size: usize) -> !:
     var elapsed: u64 = 0
     with measured:
         let start = time.now()
-        let result = try unicode.normalize((str)input, unicode.NormalizationForm.nfd)
+        let normalized = try unicode.normalize((str)input, unicode.NormalizationForm.nfd)
         elapsed = time.since(start)
+        let result = normalized.value
         assert(result.length == size)
         for index in 0..<size:
             let expected: u8 = 204 if index % 2 == 0 else (128 if index < size // 2 else 149)
             assert(result.bytes[index] == expected)
-        unicode.release(result)
+        normalized.release()
     assert(measured.allocations == 3)
     assert(measured.peak_bytes <= size * 5 + 1)
     report("normalization", size, elapsed, measured)
@@ -92,8 +93,9 @@ func copy(size: usize, source_path: c.str, destination_path: c.str) -> !:
     # Only path/temporary-name storage is allocated; payload storage is a fixed
     # stack buffer. The harness also checks identical counts across input sizes.
     assert(measured.peak_bytes < 16384)
-    let actual = try files.read_limit(destination_path, size)
-    defer free(actual)
+    let actual_file = try files.read(destination_path, size)
+    defer actual_file.release()
+    let actual = actual_file.value
     assert(actual.length == size)
     for index in 0..<size:
         assert(actual[index] == input[index])

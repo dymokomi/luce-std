@@ -29,9 +29,9 @@ func publish(writer: Writer*) -> !:
         assert(published)
         # Another writer may already have replaced this generation. The result
         # must still be a complete publication, verified by the independent peer.
-        let observed = try files.read_limit(path, output.length)
-        publication_verify(observed.data, observed.length)
-        free(observed)
+        let observed = try files.read(path, output.length)
+        publication_verify(observed.value.data, observed.value.length)
+        observed.release()
     writer.succeeded = true
 
 func worker(context: void*?):

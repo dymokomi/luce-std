@@ -92,8 +92,9 @@ func acceptable(actual: u64, expected: u64, width: u32, limit: u64) -> bool:
     return distance <= limit
 
 pub func main(arguments: c.str[]) -> i32!:
-    let corpus = try files.read(arguments[1])
-    defer free(corpus)
+    let corpus_file = try files.read(arguments[1])
+    defer corpus_file.release()
+    let corpus = corpus_file.value
     assert(corpus.length % 48 == 0)
     var position: usize = 0
     while position < corpus.length:

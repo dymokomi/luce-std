@@ -51,9 +51,9 @@ pub func main(arguments: c.str[]) -> i32!:
         recover empty)
     assert(rejected)
     let link_path = try paths.join((str)arguments[2], "link")
-    defer strings.release(link_path)
+    defer link_path.release()
     rejected = false
-    discard(files.Directory.open((c.str)link_path, false) catch failure:
+    discard(files.Directory.open((c.str)link_path.value, false) catch failure:
         assert(failure.code == files.not_directory or failure.code == files.symlink_loop)
         rejected = true
         var empty: files.Directory

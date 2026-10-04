@@ -284,8 +284,9 @@ func test_mutations() -> !:
 
 pub func main(arguments: c.str[]) -> i32!:
     if arguments.length == 4 and (str)arguments[1] == "frame-file":
-        let payload = try files.read(arguments[3])
-        defer free(payload)
+        let payload_file = try files.read(arguments[3])
+        defer payload_file.release()
+        let payload = payload_file.value
         var encoder = net.WebSocketEncoder.create((str)arguments[2] == "client")
         try encoder.write(io.stdout(), net.WebSocketOpcode.binary, payload)
         return 0

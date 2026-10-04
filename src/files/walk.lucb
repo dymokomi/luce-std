@@ -4,7 +4,7 @@
 #
 #   DESCRIPTION:
 #       Walk a directory tree, handing each entry to a visitor, guarding against symlink
-#       cycles and a maximum depth.
+#       cycles and a maximum depth; or collect every path below a root.
 #
 #==============================================================================================
 
@@ -30,7 +30,7 @@ pub interface WalkVisitor:
 ## stop traversal; earlier callback effects remain. All owned resources are cleaned
 ## up on failure. Storage is proportional to depth plus the longest path label;
 ## cycle detection compares each descended directory with its open ancestors.
-pub func walk(root: c.str, visitor: WalkVisitor, max_depth: usize = 64) -> !:
+pub func walk_with(root: c.str, visitor: WalkVisitor, max_depth: usize = 64) -> !:
     let owner = memory.allocator
     let root_info = try metadata(root)
     let descend = try visitor.visit((str)root, root_info, 0)
@@ -65,6 +65,28 @@ pub func walk(root: c.str, visitor: WalkVisitor, max_depth: usize = 64) -> !:
         if opened.device != info.device or opened.inode != info.inode:
             error(failed, "a directory changed before traversal could enter it")
         try state.push(child, opened)
+
+## Every entry below `root`, as paths relative to it joined by `/`, sorted by bytes:
+## directories are listed and entered, symlinks listed but not followed. The result owns
+## its texts, as `list`'s does. Limits and failures are walk_with's.
+pub func walk(root: c.str, max_depth: usize = 64) -> interop.Owned[const str[]]!:
+    let label = (str)root
+    let skipped = label.length if label.length > 0 and label.bytes[label.length - 1] == '/' else label.length + 1
+    var collected = Collected(skipped = skipped)
+    errdefer collected.names.release()
+    try walk_with(root, &collected, max_depth)
+    sort_names(collected.names.view())
+    return try collected.names.finish()
+
+## The paths walk collects, relative to the root.
+struct Collected: WalkVisitor:
+    var names: owned.Gathered
+    var skipped: usize
+
+    mutating func visit(path: str, info: Metadata, depth: usize) -> bool!:
+        if depth > 0:
+            try self.names.add((str)path.bytes[self.skipped..])
+        return true
 
 struct WalkFrame:
     var directory: Directory

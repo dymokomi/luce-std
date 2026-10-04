@@ -31,7 +31,7 @@ pub func main(arguments: str[]) -> i32!:
         if arguments[1] == "unicode":
             discard(try output.write("éλ😀".bytes))
             return 0
-    let executable = try files.absolute_path(arguments[0])
+    let executable = try files.canonical((c.str)arguments[0])
     defer executable.release()
     var command = try process.Command(executable.value, ["stream"])
     defer command.close()

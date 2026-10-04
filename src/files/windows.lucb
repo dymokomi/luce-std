@@ -39,8 +39,8 @@ func windows_create_symlink(target: c.str, path: c.str, directory: bool?) -> !:
         target_is_directory = hint
     else:
         let resolved = try paths.join(paths.directory((str)path), (str)target)
-        defer strings.release(resolved)
-        let info = metadata((c.str)resolved) catch failure:
+        defer resolved.release()
+        let info = metadata((c.str)resolved.value) catch failure:
             if failure.code != missing:
                 error(failure.code, failure.message)
             recover Metadata()
@@ -52,7 +52,7 @@ func windows_create_symlink(target: c.str, path: c.str, directory: bool?) -> !:
     if CreateSymbolicLinkW(link_name.data, target_name.data, 2 | (1 if target_is_directory else 0)) == 0:
         error(windows_error(GetLastError()), "the symbolic link could not be created")
 
-func windows_read_symlink(path: c.str, limit: usize) -> str!:
+func windows_read_symlink(path: c.str, limit: usize) -> interop.Owned[str]!:
     let handle = try windows_path_handle(path, false)
     defer discard(CloseHandle(handle))
     var storage: u64[2048]
@@ -69,7 +69,7 @@ func windows_read_symlink(path: c.str, limit: usize) -> str!:
     if offset % 2 != 0 or length % 2 != 0 or start + offset + length > (usize)received:
         error(failed, "the symbolic link contains invalid reparse data")
     if length == 0:
-        return try strings.copy("")
+        return try owned.copy_text("")
     let text = &words[(start + offset) // 2]
     let count = WideCharToMultiByte(65001, 128, text, (i32)(length // 2), (u8*)0, 0, none, none)
     if count <= 0:
@@ -81,7 +81,7 @@ func windows_read_symlink(path: c.str, limit: usize) -> str!:
         free(result)
         error(failed, "the symbolic link target could not be encoded")
     result[(usize)count] = 0
-    return (str)result[..<(usize)count]
+    return try owned.adopt_text((str)result[..<(usize)count])
 
 ## Windows mode bits describe the read-only attribute, not an NTFS access-control
 ## list. Any requested write bit clears read-only; other bits do not change ACLs.
@@ -239,9 +239,9 @@ func windows_metadata(handle: void*, follow: bool) -> Metadata!:
                     links = (u64)info.links, user = 0, group = 0, blocks_512 = standard.allocation // 512,
                     accessed = windows_time(basic.accessed), modified = windows_time(basic.written), changed = windows_time(basic.changed), created = windows_time(basic.created))
 
-func windows_relative(parent: i32, path: c.str) -> str!:
+func windows_relative(parent: i32, path: c.str) -> interop.Owned[str]!:
     if parent == current_directory_fd or paths.is_absolute((str)path):
-        return try strings.copy((str)path)
+        return try owned.copy_text((str)path)
     let wide = try alloc u16[32768]
     defer free(wide)
     let count = GetFinalPathNameByHandleW((void*)win_handle(parent), wide.data, (u32)wide.length, 0)
@@ -253,15 +253,15 @@ func windows_relative(parent: i32, path: c.str) -> str!:
     if length == 0:
         error(failed, "the open directory path could not be encoded")
     let joined = try paths.join((str)bytes[..<(usize)length], (str)path)
-    defer strings.release(joined)
+    defer joined.release()
     # GetFinalPathName returns the extended namespace, which does not itself
     # collapse dot components. Normalize the joined path before opening it.
-    return try paths.normalize(joined)
+    return try paths.normalize(joined.value)
 
 func windows_directory_open(parent: i32, path: c.str, follow: bool) -> Directory!:
     let joined = try windows_relative(parent, path)
-    defer strings.release(joined)
-    let handle = try windows_path_handle((c.str)joined, follow, true)
+    defer joined.release()
+    let handle = try windows_path_handle((c.str)joined.value, follow, true)
     let descriptor = win_descriptor((isize)handle, 128)
     if descriptor < 0:
         discard(CloseHandle(handle))
@@ -282,8 +282,8 @@ func windows_next(state: WinDirectory*) -> str?!:
             return none
     else:
         let joined = try windows_relative(state.descriptor, "*")
-        defer strings.release(joined)
-        let pattern = try wide_path((c.str)joined)
+        defer joined.release()
+        let pattern = try wide_path((c.str)joined.value)
         defer free(pattern)
         let search = FindFirstFileW(pattern.data, &state.data)
         if (usize)search == ~(usize)0:
