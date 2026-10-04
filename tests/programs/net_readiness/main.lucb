@@ -43,27 +43,27 @@ pub func main(arguments: c.str[]) -> i32!:
     assert(no_events(try poller.readiness(0)) and reference_end() == 2)
     reference_begin(3)
     var rejected = false
-    discard(poller.wait(net.Deadline.at(1)) catch failure:
+    _ = poller.wait(net.Deadline.at(1)) catch failure:
         assert(failure.code == net.failed)
         rejected = true
-        recover 0)
+        recover 0
     assert(rejected and no_events(try poller.readiness(0)) and reference_end() == 0)
     var cancellation: sync.Cancellation
     reference_cancel_callback(cancel_now, &cancellation)
     reference_begin(4)
     rejected = false
-    discard(poller.wait(cancellation = &cancellation) catch failure:
+    _ = poller.wait(cancellation = &cancellation) catch failure:
         assert(failure.code == net.cancelled)
         rejected = true
-        recover 0)
+        recover 0
     assert(rejected and cancellation.is_requested() and no_events(try poller.readiness(0)))
     assert(reference_end() == 1)
     reference_begin(5)
     rejected = false
-    discard(poller.wait() catch failure:
+    _ = poller.wait() catch failure:
         assert(failure.code == net.failed)
         rejected = true
-        recover 0)
+        recover 0
     assert(rejected and no_events(try poller.readiness(0)) and reference_end() == 1)
 
     var sender = try net.Datagram.bind(net.SocketAddress.loopback(0))
@@ -83,12 +83,12 @@ pub func main(arguments: c.str[]) -> i32!:
     var data: u8[8]
     let (count, peer) = try packet.receive_from(data)
     assert(count == 5 and (str)data[..<count] == "ready")
-    discard(peer)
+    _ = peer
     rejected = false
-    discard(packet.wait(deadline = net.Deadline.at(0)) catch failure:
+    _ = packet.wait(deadline = net.Deadline.at(0)) catch failure:
         assert(failure.code == net.timed_out)
         rejected = true
-        recover net.Readiness())
+        recover net.Readiness()
     assert(rejected)
     try poller.disable(1)
     packet.destroy()
@@ -98,10 +98,10 @@ pub func main(arguments: c.str[]) -> i32!:
     var concurrent: sync.Cancellation
     let worker = try thread.spawn(cancel_later, &concurrent)
     rejected = false
-    discard(poller.wait(cancellation = &concurrent) catch failure:
+    _ = poller.wait(cancellation = &concurrent) catch failure:
         assert(failure.code == net.cancelled)
         rejected = true
-        recover 0)
+        recover 0
     try worker.join()
     assert(rejected and concurrent.is_requested())
 
@@ -118,14 +118,14 @@ pub func main(arguments: c.str[]) -> i32!:
     assert((try server.wait(deadline = try net.Deadline.after(1000000000))).readable)
     try io.read_exact(&server, data[..<4])
     assert((str)data[..<4] == "tail")
-    discard(try server.wait(deadline = try net.Deadline.after(1000000000)))
+    _ = try server.wait(deadline = try net.Deadline.after(1000000000))
     assert((try server.read(data)) == 0)
 
     rejected = false
-    discard(net.Deadline.after(18446744073709551615) catch failure:
+    _ = net.Deadline.after(18446744073709551615) catch failure:
         assert(failure.code == net.invalid_options)
         rejected = true
-        recover net.Deadline())
+        recover net.Deadline()
     assert(rejected)
     rejected = false
     poller.watch(2, fd) catch failure:
@@ -156,10 +156,10 @@ pub func main(arguments: c.str[]) -> i32!:
         assert((try poller.wait(net.Deadline.at(0))) == 0)
     poller.destroy()
     rejected = false
-    discard(poller.wait() catch failure:
+    _ = poller.wait() catch failure:
         assert(failure.code == net.closed)
         rejected = true
-        recover 0)
+        recover 0
     assert(rejected)
     print("ok readiness deadlines and cancellation")
     return 0

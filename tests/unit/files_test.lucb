@@ -30,7 +30,7 @@ test "a temporary file loses its name once open and still reads back":
     assert(not files.exists((c.str)path))
     assert((try opened.write("scratch".bytes)) == 7)
     var back: u8[7]
-    discard(try opened.seek(0, files.SeekOrigin.start))
+    _ = try opened.seek(0, files.SeekOrigin.start)
     assert((try opened.read(back)) == 7)
     assert((str)back[..<7] == "scratch")
     try opened.close()
@@ -56,7 +56,7 @@ test "canonical paths resolve links, and a missing entry is missing":
     defer created.release()
     let root = created.value
     defer files.remove_tree((c.str)root) catch ignored:
-        discard(ignored)
+        _ = ignored
     let real = try strings.join([root, "/real"], "")
     try files.create_directory((c.str)real)
     let file = try strings.join([real, "/file.txt"], "")
@@ -105,7 +105,7 @@ test "a file reads lines, text and bytes, and writes where the reader stands":
     assert(try file.read_line() == "")
     assert(try file.read_line() == "three")
     assert(try file.read_line() == none)
-    discard(try file.seek(0))
+    _ = try file.seek(0)
     assert((str)(try file.read_bytes()) == "one\r\ntwO\nthree")
 
 ## A canonical path as a text of the current allocator, for comparing.

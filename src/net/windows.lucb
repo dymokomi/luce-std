@@ -26,7 +26,7 @@ var winsock_lock: sync.Mutex
 var winsock_ready: bool
 
 func windows_socket_cleanup():
-    discard(WSACleanup())
+    _ = WSACleanup()
 
 func windows_socket_startup() -> !:
     winsock_lock.lock()
@@ -38,7 +38,7 @@ func windows_socket_startup() -> !:
     if result != 0:
         error(socket_error(result), "Winsock could not initialize")
     if atexit(windows_socket_cleanup) != 0:
-        discard(WSACleanup())
+        _ = WSACleanup()
         error(resource_exhausted, "Winsock cleanup could not be registered")
     winsock_ready = true
 

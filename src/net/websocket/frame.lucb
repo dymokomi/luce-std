@@ -101,7 +101,7 @@ pub func websocket_check_close(payload: const u8[]) -> !:
         error(websocket_invalid, "reserved WebSocket close status")
     var decoder: utf8.Decoder
     for byte in payload[2..]:
-        discard(try decoder.push(byte))
+        _ = try decoder.push(byte)
     try decoder.finish()
 
 struct WebSocketSequence:
@@ -114,7 +114,7 @@ struct WebSocketSequence:
     var control_used: usize
     var closing: bool
 
-    mutating func begin(frame: WebSocketFrame) -> !:
+    func begin(frame: WebSocketFrame) -> !:
         # a control frame the peer had queued may still follow its close (RFC 6455 §5.5.1)
         if self.closing and (u8)frame.opcode < 8:
             error(websocket_invalid, "WebSocket data follows a close frame")
@@ -135,7 +135,7 @@ struct WebSocketSequence:
         self.total += frame.length
         self.fragmented = not frame.final
 
-    mutating func payload(frame: WebSocketFrame, data: const u8[], ended: bool) -> !:
+    func payload(frame: WebSocketFrame, data: const u8[], ended: bool) -> !:
         if (u8)frame.opcode >= 8:
             if frame.opcode == WebSocketOpcode.close:
                 memory.copy(self.control[self.control_used..], data, data.length)
@@ -146,7 +146,7 @@ struct WebSocketSequence:
             return
         if self.text:
             for byte in data:
-                discard(try self.decoder.push(byte))
+                _ = try self.decoder.push(byte)
             if ended and frame.final:
                 try self.decoder.finish()
 
@@ -185,11 +185,11 @@ pub struct WebSocketDecoder:
     var failure: ErrorCode
 
     ## A message decoder for a client or server peer.
-    pub static func create(from_client: bool, maximum_frame: u64 = 16777216, maximum_message: u64 = 16777216) -> WebSocketDecoder:
+    pub func create(from_client: bool, maximum_frame: u64 = 16777216, maximum_message: u64 = 16777216) -> WebSocketDecoder:
         return WebSocketDecoder(from_client = from_client, maximum_frame = maximum_frame, sequence = WebSocketSequence(maximum = maximum_message))
 
     ## Decode from `input` into `output`.
-    pub mutating func consume(input: const u8[], output: u8[]) -> WebSocketStep!:
+    pub func consume(input: const u8[], output: u8[]) -> WebSocketStep!:
         if self.failed:
             error(self.failure, "WebSocket decoder has failed")
         if output.length == 0:
@@ -201,7 +201,7 @@ pub struct WebSocketDecoder:
 
     ## EOF is valid only after a complete close frame. A TCP EOF without one is
     ## abnormal closure, including between otherwise complete messages.
-    pub mutating func finish() -> !:
+    pub func finish() -> !:
         if self.failed:
             error(self.failure, "WebSocket decoder has failed")
         if self.active or self.used != 0 or not self.sequence.closing:
@@ -209,7 +209,7 @@ pub struct WebSocketDecoder:
             self.failure = io.unexpected_eof
             error(io.unexpected_eof, "WebSocket ended without a complete close frame")
 
-    mutating func advance(input: const u8[], output: u8[]) -> WebSocketStep!:
+    func advance(input: const u8[], output: u8[]) -> WebSocketStep!:
         var at: usize = 0
         var started = false
         while not self.active and at < input.length:
@@ -253,11 +253,11 @@ pub struct WebSocketEncoder:
     var failure: ErrorCode
 
     ## A message encoder for a client or server peer.
-    pub static func create(client: bool, maximum_frame: u64 = 16777216, maximum_message: u64 = 16777216) -> WebSocketEncoder:
+    pub func create(client: bool, maximum_frame: u64 = 16777216, maximum_message: u64 = 16777216) -> WebSocketEncoder:
         return WebSocketEncoder(client = client, maximum_frame = maximum_frame, sequence = WebSocketSequence(maximum = maximum_message))
 
     ## Write a frame with `opcode` and `payload` to `destination`.
-    pub mutating func write(destination: Writer, opcode: WebSocketOpcode, payload: const u8[], final: bool = true) -> !:
+    pub func write(destination: Writer, opcode: WebSocketOpcode, payload: const u8[], final: bool = true) -> !:
         if self.failed:
             error(self.failure, "WebSocket encoder has failed")
         self.emit(destination, opcode, payload, final) catch problem:
@@ -265,8 +265,8 @@ pub struct WebSocketEncoder:
             self.failure = problem.code
             error(problem.code, problem.message)
 
-    mutating func emit(destination: Writer, opcode: WebSocketOpcode, payload: const u8[], final: bool) -> !:
-        discard(try websocket_opcode((u8)opcode))
+    func emit(destination: Writer, opcode: WebSocketOpcode, payload: const u8[], final: bool) -> !:
+        _ = try websocket_opcode((u8)opcode)
         if (u64)payload.length > self.maximum_frame:
             error(websocket_limit, "WebSocket frame exceeds its byte limit")
         if (u8)opcode >= 8 and (not final or payload.length > 125):

@@ -45,15 +45,15 @@ func drop_storage(object: ownership.Object*):
                     free(storage.texts)
 
 func trace_storage(object: ownership.Object*, visit: func(ownership.Object*, void*) -> unit, context: void*):
-    discard(object)
+    _ = object
 
-var storage_info: ownership.Info = ownership.Info(name = "owned result", size = sizeof(Storage),
+var storage_info: ownership.Info = ownership.Info(name = "owned result", size = memory.size_of(Storage),
                                                   finish = none, drop = drop_storage,
                                                   trace = trace_storage, acyclic = true)
 
 ## Storage for a result whose allocations came from the current allocator.
 func new_storage(held: Held) -> Storage*!:
-    let storage = (Storage*)(try ownership.reserve(&storage_info, sizeof(Storage)))
+    let storage = (Storage*)(try ownership.reserve(&storage_info, memory.size_of(Storage)))
     storage.allocator = memory.allocator
     storage.held = held
     return storage
@@ -106,7 +106,7 @@ pub struct Gathered:
     var count: usize
 
     ## Add a copy of `text`.
-    pub mutating func add(text: str) -> !:
+    pub func add(text: str) -> !:
         if self.count == self.texts.length:
             let capacity = self.texts.length *? 2 else error(memory.exhausted, "too many texts")
             try self.resize(capacity if capacity > 0 else 16)
@@ -117,17 +117,17 @@ pub struct Gathered:
     pub func view() -> str[]:
         return self.texts[..<self.count]
 
-    mutating func resize(capacity: usize) -> !:
+    func resize(capacity: usize) -> !:
         var resized: str[]
         if capacity > 0:
-            resized = try alloc str[capacity]
+            resized = try new str[capacity] ---
             memory.copy(resized, self.texts, self.count)
         if self.texts.length > 0:
             free(self.texts)
         self.texts = resized
 
     ## The texts as an owned result; the gathering is empty afterwards.
-    pub mutating func finish() -> interop.Owned[const str[]]!:
+    pub func finish() -> interop.Owned[const str[]]!:
         try self.resize(self.count)
         let texts = self.texts
         var empty: str[]
@@ -136,7 +136,7 @@ pub struct Gathered:
         return try adopt_texts(texts)
 
     ## Give back whatever was gathered.
-    pub mutating func release():
+    pub func release():
         release_texts(self.texts, self.count)
         var empty: str[]
         self.texts = empty
@@ -150,7 +150,7 @@ test "an owned result frees its storage when released":
     try names.add("grace")
     let list = try names.finish()
     assert(list.value.length == 2 and list.value[1] == "grace")
-    let data = try adopt_bytes(try alloc u8[3])
+    let data = try adopt_bytes(try new u8[3] ---)
     let path = try copy_text("/tmp")
     assert(path.value == "/tmp" and path.value.bytes.data[4] == 0)
     assert(ownership.live_count() == before + 3)

@@ -9,16 +9,16 @@ import utf8
 struct CappedWriter: io.Writer:
     var sink: io.SliceWriter
 
-    pub mutating func write(data: const u8[]) -> usize!:
+    pub func write(data: const u8[]) -> usize!:
         let size: usize = data.length if data.length < 3 else 3
         return try self.sink.write(data[..<size])
 
 func request_rejected(text: str):
     var fields: net.HttpField[100]
     var rejected = false
-    discard(net.http_parse_request(text.bytes, fields) catch problem:
+    _ = net.http_parse_request(text.bytes, fields) catch problem:
         rejected = true
-        recover net.HttpHead())
+        recover net.HttpHead()
     assert(rejected)
 
 func test_http() -> !:
@@ -37,9 +37,9 @@ func test_http() -> !:
     let bad_targets: str[7] = ["GET * HTTP/1.1\r\nHost: a\r\n\r\n", "CONNECT [::1] HTTP/1.1\r\nHost: a\r\n\r\n", "GET /bad%2 HTTP/1.1\r\nHost: a\r\n\r\n", "GET relative HTTP/1.1\r\nHost: a\r\n\r\n", "GET / HTTP/1.1\r\nHost: [xyz]\r\n\r\n", "GET / HTTP/1.1\r\nHost: bad%GG\r\n\r\n", "CONNECT host: HTTP/1.1\r\nHost: a\r\n\r\n"]
     for text in bad_targets:
         request_rejected(text)
-    discard(try net.http_parse_request("OPTIONS * HTTP/1.1\r\nHost: example.test\r\n\r\n".bytes, fields))
-    discard(try net.http_parse_request("CONNECT [::1]:443 HTTP/1.1\r\nHost: [::1]:443\r\n\r\n".bytes, fields))
-    discard(try net.http_parse_request("GET /caf%C3%A9 HTTP/1.1\r\nHost: [v1.future:address]\r\n\r\n".bytes, fields))
+    _ = try net.http_parse_request("OPTIONS * HTTP/1.1\r\nHost: example.test\r\n\r\n".bytes, fields)
+    _ = try net.http_parse_request("CONNECT [::1]:443 HTTP/1.1\r\nHost: [::1]:443\r\n\r\n".bytes, fields)
+    _ = try net.http_parse_request("GET /caf%C3%A9 HTTP/1.1\r\nHost: [v1.future:address]\r\n\r\n".bytes, fields)
     let response = try net.http_parse_response("HTTP/1.1 200 OK\r\nContent-Length: 9999999999\r\n\r\n".bytes, fields, "HEAD")
     assert(response.body_kind == net.HttpBodyKind.empty)
     let tunnel = try net.http_parse_response("HTTP/1.1 200 OK\r\nContent-Length: wrong\r\n\r\n".bytes, fields, "CONNECT")
@@ -62,7 +62,7 @@ func test_http() -> !:
             let step = try decoder.consume(chunks.bytes[at..<end])
             assert(step.consumed > 0)
             at += step.consumed
-            discard(try body.write(step.body))
+            _ = try body.write(step.body)
             if let trailer = step.trailer:
                 assert(net.http_equal(trailer.name, "x-checksum") and trailer.value == "test")
                 trailers += 1
@@ -72,7 +72,7 @@ func test_http() -> !:
     var fixed = try net.HttpBodyDecoder.create(net.HttpBodyKind.fixed, 2)
     assert((try fixed.consume("abc".bytes)).consumed == 2 and fixed.finished())
     var premature = try net.HttpBodyDecoder.create(net.HttpBodyKind.fixed, 2)
-    discard(try premature.consume("a".bytes))
+    _ = try premature.consume("a".bytes)
     var incomplete = false
     premature.finish() catch problem:
         assert(problem.code == io.unexpected_eof)
@@ -124,25 +124,25 @@ func test_websocket() -> !:
     assert((try net.websocket_check_response(answer, key, "chat, binary")) == "chat")
     var nonce: u8[24]
     let fresh = try net.websocket_client_key(nonce)
-    discard(try net.websocket_accept_key(fresh, accept))
+    _ = try net.websocket_accept_key(fresh, accept)
     var protocol_output: u8[1024]
     var duplicate = false
-    discard(net.websocket_encode_request(protocol_output, "example.test", "/", key, "chat, chat") catch problem:
+    _ = net.websocket_encode_request(protocol_output, "example.test", "/", key, "chat, chat") catch problem:
         assert(problem.code == net.websocket_invalid)
         duplicate = true
-        recover "".bytes)
+        recover "".bytes
     assert(duplicate)
-    discard(try net.websocket_encode_request(protocol_output, "example.test", "/", key, "chat, Chat"))
+    _ = try net.websocket_encode_request(protocol_output, "example.test", "/", key, "chat, Chat")
     var repeated = head
     fields[head.fields.length] = net.HttpField(name = "Sec-WebSocket-Protocol", value = "chat")
     repeated.fields = fields[..<head.fields.length + 1]
     duplicate = false
-    discard(net.websocket_check_request(repeated) catch problem:
+    _ = net.websocket_check_request(repeated) catch problem:
         duplicate = true
-        recover "")
+        recover ""
     assert(duplicate)
     # an empty list element is ignored (RFC 9110 section 5.6.1.2)
-    discard(try net.websocket_encode_request(protocol_output, "example.test", "/", key, "chat,,binary"))
+    _ = try net.websocket_encode_request(protocol_output, "example.test", "/", key, "chat,,binary")
     # a control frame the peer had queued may follow its close (RFC 6455 section 5.5.1)
     var late: u8[64]
     var late_sink = io.SliceWriter.over(late)
@@ -188,7 +188,7 @@ func test_websocket() -> !:
             assert(step.consumed > 0)
             at += step.consumed
             if (u8)step.opcode < 8:
-                discard(try body.write(output[..<step.written]))
+                _ = try body.write(output[..<step.written])
             if step.frame_end:
                 frames += 1
             if step.message_end:
@@ -200,14 +200,14 @@ func test_websocket() -> !:
         var decoder = net.WebSocketDecoder.create(false)
         var output: u8[128]
         var refused = false
-        discard(decoder.consume(text.bytes, output) catch problem:
+        _ = decoder.consume(text.bytes, output) catch problem:
             refused = true
-            recover net.WebSocketStep())
+            recover net.WebSocketStep()
         assert(refused)
         var latched = false
-        discard(decoder.consume("".bytes, output) catch problem:
+        _ = decoder.consume("".bytes, output) catch problem:
             latched = true
-            recover net.WebSocketStep())
+            recover net.WebSocketStep()
         assert(latched)
     # A failed writer must not attempt a second frame on the same stream.
     var tiny: u8[1]
@@ -219,10 +219,10 @@ func test_websocket() -> !:
     assert(failed)
     let lengths: usize[4] = [125, 126, 65535, 65536]
     for size in lengths:
-        let payload = try alloc u8[size]
+        let payload = try new u8[size] ---
         defer free(payload)
         memory.set(payload, 97)
-        let encoded_storage = try alloc u8[size + 14]
+        let encoded_storage = try new u8[size + 14] ---
         defer free(encoded_storage)
         var capped = CappedWriter(sink = io.SliceWriter.over(encoded_storage))
         var boundary_encoder = net.WebSocketEncoder.create(true)
@@ -259,10 +259,10 @@ func test_mutations() -> !:
         for index in 0..<size:
             seed = seed *% 6364136223846793005 +% 1442695040888963407
             input[index] = (u8)(seed >> 32)
-        discard(net.http_parse_request(input[..<size], fields) catch problem:
-            recover net.HttpHead())
-        discard(net.http_parse_response(input[..<size], fields) catch problem:
-            recover net.HttpHead())
+        _ = net.http_parse_request(input[..<size], fields) catch problem:
+            recover net.HttpHead()
+        _ = net.http_parse_response(input[..<size], fields) catch problem:
+            recover net.HttpHead()
         var body = try net.HttpBodyDecoder.create(net.HttpBodyKind.chunked, maximum = 1024)
         var frames = net.WebSocketDecoder.create(iteration % 2 == 0, 1024, 1024)
         var at: usize = 0

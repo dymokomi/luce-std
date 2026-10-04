@@ -21,8 +21,8 @@ noinline func crash_depth_one(address: usize, mode: str) -> usize:
     return result + 1
 
 func crash_thread(context: void*?):
-    discard(context)
-    discard(crash_depth_one(0, "thread"))
+    _ = context
+    _ = crash_depth_one(0, "thread")
 
 pub func main(arguments: str[]) -> i32!:
     try crash.enable("crashcheck", version = "1")
@@ -34,5 +34,5 @@ pub func main(arguments: str[]) -> i32!:
     # Read from the arguments, so the null address is not known when compiling.
     let parsed = strings.parse_u64(arguments[2] if arguments.length > 2 else "0") else 0
     let address = (usize)parsed
-    discard(crash_depth_one(address, mode))
+    _ = crash_depth_one(address, mode)
     return 0

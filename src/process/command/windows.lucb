@@ -18,16 +18,16 @@ extern func SetFilePointerEx(file: void*, distance: i64, position: i64*?, origin
 
 func monitor_windows(process: void*, child_thread: void*, out: void*, err: void*, state: CommandState*) -> !:
     # Even failure before job assignment must terminate the suspended child.
-    errdefer discard(TerminateProcess(process, 1))
+    errdefer _ = TerminateProcess(process, 1)
     let job = CreateJobObjectW(none, none) else error(failed, "a command job could not be created")
-    defer discard(CloseHandle(job))
-    defer discard(TerminateJobObject(job, 1))
+    defer _ = CloseHandle(job)
+    defer _ = TerminateJobObject(job, 1)
     if AssignProcessToJobObject(job, process) == 0 or ResumeThread(child_thread) == 4294967295:
         error(failed, "the command could not enter its process job")
     let out_reader = try command_reader(out)
-    defer discard(CloseHandle(out_reader))
+    defer _ = CloseHandle(out_reader)
     let err_reader = try command_reader(err)
-    defer discard(CloseHandle(err_reader))
+    defer _ = CloseHandle(err_reader)
     var out_offset: i64 = 0
     var err_offset: i64 = 0
     while true:

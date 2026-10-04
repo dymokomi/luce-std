@@ -22,7 +22,7 @@ pub struct Queue:
 
     ## Transfer ownership to a worker on success. On failure the caller still
     ## owns the connection; on success it must stop using its copied handle.
-    pub mutating func push(connection: net.Connection) -> !:
+    pub func push(connection: net.Connection) -> !:
         self.mutex.lock()
         defer self.mutex.unlock()
         if self.count == capacity:
@@ -32,7 +32,7 @@ pub struct Queue:
         self.ready.signal()
 
     ## The next connection, or none once the pool is stopping and the queue is empty.
-    pub mutating func pop() -> net.Connection?:
+    pub func pop() -> net.Connection?:
         self.mutex.lock()
         defer self.mutex.unlock()
         while self.count == 0 and not self.stopping:
@@ -48,13 +48,13 @@ pub struct Queue:
         return connection
 
     ## Let every worker finish and leave.
-    pub mutating func stop():
+    pub func stop():
         self.mutex.lock()
         self.stopping = true
         self.ready.broadcast()
         self.mutex.unlock()
 
-    pub mutating func pending() -> usize:
+    pub func pending() -> usize:
         self.mutex.lock()
         defer self.mutex.unlock()
         return self.count

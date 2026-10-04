@@ -98,11 +98,11 @@ pub func enable(app: str, version: str = "") -> !:
             pid = (i64)GetCurrentProcessId()
         elif platform.posix and not platform.wasm32:
             pid = (i64)getpid()
-        let file_name = try format(stamp, f"{kept}-{started}-{pid}.crash")
+        let file_name = try strings.format(stamp, f"{kept}-{started}-{pid}.crash")
         let path = try paths.join(folder.value, file_name)
         defer path.release()
         var header: u8[1024]
-        let text = try format(header, f"luce crash report\napp: {app}\nversion: {version}\nplatform: {platform.name}\npid: {pid}\nstarted: {started}\n\n")
+        let text = try strings.format(header, f"luce crash report\napp: {app}\nversion: {version}\nplatform: {platform.name}\npid: {pid}\nstarted: {started}\n\n")
         core.set_crash_report(path.value, text)
         if platform.posix and not platform.wasm32:
             try install_alternate_stack()
@@ -110,7 +110,7 @@ pub func enable(app: str, version: str = "") -> !:
                 install_handler(number)
         if platform.windows:
             # every thread's unhandled exception, where POSIX has signals
-            discard(SetUnhandledExceptionFilter(fatal_exception))
+            _ = SetUnhandledExceptionFilter(fatal_exception)
 
 let illegal_signal: i32 = 4
 let abort_signal: i32 = 6
@@ -128,7 +128,7 @@ func bus_signal() -> i32:
 func install_handler(number: i32):
     if platform.macos:
         var action = MacAction(handler = fatal_action, mask = 0, flags = 0x40 | 0x1 | 0x10)
-        discard(mac_sigaction(number, &action, none))
+        _ = mac_sigaction(number, &action, none)
     elif platform.linux:
         var action: LinuxAction = ---
         action.handler = fatal_action
@@ -137,22 +137,22 @@ func install_handler(number: i32):
         action.flags = 0x4 | 0x08000000 | 0x40000000
         action.padding = 0
         action.restorer = none
-        discard(linux_sigaction(number, &action, none))
+        _ = linux_sigaction(number, &action, none)
 
 ## A stack for the main thread's fatal signals, so running out of stack can
 ## still be reported. Other threads keep reporting on their own stacks.
 func install_alternate_stack() -> !:
     let size: usize = 262144
-    let stack = try alloc u8[size] in memory.heap
+    let stack = try new u8[size] --- in memory.heap
     if platform.macos:
         var alternate = MacStack(base = (void*)stack.data, size = size, flags = 0, padding = 0)
-        discard(mac_sigaltstack(&alternate, none))
+        _ = mac_sigaltstack(&alternate, none)
     elif platform.linux:
         var alternate = LinuxStack(base = (void*)stack.data, flags = 0, padding = 0, size = size)
-        discard(linux_sigaltstack(&alternate, none))
+        _ = linux_sigaltstack(&alternate, none)
 
 func fatal_action(number: i32, info: void*?, context: void*?):
-    discard(info)
+    _ = info
     core.report_fatal_signal_in(signal_name(number), number, context)
 
 func signal_name(number: i32) -> str:
@@ -227,12 +227,12 @@ pub func take_report(app: str) -> interop.Owned[str]!:
     defer path.release()
     let text = try files.read_text(path.value, limit = 262144)
     var seen: u8[1100]
-    let seen_path = try format(seen, f"{path.value}.seen")
+    let seen_path = try strings.format(seen, f"{path.value}.seen")
     let target = try strings.copy(seen_path)
     defer strings.release(target)
     # A report that cannot be marked may show again; that is better than losing it.
     files.rename((c.str)path.value, (c.str)target) catch failure:
-        discard(failure)
+        _ = failure
     return text
 
 test "a crash name keeps letters, digits, dashes and underscores":

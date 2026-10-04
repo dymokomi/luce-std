@@ -51,10 +51,10 @@ struct Capture:
     var used: usize
     var open: bool
 
-    mutating func pull() -> !:
+    func pull() -> !:
         if self.data.length - self.used < 256:
             if self.data.length == 0:
-                self.data = try alloc u8[1024]
+                self.data = try new u8[1024] ---
             else:
                 self.data = try memory.grow(self.data, self.data.length * 2)
         let n = c_read(self.descriptor, self.data[self.used..].data, self.data.length - self.used)
@@ -66,12 +66,12 @@ struct Capture:
             error(failed, "the program's output cannot be read")
 
     ## What was captured, as a text of its own; the capture's storage is given back.
-    mutating func take() -> str!:
+    func take() -> str!:
         let text = try captured((str)self.data[..<self.used])
         self.drop()
         return text
 
-    mutating func drop():
+    func drop():
         if self.data.length > 0:
             free(self.data)
             var empty: u8[]
@@ -109,7 +109,7 @@ pub struct Completed:
 ## serialize mutations of its process-wide environment during process creation.
 pub func run(program: c.str, arguments: const c.str[], directory: c.str = "", environment: const c.str[]? = none) -> interop.Owned[Completed]!:
     let finished = try run_controlled(program, arguments, directory, environment, none)
-    var texts = alloc str[2] catch failure:
+    var texts = new str[2] --- catch failure:
         release_output(finished.1)
         release_output(finished.2)
         error(failure.code, failure.message)
@@ -127,7 +127,7 @@ func run_controlled(program: c.str, arguments: const c.str[], directory: c.str, 
         if let overrides = environment:
             selected = try environment_posix(overrides, *slot)
         defer release_storage(selected)
-        let argv = try alloc void*?[arguments.length + 2]
+        let argv = try new void*?[arguments.length + 2] ---
         argv[0] = (void*)program
         var i: usize = 0
         while i < arguments.length:
@@ -140,16 +140,16 @@ func run_controlled(program: c.str, arguments: const c.str[], directory: c.str, 
             free(argv)
             error(failed, "run")
         if pipe((i32*)&err_pipe) != 0:
-            discard(close(out_pipe[0]))
-            discard(close(out_pipe[1]))
+            _ = close(out_pipe[0])
+            _ = close(out_pipe[1])
             free(argv)
             error(failed, "run")
         let pid = fork()
         if pid < 0:
-            discard(close(out_pipe[0]))
-            discard(close(out_pipe[1]))
-            discard(close(err_pipe[0]))
-            discard(close(err_pipe[1]))
+            _ = close(out_pipe[0])
+            _ = close(out_pipe[1])
+            _ = close(err_pipe[0])
+            _ = close(err_pipe[1])
             free(argv)
             error(failed, "run")
         if pid == 0:
@@ -160,29 +160,29 @@ func run_controlled(program: c.str, arguments: const c.str[], directory: c.str, 
                 if input < 0 or dup2(input, 0) < 0:
                     _exit(127)
                 if input > 2:
-                    discard(close(input))
-            discard(close(out_pipe[0]))
-            discard(close(err_pipe[0]))
+                    _ = close(input)
+            _ = close(out_pipe[0])
+            _ = close(err_pipe[0])
             if dup2(out_pipe[1], 1) < 0 or dup2(err_pipe[1], 2) < 0:
                 _exit(127)
-            discard(close(out_pipe[1]))
-            discard(close(err_pipe[1]))
+            _ = close(out_pipe[1])
+            _ = close(err_pipe[1])
             if ((str)directory).length > 0 and chdir(directory) != 0:
                 _exit(127)
             if selected.length > 0:
                 *slot = selected.data
-            discard(execvp(program, argv.data))
+            _ = execvp(program, argv.data)
             _exit(127)
         if control != none:
-            discard(setpgid(pid, pid))
+            _ = setpgid(pid, pid)
         free(argv)
-        discard(close(out_pipe[1]))
-        discard(close(err_pipe[1]))
+        _ = close(out_pipe[1])
+        _ = close(err_pipe[1])
         var empty: u8[]
         var out = Capture(descriptor = out_pipe[0], data = empty, used = 0, open = true)
         var err = Capture(descriptor = err_pipe[0], data = empty, used = 0, open = true)
-        defer discard(close(out_pipe[0]))
-        defer discard(close(err_pipe[0]))
+        defer _ = close(out_pipe[0])
+        defer _ = close(err_pipe[0])
         defer out.drop()
         defer err.drop()
         var status: i32 = 0
@@ -233,7 +233,7 @@ func wait_for(pid: i32) -> i32!:
 
 ## A child may ignore a broken pipe or SIGTERM. SIGKILL stops its writes before waiting.
 func terminate(pid: i32):
-    discard(kill(pid, 9))
+    _ = kill(pid, 9)
     var status: i32 = 0
     while waitpid(pid, &status, 0) < 0 and c.errno() == c.interrupted:
         continue

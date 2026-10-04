@@ -29,13 +29,13 @@ pub struct Deadline:
 
     ## Expire this many nanoseconds from now. Zero is an immediate check. A delay
     ## that exceeds the clock's representable range reports invalid_options.
-    pub static func after(nanoseconds: u64) -> Deadline!:
+    pub func after(nanoseconds: u64) -> Deadline!:
         let current = try monotonic_nanoseconds()
         let end = current +? nanoseconds else error(invalid_options, "the deadline exceeds the monotonic clock range")
         return Deadline(instant = end)
 
     ## Use an absolute nanosecond instant from the same monotonic origin as time.now.
-    pub static func at(nanoseconds: u64) -> Deadline:
+    pub func at(nanoseconds: u64) -> Deadline:
         return Deadline(instant = nanoseconds)
 
 ## Which readiness to wait for.
@@ -70,10 +70,10 @@ pub struct Poller:
     var owner: memory.Allocator?
 
     ## A poller for up to `capacity` descriptors.
-    pub static func create(capacity: usize) -> Poller!:
+    pub func create(capacity: usize) -> Poller!:
         if capacity == 0 or capacity > 2147483647:
             error(invalid_options, "poller capacity must be between one and i32 maximum")
-        let entries = try alloc NativePoll[capacity]
+        let entries = try new NativePoll[capacity] ---
         var index: usize = 0
         while index < capacity:
             entries[index] = NativePoll(descriptor = -1)
@@ -87,7 +87,7 @@ pub struct Poller:
     ## Watch a nonnegative borrowed descriptor. A descriptor may occupy only one
     ## slot: host poll implementations differ on duplicate entries. Use both for
     ## combined read/write interest. Replacing a slot clears its events.
-    pub mutating func watch(index: usize, descriptor: platform.SocketDescriptor, interest: WaitInterest = WaitInterest.read) -> !:
+    pub func watch(index: usize, descriptor: platform.SocketDescriptor, interest: WaitInterest = WaitInterest.read) -> !:
         try self.check_slot(index)
         if descriptor < 0:
             error(invalid_options, "a watched descriptor must be nonnegative")
@@ -100,7 +100,7 @@ pub struct Poller:
         self.entries[index] = NativePoll(descriptor = descriptor, events = events)
 
     ## Stop watching the descriptor at `index`.
-    pub mutating func disable(index: usize) -> !:
+    pub func disable(index: usize) -> !:
         try self.check_slot(index)
         self.entries[index] = NativePoll(descriptor = -1)
 
@@ -112,7 +112,7 @@ pub struct Poller:
     ## readiness. Expired deadlines still perform one nonblocking readiness check.
     ## Interrupted calls recompute the remaining deadline. Output events are cleared
     ## on entry and on error. This does not make later I/O obey the deadline itself.
-    pub mutating func wait(deadline: Deadline = Deadline(), cancellation: sync.Cancellation*? = none) -> usize!:
+    pub func wait(deadline: Deadline = Deadline(), cancellation: sync.Cancellation*? = none) -> usize!:
         if self.entries.length == 0:
             error(closed, "the poller is closed")
         return try wait_poll(self.entries, deadline, cancellation)
@@ -124,7 +124,7 @@ pub struct Poller:
         return poll_readiness(self.entries[index].returned)
 
     ## Release the poller.
-    pub mutating func destroy():
+    pub func destroy():
         if self.entries.length > 0:
             let owner = self.owner else trap("the poller lost its allocator")
             free(self.entries) in owner

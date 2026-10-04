@@ -47,7 +47,7 @@ pub func main(arguments: c.str[]) -> i32!:
         collection = try net.resolve_all("mixed.invalid", 1234)
     assert(collection.view().length == 3 and reference_released() == 7)
     let original = (usize)collection.view().data
-    let extent = collection.view().length * sizeof(net.SocketAddress)
+    let extent = collection.view().length * memory.size_of(net.SocketAddress)
     with rejecting:
         collection.destroy()
         collection.destroy()

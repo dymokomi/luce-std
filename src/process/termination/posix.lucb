@@ -16,7 +16,7 @@ let interrupt_signal: i32 = 2
 let terminate_signal: i32 = 15
 
 func termination_received(number: i32):
-    discard(termination_generation.add(1, .release))
+    _ = termination_generation.add(1, .release)
 
 func termination_refused(handler: TerminationHandler?) -> bool:
     if let function = handler:
@@ -29,9 +29,9 @@ func termination_posix_install() -> !:
         error(failed, "SIGINT handler could not be installed")
     previous_terminate = termination_signal(terminate_signal, termination_received)
     if termination_refused(previous_terminate):
-        discard(termination_signal(interrupt_signal, previous_interrupt))
+        _ = termination_signal(interrupt_signal, previous_interrupt)
         error(failed, "SIGTERM handler could not be installed")
 
 func termination_posix_restore():
-    discard(termination_signal(interrupt_signal, previous_interrupt))
-    discard(termination_signal(terminate_signal, previous_terminate))
+    _ = termination_signal(interrupt_signal, previous_interrupt)
+    _ = termination_signal(terminate_signal, previous_terminate)

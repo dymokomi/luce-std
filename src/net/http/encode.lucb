@@ -30,7 +30,7 @@ pub func http_encode_head(output: u8[], head: HttpHead) -> const u8[]!:
     else:
         if head.status < 100 or head.status > 599:
             error(http_invalid, "invalid HTTP status")
-        try io.write_all(&sink, (try format(line, f"{head.version} {head.status} \r\n")).bytes)
+        try io.write_all(&sink, (try strings.format(line, f"{head.version} {head.status} \r\n")).bytes)
     for item in head.fields:
         if not http_field_valid(item) or http_equal(item.name, "content-length") or http_equal(item.name, "transfer-encoding") or http_equal(item.name, "connection"):
             error(http_invalid, "invalid or generated HTTP field")
@@ -43,10 +43,10 @@ pub func http_encode_head(output: u8[], head: HttpHead) -> const u8[]!:
         error(http_invalid, "framing is forbidden for this response")
     if not no_framing:
         if head.status == 304 and head.body_kind == HttpBodyKind.empty:
-            discard(0)
+            _ = 0
         elif head.body_kind == HttpBodyKind.fixed or head.body_kind == HttpBodyKind.empty:
             let size = head.body_length if head.body_kind == HttpBodyKind.fixed else 0
-            try io.write_all(&sink, (try format(line, f"Content-Length: {size}\r\n")).bytes)
+            try io.write_all(&sink, (try strings.format(line, f"Content-Length: {size}\r\n")).bytes)
         elif head.body_kind == HttpBodyKind.chunked:
             if head.version != "HTTP/1.1":
                 error(http_invalid, "chunked framing requires HTTP/1.1")
@@ -64,9 +64,9 @@ pub func http_encode_head(output: u8[], head: HttpHead) -> const u8[]!:
     var fields: HttpField[100]
     let generous = HttpLimits(body_bytes = 18446744073709551615)
     if head.status == 0:
-        discard(try http_parse_request(sink.written(), fields, generous))
+        _ = try http_parse_request(sink.written(), fields, generous)
     else:
-        discard(try http_parse_response(sink.written(), fields, head.method, generous))
+        _ = try http_parse_response(sink.written(), fields, head.method, generous)
     return sink.written()
 
 # mark: Chunked writing =======================================================================
@@ -108,20 +108,20 @@ pub struct HttpBodyWriter: Writer:
     var failure: ErrorCode
 
     ## A body writer over `destination` for a body of `kind`.
-    pub static func over(destination: Writer, kind: HttpBodyKind, length: u64 = 0) -> HttpBodyWriter!:
+    pub func over(destination: Writer, kind: HttpBodyKind, length: u64 = 0) -> HttpBodyWriter!:
         if kind == HttpBodyKind.tunnel:
             error(http_unsupported, "a tunnel has no HTTP body writer")
         return HttpBodyWriter(destination = destination, kind = kind, remaining = length if kind == HttpBodyKind.fixed else 0, active = true)
 
     ## Write body bytes, framed by the body kind.
-    pub mutating func write(data: const u8[]) -> usize!:
+    pub func write(data: const u8[]) -> usize!:
         try self.check()
         return self.append(data) catch problem:
             self.failed = true
             self.failure = problem.code
             error(problem.code, problem.message)
 
-    mutating func append(data: const u8[]) -> usize!:
+    func append(data: const u8[]) -> usize!:
         if data.length == 0:
             return 0
         if self.kind == HttpBodyKind.empty or (self.kind == HttpBodyKind.fixed and (u64)data.length > self.remaining):
@@ -135,7 +135,7 @@ pub struct HttpBodyWriter: Writer:
         return data.length
 
     ## Finish the body, writing any terminator.
-    pub mutating func finish() -> !:
+    pub func finish() -> !:
         try self.check()
         self.end_body() catch problem:
             self.failed = true
@@ -143,7 +143,7 @@ pub struct HttpBodyWriter: Writer:
             error(problem.code, problem.message)
         self.active = false
 
-    mutating func end_body() -> !:
+    func end_body() -> !:
         if self.kind == HttpBodyKind.fixed and self.remaining != 0:
             error(io.unexpected_eof, "HTTP body is shorter than its declared length")
         if self.kind == HttpBodyKind.chunked:

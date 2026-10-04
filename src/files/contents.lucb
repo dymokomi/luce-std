@@ -38,14 +38,14 @@ pub func read(path: c.str, limit: usize = ~(usize)0) -> interop.Owned[const u8[]
             if capacity > limit:
                 capacity = limit
             if bytes.length == 0:
-                bytes = try alloc u8[capacity]
+                bytes = try new u8[capacity] ---
             else:
                 bytes = try memory.grow(bytes, capacity)
         memory.copy(bytes[used..], scratch, count)
         used += count
     try file.close()
     if used < bytes.length:
-        let exact = try alloc u8[used]
+        let exact = try new u8[used] ---
         memory.copy(exact, bytes, used)
         release_buffer(bytes)
         bytes = exact

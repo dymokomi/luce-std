@@ -14,7 +14,7 @@
 ## file, so checking a FIFO cannot block waiting for a writer.
 pub func exists(path: c.str) -> bool:
     return exists_checked(path) catch failure:
-        discard(failure)
+        _ = failure
         recover false
 
 ## Checked existence lookup. Missing components, non-directory parent components
@@ -155,7 +155,7 @@ pub func read_symlink(path: c.str, limit: usize = 4096) -> interop.Owned[str]!:
         return try windows_read_symlink(path, limit)
     else:
         let capacity = limit +? 1 else error(memory.exhausted, "the link target limit overflows")
-        let buffer = try alloc u8[capacity]
+        let buffer = try new u8[capacity] ---
         defer free(buffer)
         var count = readlink(path, buffer.data, buffer.length)
         while count < 0 and c.errno() == c.interrupted:

@@ -50,20 +50,20 @@ pub func main(arguments: c.str[]) -> i32!:
             output[i] = 85
             i += 1
         var rejected = false
-        discard(address.render(output[..<text_length - 1]) catch failure:
+        _ = address.render(output[..<text_length - 1]) catch failure:
             assert(failure.code == io.full)
             rejected = true
-            recover "")
+            recover ""
         assert(rejected)
         i = 0
         while i < output.length:
             assert(output[i] == 85)
             i += 1
         rejected = false
-        discard(address.write_octets(output[..<byte_count - 1]) catch failure:
+        _ = address.write_octets(output[..<byte_count - 1]) catch failure:
             assert(failure.code == io.full)
             rejected = true
-            recover 0)
+            recover 0
         assert(rejected and output[0] == 85)
         cases += 1
     assert(cases > 5000)
@@ -79,10 +79,10 @@ pub func main(arguments: c.str[]) -> i32!:
     while length <= bytes.length:
         if length != 4 and length != 16:
             var rejected = false
-            discard(net.IpAddress.from_bytes(bytes[..<length]) catch failure:
+            _ = net.IpAddress.from_bytes(bytes[..<length]) catch failure:
                 assert(failure.code == net.invalid_options)
                 rejected = true
-                recover net.IpAddress())
+                recover net.IpAddress()
             assert(rejected)
         length += 1
     print("ok IP address reference corpus")

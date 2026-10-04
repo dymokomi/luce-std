@@ -30,7 +30,7 @@ pub func main(arguments: c.str[]) -> i32!:
     let fifo = arguments[3]
     var file = try files.File.open(path, files.OpenMode.create_new_read_write)
     defer file.destroy()
-    discard(try file.seek(5368709120))
+    _ = try file.seek(5368709120)
     try io.write_all(&file, "x".bytes)
     let descriptor = file.descriptor() else trap("file not open")
     metadata_prepare(descriptor)
@@ -58,29 +58,29 @@ pub func main(arguments: c.str[]) -> i32!:
         metadata_fault_arm(kind)
         var rejected = false
         if kind == 4:
-            discard(file.metadata() catch failure:
+            _ = file.metadata() catch failure:
                 assert(failure.code == files.failed)
                 rejected = true
-                recover value)
+                recover value
         else:
-            discard(files.metadata(path, kind == 5) catch failure:
+            _ = files.metadata(path, kind == 5) catch failure:
                 assert(failure.code == (files.permission_denied if kind == 5 else files.failed))
                 rejected = true
-                recover value)
+                recover value
         assert(rejected and metadata_fault_hits() == 1)
         kind += 1
     metadata_fault_arm(7)
     try file.set_permissions(384)
     assert(metadata_fault_hits() == 1 and (try file.metadata()).permissions == 384)
-    discard(try file.seek(0))
+    _ = try file.seek(0)
     try io.write_all(&file, "ab".bytes)
-    discard(try file.seek(5368709121))
+    _ = try file.seek(5368709121)
     metadata_fault_arm(8)
     try file.truncate(2)
     assert(metadata_fault_hits() == 1 and (try file.metadata()).size == 2)
     try file.truncate(6)
     assert((try file.seek(0, files.SeekOrigin.current)) == 5368709121)
-    discard(try file.seek(0))
+    _ = try file.seek(0)
     var bytes: u8[6]
     try io.read_exact(&file, bytes)
     assert(bytes[0] == 97 and bytes[1] == 98)
@@ -135,10 +135,10 @@ pub func main(arguments: c.str[]) -> i32!:
     assert(unlinked.links == 0 and unlinked.size == 6)
     compare(unlinked, path, true, descriptor)
     var rejected = false
-    discard(files.metadata(link) catch failure:
+    _ = files.metadata(link) catch failure:
         assert(failure.code == files.missing)
         rejected = true
-        recover value)
+        recover value
     assert(rejected)
     assert((try files.metadata(link, false)).kind == files.FileKind.symlink)
     try file.close()
@@ -148,10 +148,10 @@ pub func main(arguments: c.str[]) -> i32!:
         invalid = true
     assert(invalid)
     rejected = false
-    discard(file.metadata() catch failure:
+    _ = file.metadata() catch failure:
         assert(failure.code == io.closed)
         rejected = true
-        recover value)
+        recover value
     assert(rejected)
     try files.remove_file(link)
     print("ok file metadata and native layouts")

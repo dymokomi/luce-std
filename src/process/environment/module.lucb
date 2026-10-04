@@ -41,7 +41,7 @@ pub func variables() -> interop.Owned[const str[]]!:
     errdefer texts.release()
     if platform.windows:
         let block = GetEnvironmentStringsW() else error(failed, "the environment is unavailable")
-        defer discard(FreeEnvironmentStringsW(block))
+        defer _ = FreeEnvironmentStringsW(block)
         var cursor: usize = 0
         while block[cursor] != 0:
             let start = cursor

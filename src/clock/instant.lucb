@@ -50,7 +50,7 @@ func wall_clock() -> (i64, u32):
         return (seconds, (u32)((since_1970 - seconds * 1000000) * 1000))
     else:
         var stamp = Timespec(seconds = 0, nanoseconds = 0)
-        discard(clock_gettime(0, &stamp))
+        _ = clock_gettime(0, &stamp)
         return (stamp.seconds, (u32)stamp.nanoseconds)
 
 ## Sleep for `seconds`, at least; zero or less returns at once.

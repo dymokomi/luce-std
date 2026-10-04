@@ -25,7 +25,7 @@ func environment_windows_compare(left: const u16[], right: const u16[]) -> i32:
 
 func environment_windows(overrides: const c.str[]) -> u16[]!:
     let inherited = GetEnvironmentStringsW() else error(failed, "the inherited environment is unavailable")
-    defer discard(FreeEnvironmentStringsW(inherited))
+    defer _ = FreeEnvironmentStringsW(inherited)
     var count: usize = 0
     var cursor: usize = 0
     while inherited[cursor] != 0:
@@ -33,19 +33,19 @@ func environment_windows(overrides: const c.str[]) -> u16[]!:
         while inherited[cursor] != 0:
             cursor += 1
         cursor += 1
-    let overriding = try alloc (u16[])[overrides.length]
+    let overriding = try new (u16[])[overrides.length] ---
     defer free(overriding)
     var converted: usize = 0
     defer environment_windows_release(overriding, converted)
     for index in 0..<overrides.length:
-        discard(try environment_name(overrides[index]))
+        _ = try environment_name(overrides[index])
         overriding[index] = try windows_text.wide(overrides[index], failed)
         converted += 1
         for prior in 0..<index:
             if environment_windows_compare(overriding[index], overriding[prior]) == 0:
                 error(failed, "an environment override repeats a name")
     let capacity = count +? overrides.length else error(failed, "the environment is too large")
-    let entries = try alloc (u16[])[capacity]
+    let entries = try new (u16[])[capacity] ---
     defer free(entries)
     var used: usize = 0
     cursor = 0
@@ -76,7 +76,7 @@ func environment_windows(overrides: const c.str[]) -> u16[]!:
     var size: usize = 1
     for index in 0..<used:
         size = size +? entries[index].length else error(failed, "the environment is too large")
-    let result = try alloc u16[size if used > 0 else 2]
+    let result = try new u16[size if used > 0 else 2] ---
     var output: usize = 0
     for index in 0..<used:
         for word in entries[index]:

@@ -22,7 +22,7 @@ pub struct IpAddress:
     var octets: u8[16]
 
     ## An IPv4 address from a 32-bit number.
-    pub static func from_ipv4(number: u32) -> IpAddress:
+    pub func from_ipv4(number: u32) -> IpAddress:
         var result: IpAddress
         var i: usize = 0
         while i < 4:
@@ -31,7 +31,7 @@ pub struct IpAddress:
         return result
 
     ## Copy exactly four IPv4 or sixteen IPv6 octets in network order.
-    pub static func from_bytes(bytes: const u8[]) -> IpAddress!:
+    pub func from_bytes(bytes: const u8[]) -> IpAddress!:
         if bytes.length != 4 and bytes.length != 16:
             error(invalid_options, "an IP address needs four or sixteen octets")
         var result = IpAddress(kind = IpVersion.ipv4 if bytes.length == 4 else IpVersion.ipv6)
@@ -41,7 +41,7 @@ pub struct IpAddress:
     ## Parse one complete address, without DNS. Accept IPv6 compression, uppercase
     ## hex and dotted IPv4 tails. IPv4 needs four decimal components without leading
     ## zeros. Reject whitespace, NUL, brackets, ports, prefix lengths and zone IDs.
-    pub static func parse(text: str) -> IpAddress?:
+    pub func parse(text: str) -> IpAddress?:
         if text.length == 0 or text.length > 45:
             return none
         var has_colon = false

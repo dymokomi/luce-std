@@ -218,7 +218,7 @@ func linux_metadata(value: LinuxMetadata) -> Metadata:
 pub func metadata(path: c.str, follow_symlinks: bool = true) -> Metadata!:
     if platform.windows:
         let handle = try windows_path_handle(path, follow_symlinks)
-        defer discard(CloseHandle(handle))
+        defer _ = CloseHandle(handle)
         return try windows_metadata(handle, follow_symlinks)
     else:
         if platform.macos:

@@ -46,7 +46,7 @@ pub struct File: io.Reader, io.Writer:
     var ahead: readahead.ReadAhead
 
     ## Open a close-on-exec descriptor. Only the named creation modes create paths.
-    pub static func open(path: c.str, mode: OpenMode = OpenMode.read, permissions: u32 = 420) -> File!:
+    pub func open(path: c.str, mode: OpenMode = OpenMode.read, permissions: u32 = 420) -> File!:
         let temporary = mode == OpenMode.create_temporary
         let flags = try file_open_flags(OpenMode.create_new_read_write if temporary else mode, permissions)
         var fd = try open_descriptor(path, flags, permissions, temporary)
@@ -72,7 +72,7 @@ pub struct File: io.Reader, io.Writer:
     ## Set the logical length without moving the file position. Shrinking
     ## discards the suffix; extension reads as zero bytes. Requires a writable
     ## descriptor. Reject negative lengths before calling the OS.
-    pub mutating func truncate(length: i64) -> !:
+    pub func truncate(length: i64) -> !:
         let descriptor = self.handle else error(io.closed, "the file is closed")
         if length < 0:
             error(invalid_options, "a file length cannot be negative")
@@ -85,7 +85,7 @@ pub struct File: io.Reader, io.Writer:
     ## Set permission and special mode bits on this opened object, independent
     ## of pathname changes. Umask is not applied. Host permission rules may
     ## reject or clear requested special bits; inspect metadata for the result.
-    pub mutating func set_permissions(permissions: u32) -> !:
+    pub func set_permissions(permissions: u32) -> !:
         let descriptor = self.handle else error(io.closed, "the file is closed")
         if permissions > 4095:
             error(invalid_options, "file permissions must fit the Unix mode bits")
@@ -103,7 +103,7 @@ pub struct File: io.Reader, io.Writer:
     ## Set explicit access and modification times; creation/status-change times
     ## are not set by this operation. Validate nanoseconds before the OS call.
     ## The filesystem's range and timestamp resolution still apply.
-    pub mutating func set_times(accessed: FileTime, modified: FileTime) -> !:
+    pub func set_times(accessed: FileTime, modified: FileTime) -> !:
         let descriptor = self.handle else error(io.closed, "the file is closed")
         if accessed.nanoseconds >= 1000000000 or modified.nanoseconds >= 1000000000:
             error(invalid_options, "a timestamp nanosecond fraction must be below one billion")
@@ -121,7 +121,7 @@ pub struct File: io.Reader, io.Writer:
 
     ## Read some bytes, retrying interruption. Zero for nonempty storage is EOF;
     ## empty input makes no system call. The handle must be open even for empty I/O.
-    pub mutating func read(buffer: u8[]) -> usize!:
+    pub func read(buffer: u8[]) -> usize!:
         let fd = self.handle else error(io.closed, "the file is closed")
         if self.ahead.count() > 0:
             return self.ahead.take(buffer)
@@ -129,13 +129,13 @@ pub struct File: io.Reader, io.Writer:
 
     ## Write some bytes, retrying interruption. Use io.write_all for a full payload.
     ## Success confirms an OS write, not durable storage; call sync when required.
-    pub mutating func write(data: const u8[]) -> usize!:
+    pub func write(data: const u8[]) -> usize!:
         let fd = self.handle else error(io.closed, "the file is closed")
         if data.length == 0:
             return 0
         if self.ahead.count() > 0:
             # bytes read ahead were not answered yet: write where the reader stands
-            discard(try self.seek(0, SeekOrigin.current))
+            _ = try self.seek(0, SeekOrigin.current)
         let count = data.length if data.length < transfer_limit else transfer_limit
         var written = c_write(fd, data.data, count)
         while written < 0 and c.errno() == c.interrupted:
@@ -146,7 +146,7 @@ pub struct File: io.Reader, io.Writer:
 
     ## Seek a seekable file and return its resulting byte offset. Pipes and other
     ## unseekable descriptors report failure instead of pretending their size is zero.
-    pub mutating func seek(offset: i64, origin: SeekOrigin = SeekOrigin.start) -> i64!:
+    pub func seek(offset: i64, origin: SeekOrigin = SeekOrigin.start) -> i64!:
         let fd = self.handle else error(io.closed, "the file is closed")
         # the descriptor stands past the bytes read ahead; a relative seek starts before them
         let target = offset - (i64)self.ahead.count() if origin == SeekOrigin.current else offset
@@ -160,7 +160,7 @@ pub struct File: io.Reader, io.Writer:
 
     ## Request the OS's fsync durability boundary for this file; this does not sync
     ## a containing directory or promise persistence beyond the OS/device contract.
-    pub mutating func sync() -> !:
+    pub func sync() -> !:
         let fd = self.handle else error(io.closed, "the file is closed")
         var result = fsync(fd)
         while result < 0 and c.errno() == c.interrupted:
@@ -173,34 +173,34 @@ pub struct File: io.Reader, io.Writer:
     ## The next line without its `\n` or `\r\n`; the unfinished last line at the end, and
     ## none after it. A line that is not UTF-8 is invalid_text. The view lasts until the
     ## next read.
-    pub mutating func read_line() -> str?!:
+    pub func read_line() -> str?!:
         var source = Descriptor(handle = self.handle else error(io.closed, "the file is closed"))
         return try self.ahead.line(&source)
 
     ## Up to `maximum` bytes, or all the rest with a negative maximum; empty at the end. The
     ## view lasts until the next read.
-    pub mutating func read_bytes(maximum: i64 = -1) -> const u8[]!:
+    pub func read_bytes(maximum: i64 = -1) -> const u8[]!:
         var source = Descriptor(handle = self.handle else error(io.closed, "the file is closed"))
         return try self.ahead.bytes(&source, read_limit(maximum), true)
 
     ## Up to `maximum` bytes as text, or all the rest with a negative maximum, ending on a
     ## whole character; empty at the end. Text that is not UTF-8 is invalid_text.
-    pub mutating func read_text(maximum: i64 = -1) -> str!:
+    pub func read_text(maximum: i64 = -1) -> str!:
         var source = Descriptor(handle = self.handle else error(io.closed, "the file is closed"))
         return try self.ahead.text(&source, read_limit(maximum), true)
 
     ## Write all of `data`.
-    pub mutating func write_bytes(data: const u8[]) -> !:
+    pub func write_bytes(data: const u8[]) -> !:
         try io.write_all(&self, data)
 
     ## Write all of `text`.
-    pub mutating func write_text(text: str) -> !:
+    pub func write_text(text: str) -> !:
         try io.write_all(&self, text.bytes)
 
     ## Consume ownership before closing, so repeated calls on this value are safe
     ## even after failure. Never retry close: a reused descriptor may belong to
     ## another thread. A reported failure must not be retried using descriptor().
-    pub mutating func close() -> !:
+    pub func close() -> !:
         let fd = self.handle else return
         self.handle = none
         self.ahead.release()
@@ -209,9 +209,9 @@ pub struct File: io.Reader, io.Writer:
 
     ## Best-effort cleanup while unwinding another error. Use close explicitly on
     ## the successful path when delayed close errors must be reported to the caller.
-    pub mutating func destroy():
+    pub func destroy():
         self.close() catch failure:
-            discard(failure)
+            _ = failure
 
 ## Open `path` as a File object for Luce: `files.open("notes.txt")` reads, and a mode
 ## such as `files.OpenMode.replace` or `.append` writes. It closes with `with` or `close()`.
@@ -235,7 +235,7 @@ pub let invalid_text: ErrorCode = readahead.invalid_text
 struct Descriptor: io.Reader:
     var handle: i32
 
-    mutating func read(buffer: u8[]) -> usize!:
+    func read(buffer: u8[]) -> usize!:
         return try read_descriptor(self.handle, buffer)
 
 ## Read some bytes, retrying interruption; zero at the end.

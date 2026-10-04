@@ -22,7 +22,7 @@ pub struct DeadlineStream: Reader, Writer:
     var cancellation: sync.Cancellation*?
 
     ## Wrap `connection` so every transfer shares one absolute deadline.
-    pub static func over(connection: Connection*, deadline: Deadline = Deadline(), cancellation: sync.Cancellation*? = none) -> DeadlineStream!:
+    pub func over(connection: Connection*, deadline: Deadline = Deadline(), cancellation: sync.Cancellation*? = none) -> DeadlineStream!:
         try require_nonblocking(connection)
         return DeadlineStream(connection = connection, deadline = deadline, cancellation = cancellation)
 
@@ -30,7 +30,7 @@ pub struct DeadlineStream: Reader, Writer:
     ## buffer is EOF. Empty input succeeds on an open connection even after its
     ## deadline or cancellation, because it performs no transfer. The connection
     ## must remain nonblocking; the adapter never changes its shared status flags.
-    pub mutating func read(buffer: u8[]) -> usize!:
+    pub func read(buffer: u8[]) -> usize!:
         let connection = self.connection else error(closed, "the deadline stream has no connection")
         let descriptor = try connection.socket.require()
         if buffer.length == 0:
@@ -47,7 +47,7 @@ pub struct DeadlineStream: Reader, Writer:
     ## Write some bytes, waiting only when kernel buffers are full. Each successful
     ## count is confirmed before checking the next attempt's deadline/cancellation;
     ## do not discard it when a later transfer fails. Empty writes make no syscall.
-    pub mutating func write(data: const u8[]) -> usize!:
+    pub func write(data: const u8[]) -> usize!:
         let connection = self.connection else error(closed, "the deadline stream has no connection")
         let descriptor = try connection.socket.require()
         if data.length == 0:
@@ -74,7 +74,7 @@ func await_transfer_retry(descriptor: platform.SocketDescriptor, interest: WaitI
     let code = socket_error(number)
     if code != io.would_block:
         error(code, "the deadline stream transfer failed")
-    discard(try wait_socket(descriptor, interest, deadline, cancellation))
+    _ = try wait_socket(descriptor, interest, deadline, cancellation)
 
 func require_nonblocking(connection: Connection*) -> !:
     if not try connection.is_nonblocking():

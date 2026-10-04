@@ -22,7 +22,7 @@ pub struct SocketAddress:
     pub var scope_id: u32
 
     ## The loopback endpoint on `port`.
-    pub static func loopback(port: u16, version: IpVersion = IpVersion.ipv4) -> SocketAddress:
+    pub func loopback(port: u16, version: IpVersion = IpVersion.ipv4) -> SocketAddress:
         if version == IpVersion.ipv4:
             return SocketAddress(ip = IpAddress.from_ipv4(2130706433), port = port)
         var ip = IpAddress(kind = version)
@@ -30,13 +30,13 @@ pub struct SocketAddress:
         return SocketAddress(ip = ip, port = port)
 
     ## The wildcard endpoint on `port`.
-    pub static func any(port: u16, version: IpVersion = IpVersion.ipv4) -> SocketAddress:
+    pub func any(port: u16, version: IpVersion = IpVersion.ipv4) -> SocketAddress:
         return SocketAddress(ip = IpAddress(kind = version), port = port)
 
     ## Parse IPv4:port or [IPv6%scope]:port without DNS. Scope is optional and
     ## numeric, not an interface name. Ports use 1–5 decimal digits; scope IDs use
     ## 1–10. Leading zeroes in these numbers are accepted and omitted on output.
-    pub static func parse(text: str) -> SocketAddress?:
+    pub func parse(text: str) -> SocketAddress?:
         if text.length == 0 or text.length > 64:
             return none
         var ip_start: usize = 0

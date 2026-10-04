@@ -26,15 +26,15 @@ pub func main(arguments: str[]) -> i32!:
         found = found or name == "héllo.txt"
     assert(found)
     var rejected = false
-    discard(files.read_text(path, limit = 1) catch failure:
+    _ = files.read_text(path, limit = 1) catch failure:
         rejected = true
-        recover interop.Owned[str](""))
+        recover interop.Owned[str]("")
     assert(rejected)
     try files.write((c.str)path, [255])
     rejected = false
-    discard(files.read_text(path) catch failure:
+    _ = files.read_text(path) catch failure:
         rejected = true
-        recover interop.Owned[str](""))
+        recover interop.Owned[str]("")
     assert(rejected)
     rejected = false
     files.write_text("bad\0path", "safe") catch failure:

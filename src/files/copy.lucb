@@ -53,4 +53,4 @@ func metadata_if_present(path: c.str) -> Metadata?!:
 ## Copy the file at `source` to `destination`, refusing an existing destination unless
 ## `replace`: copy_file's contract with its defaults, in the form Luce calls.
 pub func copy(source: c.str, destination: c.str, replace: bool = false) -> !:
-    discard(try copy_file(source, destination, replace = replace))
+    _ = try copy_file(source, destination, replace = replace)

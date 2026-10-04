@@ -54,7 +54,7 @@ func windows_create_symlink(target: c.str, path: c.str, directory: bool?) -> !:
 
 func windows_read_symlink(path: c.str, limit: usize) -> interop.Owned[str]!:
     let handle = try windows_path_handle(path, false)
-    defer discard(CloseHandle(handle))
+    defer _ = CloseHandle(handle)
     var storage: u64[2048]
     var received: u32 = 0
     if DeviceIoControl(handle, 589992, none, 0, &storage[0], 16384, &received, none) == 0:
@@ -76,7 +76,7 @@ func windows_read_symlink(path: c.str, limit: usize) -> interop.Owned[str]!:
         error(invalid_options, "the symbolic link target is invalid UTF-16")
     if (usize)count > limit:
         error(too_large, "the link target exceeds the requested limit")
-    let result = try alloc u8[(usize)count + 1]
+    let result = try new u8[(usize)count + 1] ---
     if WideCharToMultiByte(65001, 128, text, (i32)(length // 2), result.data, count, none, none) != count:
         free(result)
         error(failed, "the symbolic link target could not be encoded")
@@ -88,12 +88,12 @@ func windows_read_symlink(path: c.str, limit: usize) -> interop.Owned[str]!:
 func windows_permissions(descriptor: i32, permissions: u32) -> !:
     let handle = (void*)win_handle(descriptor)
     var info: WinBasic
-    if GetFileInformationByHandleEx(handle, 0, &info, (u32)sizeof(WinBasic)) == 0:
+    if GetFileInformationByHandleEx(handle, 0, &info, (u32)memory.size_of(WinBasic)) == 0:
         error(windows_error(GetLastError()), "file attributes could not be read")
     var update: WinBasic
     update.attributes = info.attributes | 1 if (permissions & 146) == 0 else info.attributes & ~u32(1)
     if update.attributes == 0: update.attributes = 128
-    if SetFileInformationByHandle(handle, 0, &update, (u32)sizeof(WinBasic)) == 0:
+    if SetFileInformationByHandle(handle, 0, &update, (u32)memory.size_of(WinBasic)) == 0:
         error(windows_error(GetLastError()), "file attributes could not be changed")
 
 func windows_ticks(time: FileTime) -> u64!:
@@ -185,25 +185,25 @@ func windows_open(path: c.str, flags: i32, permissions: u32, follow: bool = true
     if (usize)handle == ~(usize)0:
         error(windows_error(GetLastError()), "the file could not be opened")
     if nonblocking and GetFileType(handle) != 1:
-        discard(CloseHandle(handle))
+        _ = CloseHandle(handle)
         error(invalid_options, "nonblocking Windows file opening requires a disk file")
     var info: WinInformation
     if not follow:
         if GetFileInformationByHandle(handle, &info) == 0:
             let number = GetLastError()
-            discard(CloseHandle(handle))
+            _ = CloseHandle(handle)
             error(windows_error(number), "the opened file could not be inspected")
         if (info.attributes & 1024) != 0:
-            discard(CloseHandle(handle))
+            _ = CloseHandle(handle)
             error(symlink_loop, "a final symbolic link is not allowed")
     let descriptor = win_descriptor((isize)handle, flags & (32768 | 128 | 8 | 3))
     if descriptor < 0:
         let number = c.errno()
-        discard(CloseHandle(handle))
+        _ = CloseHandle(handle)
         error(classify_error(number), "the file descriptor could not be created")
     if (flags & truncate) != 0 and ftruncate(descriptor, 0) != 0:
         let number = c.errno()
-        discard(close(descriptor))
+        _ = close(descriptor)
         error(classify_error(number), "the file could not be truncated")
     return descriptor
 
@@ -216,7 +216,7 @@ func windows_path_handle(path: c.str, follow: bool, directory: bool = false) -> 
     if directory:
         var info: WinInformation
         if GetFileInformationByHandle(handle, &info) == 0 or (info.attributes & 16) == 0 or (not follow and (info.attributes & 1024) != 0):
-            discard(CloseHandle(handle))
+            _ = CloseHandle(handle)
             error(not_directory, "the path is not an allowed directory")
     return handle
 
@@ -228,7 +228,7 @@ func windows_metadata(handle: void*, follow: bool) -> Metadata!:
     var info: WinInformation
     var basic: WinBasic
     var standard: WinStandard
-    if GetFileInformationByHandle(handle, &info) == 0 or GetFileInformationByHandleEx(handle, 0, &basic, (u32)sizeof(WinBasic)) == 0 or GetFileInformationByHandleEx(handle, 1, &standard, (u32)sizeof(WinStandard)) == 0:
+    if GetFileInformationByHandle(handle, &info) == 0 or GetFileInformationByHandleEx(handle, 0, &basic, (u32)memory.size_of(WinBasic)) == 0 or GetFileInformationByHandleEx(handle, 1, &standard, (u32)memory.size_of(WinStandard)) == 0:
         error(windows_error(GetLastError()), "file metadata could not be read")
     var kind = FileKind.directory if (info.attributes & 16) != 0 else FileKind.regular
     if not follow and (info.attributes & 1024) != 0:
@@ -242,12 +242,12 @@ func windows_metadata(handle: void*, follow: bool) -> Metadata!:
 func windows_relative(parent: i32, path: c.str) -> interop.Owned[str]!:
     if parent == current_directory_fd or paths.is_absolute((str)path):
         return try owned.copy_text((str)path)
-    let wide = try alloc u16[32768]
+    let wide = try new u16[32768] ---
     defer free(wide)
     let count = GetFinalPathNameByHandleW((void*)win_handle(parent), wide.data, (u32)wide.length, 0)
     if count == 0 or count >= wide.length:
         error(windows_error(GetLastError()), "the open directory path could not be read")
-    let bytes = try alloc u8[(usize)count * 4 + 1]
+    let bytes = try new u8[(usize)count * 4 + 1] ---
     defer free(bytes)
     let length = WideCharToMultiByte(65001, 128, wide.data, (i32)count, bytes.data, (i32)(bytes.length - 1), none, none)
     if length == 0:
@@ -264,10 +264,10 @@ func windows_directory_open(parent: i32, path: c.str, follow: bool) -> Directory
     let handle = try windows_path_handle((c.str)joined.value, follow, true)
     let descriptor = win_descriptor((isize)handle, 128)
     if descriptor < 0:
-        discard(CloseHandle(handle))
+        _ = CloseHandle(handle)
         error(failed, "the directory descriptor could not be created")
     let state = new WinDirectory(descriptor = descriptor) in memory.heap catch failure:
-        discard(close(descriptor))
+        _ = close(descriptor)
         error(failure.code, failure.message)
     return Directory(handle = (void*)state)
 
@@ -299,7 +299,7 @@ func windows_next(state: WinDirectory*) -> str?!:
 
 func windows_directory_close(state: WinDirectory*) -> !:
     if let search = state.search:
-        discard(FindClose(search))
+        _ = FindClose(search)
     let result = close(state.descriptor)
     free(state) in memory.heap
     if result != 0:

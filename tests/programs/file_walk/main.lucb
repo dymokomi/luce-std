@@ -11,7 +11,7 @@ struct Visitor: files.WalkVisitor:
     var symlinks: usize
     var deepest: usize
 
-    pub mutating func visit(path: str, info: files.Metadata, depth: usize) -> bool!:
+    pub func visit(path: str, info: files.Metadata, depth: usize) -> bool!:
         assert(strings.starts_with(path, (str)self.root))
         if depth > self.deepest:
             self.deepest = depth

@@ -39,10 +39,10 @@ pub func main(arguments: c.str[]) -> i32!:
         let expected = categories[(usize)reference_resolver_category(index)]
         reference_arm(3, index)
         var rejected = false
-        discard(net.resolve("failure.invalid", 1234) catch failure:
+        _ = net.resolve("failure.invalid", 1234) catch failure:
             assert(failure.code == expected)
             rejected = true
-            recover net.SocketAddress())
+            recover net.SocketAddress()
         assert(rejected and reference_consumed() == 1)
         reference_arm(3, index)
         rejected = false

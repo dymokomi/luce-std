@@ -25,10 +25,10 @@ pub func main(arguments: c.str[]) -> i32!:
     defer peer.destroy()
     assert(reference_nonblocking(pair[0]) == 0)
     var requires_nonblocking = false
-    discard(net.DeadlineStream.over(&connection) catch failure:
+    _ = net.DeadlineStream.over(&connection) catch failure:
         assert(failure.code == net.invalid_options)
         requires_nonblocking = true
-        recover net.DeadlineStream())
+        recover net.DeadlineStream()
     assert(requires_nonblocking and reference_nonblocking(pair[0]) == 0)
     try connection.set_nonblocking(true)
     var bytes: u8[8]
@@ -85,36 +85,36 @@ pub func main(arguments: c.str[]) -> i32!:
         reference_begin((i32)kind, pair[0])
         rejected = false
         if kind == 6:
-            discard(retry.read(bytes) catch failure:
+            _ = retry.read(bytes) catch failure:
                 assert(failure.code == net.failed)
                 rejected = true
-                recover 0)
+                recover 0
         else:
-            discard(retry.write("x".bytes) catch failure:
+            _ = retry.write("x".bytes) catch failure:
                 assert(failure.code == (io.no_progress if kind == 5 else net.closed))
                 rejected = true
-                recover 0)
+                recover 0
         assert(rejected and reference_end() == 1)
     assert(reference_nonblocking(pair[0]) == 1)
 
     try connection.set_nonblocking(false)
     rejected = false
-    discard(retry.write("x".bytes) catch failure:
+    _ = retry.write("x".bytes) catch failure:
         assert(failure.code == net.invalid_options)
         rejected = true
-        recover 0)
+        recover 0
     assert(rejected)
     rejected = false
-    discard(retry.read(bytes) catch failure:
+    _ = retry.read(bytes) catch failure:
         assert(failure.code == net.invalid_options)
         rejected = true
-        recover 0)
+        recover 0
     assert(rejected and (try retry.read(bytes[..<0])) == 0)
     try connection.set_nonblocking(true)
 
     # Real backpressure: confirm that the peer receives exactly the reported prefix.
     try connection.set_send_buffer(4096)
-    let payload = try alloc u8[1048576]
+    let payload = try new u8[1048576] ---
     defer free(payload)
     var index: usize = 0
     while index < payload.length:
@@ -140,19 +140,19 @@ pub func main(arguments: c.str[]) -> i32!:
     try peer.set_nonblocking(true)
     var probe = try net.DeadlineStream.over(&peer, try net.Deadline.after(10000000))
     rejected = false
-    discard(probe.read(block) catch failure:
+    _ = probe.read(block) catch failure:
         assert(failure.code == net.timed_out)
         rejected = true
-        recover 0)
+        recover 0
     assert(rejected)
     try peer.shutdown(net.ShutdownDirection.write)
     assert((try retry.read(bytes)) == 0)
     connection.destroy()
     rejected = false
-    discard(retry.read(bytes[..<0]) catch failure:
+    _ = retry.read(bytes[..<0]) catch failure:
         assert(failure.code == net.closed)
         rejected = true
-        recover 0)
+        recover 0
     assert(rejected)
     print("ok deadline stream progress and backpressure")
     return 0

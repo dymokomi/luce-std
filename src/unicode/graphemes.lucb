@@ -18,13 +18,13 @@ pub struct GraphemeIterator:
     var offset: usize
 
     ## An iterator over the grapheme clusters of `text`, whose UTF-8 is validated up front.
-    pub static func over(text: str) -> GraphemeIterator!:
+    pub func over(text: str) -> GraphemeIterator!:
         if not utf8.valid(text.bytes):
             error(utf8.invalid_sequence, "invalid UTF-8 text")
         return GraphemeIterator(text = text)
 
     ## Next nonempty borrowed cluster, or none at EOF; repeated EOF stays none.
-    pub mutating func next() -> str?:
+    pub func next() -> str?:
         if self.offset == self.text.length:
             return none
         let start = self.offset
@@ -105,7 +105,7 @@ struct GraphemeState:
             return false
         return true
 
-    mutating func accept(scalar: u32, current: GraphemeClass):
+    func accept(scalar: u32, current: GraphemeClass):
         self.zwj_after_pictographic = current == GraphemeClass.zwj and self.pictographic_prefix
         if range_value(pictographic_ranges, scalar) != 0:
             self.pictographic_prefix = true

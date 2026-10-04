@@ -13,15 +13,15 @@ pub struct Counting: memory.Allocator:
     pub var failures: usize
     pub var limit: usize
 
-    pub static func unlimited() -> Counting:
+    pub func unlimited() -> Counting:
         return Counting(live = 0, bytes = 0, peak_bytes = 0, peak_live = 0, allocations = 0, frees = 0, failures = 0, limit = 0)
 
-    pub static func within(limit: usize) -> Counting:
+    pub func within(limit: usize) -> Counting:
         var c = Counting.unlimited()
         c.limit = limit
         return c
 
-    pub mutating func allocate(size: usize, alignment: usize) -> u8[]?:
+    pub func allocate(size: usize, alignment: usize) -> u8[]?:
         if self.limit > 0 and self.bytes + size > self.limit:
             self.failures += 1
             return none
@@ -35,10 +35,10 @@ pub struct Counting: memory.Allocator:
             self.peak_live = self.live
         return block
 
-    pub mutating func resize(block: u8[], size: usize) -> bool:
+    pub func resize(block: u8[], size: usize) -> bool:
         return false
 
-    pub mutating func release(block: u8[]):
+    pub func release(block: u8[]):
         self.live -= 1
         self.bytes -= block.length
         self.frees += 1

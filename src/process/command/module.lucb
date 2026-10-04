@@ -55,12 +55,12 @@ pub struct Command:
         errdefer command_dispose(state)
         state.program = try command_text(program)
         state.directory = try command_text(directory)
-        state.arguments = try alloc c.str[arguments.length] in memory.heap
+        state.arguments = try new c.str[arguments.length] --- in memory.heap
         for index in 0..<arguments.length:
             state.arguments[index] = (c.str)(try command_text(arguments[index]))
             state.argument_count += 1
         if let overrides = environment:
-            state.environment = try alloc c.str[overrides.length] in memory.heap
+            state.environment = try new c.str[overrides.length] --- in memory.heap
             for index in 0..<overrides.length:
                 state.environment[index] = (c.str)(try command_text(overrides[index]))
                 state.environment_count += 1
@@ -103,7 +103,7 @@ pub struct Command:
                     if (u32)scalar.scalar == 0:
                         try text.put("�")
                     else:
-                        discard(try text.write(bytes[offset..<offset + scalar.width]))
+                        _ = try text.write(bytes[offset..<offset + scalar.width])
                     offset += scalar.width
                 else:
                     try text.put("�")
@@ -118,7 +118,7 @@ pub struct Command:
 
     ## Block until the program ends, then its exit code. A program that could not be
     ## started, outgrew its output limit or was cancelled is a failure.
-    pub mutating func wait() -> i64!:
+    pub func wait() -> i64!:
         let state = self.state()
         if let worker = self.worker:
             self.worker = none
@@ -134,7 +134,7 @@ pub struct Command:
             state.cancelled.store(true, .release)
 
     ## Wait for the worker, reap the child, and release resources.
-    pub mutating func close():
+    pub func close():
         if let worker = self.worker:
             self.cancel()
             worker.join() catch failure:
@@ -189,12 +189,12 @@ func command_append(state: CommandState*, bytes: const u8[]) -> !:
     if size > state.output.length:
         let capacity = math_min_size(state.limit, math_max_size(size, math_max_size(4096, state.output.length * 2)))
         if state.output.length == 0:
-            state.output = try alloc u8[capacity]
+            state.output = try new u8[capacity] ---
         else:
             state.output = try memory.grow(state.output, capacity)
     memory.copy(state.output[state.used..], bytes, bytes.length)
     state.used = size
-    discard(state.changed.add(1, .release))
+    _ = state.changed.add(1, .release)
 
 func math_min_size(a: usize, b: usize) -> usize:
     return a if a < b else b

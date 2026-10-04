@@ -80,10 +80,10 @@ func udp(version: net.IpVersion, dual: bool) -> !:
     assert(empty == 0 and empty_sender.equals(remote))
     try client.send_to("too long".bytes, destination)
     var truncated = false
-    discard(server.receive_from(data) catch failure:
+    _ = server.receive_from(data) catch failure:
         assert(failure.code == net.message_too_large)
         truncated = true
-        recover (0, net.SocketAddress()))
+        recover (0, net.SocketAddress())
     assert(truncated)
     try client.send_to("next".bytes, destination)
     let (next, next_sender) = try server.receive_from(data)
@@ -105,10 +105,10 @@ func endpoint_text() -> !:
             buffer[byte] = 85
             byte += 1
         var full = false
-        discard(address.render(buffer[..<expected[index].length - 1]) catch failure:
+        _ = address.render(buffer[..<expected[index].length - 1]) catch failure:
             assert(failure.code == io.full)
             full = true
-            recover "")
+            recover ""
         assert(full)
         for value in buffer:
             assert(value == 85)

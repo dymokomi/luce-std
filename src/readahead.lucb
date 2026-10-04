@@ -31,7 +31,7 @@ pub struct ReadAhead:
         return self.end - self.start
 
     ## Move up to `buffer.length` waiting bytes into `buffer`; the number moved.
-    pub mutating func take(buffer: u8[]) -> usize:
+    pub func take(buffer: u8[]) -> usize:
         let available = self.count()
         let count = buffer.length if buffer.length < available else available
         memory.copy(buffer, self.data[self.start..], count)
@@ -39,12 +39,12 @@ pub struct ReadAhead:
         return count
 
     ## Forget the waiting bytes, as a seek does.
-    pub mutating func clear():
+    pub func clear():
         self.start = 0
         self.end = 0
 
     ## Give the storage back.
-    pub mutating func release():
+    pub func release():
         if self.data.length > 0:
             free(self.data) in memory.heap
             var empty: u8[]
@@ -53,7 +53,7 @@ pub struct ReadAhead:
 
     ## Room for at least `minimum` more bytes after the waiting ones: the waiting bytes move
     ## to the front, and the storage grows, or shrinks back after a large read.
-    mutating func space(minimum: usize) -> u8[]!:
+    func space(minimum: usize) -> u8[]!:
         let waiting = self.count()
         if waiting == 0 and self.data.length > kept_capacity:
             self.release()
@@ -70,13 +70,13 @@ pub struct ReadAhead:
                 capacity = smallest
             with memory.heap:
                 if self.data.length == 0:
-                    self.data = try alloc u8[capacity]
+                    self.data = try new u8[capacity] ---
                 else:
                     self.data = try memory.grow(self.data, capacity)
         return self.data[self.end..]
 
     ## Read once from `source` into the space after the waiting bytes; false at the end.
-    mutating func fill(source: io.Reader, minimum: usize = smallest) -> bool!:
+    func fill(source: io.Reader, minimum: usize = smallest) -> bool!:
         let room = try self.space(minimum)
         let count = try source.read(room)
         self.end += count
@@ -84,7 +84,7 @@ pub struct ReadAhead:
 
     ## The next line, its `\n` or `\r\n` consumed and left out; at the end, the unfinished
     ## last line, or none when nothing is left.
-    pub mutating func line(source: io.Reader) -> str?!:
+    pub func line(source: io.Reader) -> str?!:
         var searched: usize = 0
         while true:
             let waiting = self.data[self.start..<self.end]
@@ -106,7 +106,7 @@ pub struct ReadAhead:
 
     ## Up to `maximum` bytes: with `whole`, as many as the source has up to `maximum`,
     ## otherwise what one read brings when nothing is waiting. Empty at the end.
-    pub mutating func bytes(source: io.Reader, maximum: usize, whole: bool) -> const u8[]!:
+    pub func bytes(source: io.Reader, maximum: usize, whole: bool) -> const u8[]!:
         if self.count() == 0 or whole:
             while self.count() < maximum:
                 let wanted = maximum - self.count()
@@ -122,7 +122,7 @@ pub struct ReadAhead:
     ## Up to `maximum` bytes as text, as `bytes` reads them, ending on a whole character: a
     ## character the read cut in two waits for the next read, and a maximum too small for
     ## the next character still answers it whole. Invalid UTF-8 is an error.
-    pub mutating func text(source: io.Reader, maximum: usize, whole: bool) -> str!:
+    pub func text(source: io.Reader, maximum: usize, whole: bool) -> str!:
         if maximum == 0:
             return ""
         var limit = maximum
@@ -161,7 +161,7 @@ struct Chunks: io.Reader:
     var data: const u8[]
     var step: usize
 
-    mutating func read(buffer: u8[]) -> usize!:
+    func read(buffer: u8[]) -> usize!:
         var count = self.step if self.step < self.data.length else self.data.length
         if count > buffer.length:
             count = buffer.length

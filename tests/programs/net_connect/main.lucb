@@ -52,7 +52,7 @@ pub func main(arguments: c.str[]) -> i32!:
     var connected = try net.Connection.connect(try listener.address(), try net.Deadline.after(1000000000), nonblocking = true)
     defer connected.destroy()
     assert(try connected.is_nonblocking())
-    discard(try listener.wait(deadline = try net.Deadline.after(1000000000)))
+    _ = try listener.wait(deadline = try net.Deadline.after(1000000000))
     var accepted = try listener.accept()
     defer accepted.destroy()
     assert(not (try accepted.is_nonblocking()))

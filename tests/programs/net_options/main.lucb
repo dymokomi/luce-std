@@ -61,10 +61,10 @@ pub func main(arguments: c.str[]) -> i32!:
     assert(try client.is_nonblocking())
     var bytes: u8[4]
     refused = false
-    discard(client.read(bytes) catch failure:
+    _ = client.read(bytes) catch failure:
         assert(failure.code == io.would_block)
         refused = true
-        recover 0)
+        recover 0
     assert(refused)
     try client.set_nonblocking(false)
     try io.write_all(&server, "data".bytes)
@@ -77,10 +77,10 @@ pub func main(arguments: c.str[]) -> i32!:
     try packet.set_nonblocking(true)
     assert(try packet.is_nonblocking())
     refused = false
-    discard(packet.receive_from(bytes) catch failure:
+    _ = packet.receive_from(bytes) catch failure:
         assert(failure.code == io.would_block)
         refused = true
-        recover (0, net.SocketAddress()))
+        recover (0, net.SocketAddress())
     assert(refused)
     try packet.set_nonblocking(false)
     assert(not (try packet.is_nonblocking()))
@@ -101,10 +101,10 @@ pub func main(arguments: c.str[]) -> i32!:
     assert(fault_hits() == 1)
     fault_arm(2)
     refused = false
-    discard(packet.receive_buffer() catch failure:
+    _ = packet.receive_buffer() catch failure:
         assert(failure.code == net.failed)
         refused = true
-        recover 0)
+        recover 0
     assert(refused and fault_hits() == 1)
     fault_arm(3)
     try packet.set_send_buffer(32768)

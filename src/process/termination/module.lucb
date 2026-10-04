@@ -54,7 +54,7 @@ pub struct Termination:
         return self.observation
 
     ## Remove the handler.
-    pub mutating func close():
+    pub func close():
         if not self.active:
             return
         termination_lock.lock()

@@ -33,7 +33,7 @@ pub struct Connection: Reader, Writer:
     ## Connection setup is nonblocking internally; the returned socket is blocking
     ## unless nonblocking=true. Failure closes the newly acquired descriptor. DNS
     ## resolution is separate and is not covered by this connection deadline.
-    pub static func connect(address: SocketAddress, deadline: Deadline = Deadline(), cancellation: sync.Cancellation*? = none, nonblocking: bool = false) -> Connection!:
+    pub func connect(address: SocketAddress, deadline: Deadline = Deadline(), cancellation: sync.Cancellation*? = none, nonblocking: bool = false) -> Connection!:
         try check_operation(deadline, cancellation)
         var raw: NativeAddress
         let length = try address.write_native(&raw)
@@ -49,7 +49,7 @@ pub struct Connection: Reader, Writer:
             let already_pending = 10037 if platform.windows else (37 if platform.macos else 114)
             if number != in_progress and number != already_pending and number != socket_interrupted:
                 error(socket_error(number), "the connection could not reach its peer")
-            discard(try wait_socket(fd, WaitInterest.write, deadline, cancellation))
+            _ = try wait_socket(fd, WaitInterest.write, deadline, cancellation)
             try check_operation(deadline, cancellation)
             let pending_error = try get_socket_integer(fd, socket_level, 4103 if platform.macos or platform.windows else 4)
             if pending_error != 0:
@@ -66,12 +66,12 @@ pub struct Connection: Reader, Writer:
     ## instead of ending the process. Make the connection while the peer is still there:
     ## macOS refuses the mark on a socket whose peer has already gone, and a write on
     ## such a connection answers `closed` without sending.
-    pub static func over(descriptor: platform.SocketDescriptor) -> Connection!:
+    pub func over(descriptor: platform.SocketDescriptor) -> Connection!:
         return Connection.from_socket(try SocketHandle.adopt(descriptor))
 
-    static func from_socket(acquired: SocketHandle) -> Connection:
+    func from_socket(acquired: SocketHandle) -> Connection:
         var connection = Connection(socket = acquired, guarded = false)
-        discard(connection.guard())
+        _ = connection.guard()
         return connection
 
     ## Query this connection's local IP endpoint, including its assigned port.
@@ -87,7 +87,7 @@ pub struct Connection: Reader, Writer:
     ## Use read shutdown only when input is no longer needed; treatment of queued
     ## input follows the host. Neither direction flushes user buffers; flush any
     ## io.BufferedWriter before shutting down writes.
-    pub mutating func shutdown(direction: ShutdownDirection = ShutdownDirection.both) -> !:
+    pub func shutdown(direction: ShutdownDirection = ShutdownDirection.both) -> !:
         let descriptor = try self.socket.require()
         if direction != ShutdownDirection.read and direction != ShutdownDirection.write and direction != ShutdownDirection.both:
             error(invalid_options, "unknown socket shutdown direction")
@@ -100,7 +100,7 @@ pub struct Connection: Reader, Writer:
     ## Whether a write cannot raise `SIGPIPE`. Linux asks with every `send`
     ## (`MSG_NOSIGNAL`); macOS marks the socket once (`SO_NOSIGPIPE`), and refuses the mark
     ## with `EINVAL` on a socket whose peer has disconnected.
-    mutating func guard() -> bool:
+    func guard() -> bool:
         let descriptor = self.socket.value else return false
         if self.guarded:
             return true
@@ -119,7 +119,7 @@ pub struct Connection: Reader, Writer:
     ## Send some bytes, retrying interruption. Use io.write_all for a complete
     ## payload and its optional progress output to resume after a later failure.
     ## An empty input makes no syscall. A closed peer never raises SIGPIPE.
-    pub mutating func write(data: const u8[]) -> usize!:
+    pub func write(data: const u8[]) -> usize!:
         let descriptor = try self.socket.require()
         if data.length == 0:
             return 0
@@ -137,14 +137,14 @@ pub struct Connection: Reader, Writer:
 
     ## Receive some bytes. For nonempty storage, zero is peer EOF; empty storage
     ## returns zero without probing the peer. This call does not fill the buffer.
-    pub mutating func read(buffer: u8[]) -> usize!:
+    pub func read(buffer: u8[]) -> usize!:
         if self.ahead.count() > 0:
-            discard(try self.socket.require())
+            _ = try self.socket.require()
             return self.ahead.take(buffer)
         return try self.receive(buffer)
 
     ## One receive from the socket itself, under the bytes read ahead.
-    mutating func receive(buffer: u8[]) -> usize!:
+    func receive(buffer: u8[]) -> usize!:
         let descriptor = try self.socket.require()
         if buffer.length == 0:
             return 0
@@ -160,13 +160,13 @@ pub struct Connection: Reader, Writer:
 
     ## The next line without its `\n` or `\r\n`; at the end of the stream the unfinished
     ## last line, and none after it. A line that is not UTF-8 is invalid_text.
-    pub mutating func read_line() -> str?!:
+    pub func read_line() -> str?!:
         var source = Received(connection = &self)
         return try self.ahead.line(&source)
 
     ## What arrives next, up to `maximum` bytes, waiting only while nothing has; empty when
     ## the peer has finished sending. The view lasts until the next read.
-    pub mutating func read_bytes(maximum: i64 = 65536) -> const u8[]!:
+    pub func read_bytes(maximum: i64 = 65536) -> const u8[]!:
         if maximum < 1:
             error(invalid_options, "a read needs a positive maximum")
         var source = Received(connection = &self)
@@ -174,23 +174,23 @@ pub struct Connection: Reader, Writer:
 
     ## What arrives next as text, as read_bytes reads it, ending on a whole character; a
     ## character cut in two waits for the next read. Text that is not UTF-8 is invalid_text.
-    pub mutating func read_text(maximum: i64 = 65536) -> str!:
+    pub func read_text(maximum: i64 = 65536) -> str!:
         if maximum < 1:
             error(invalid_options, "a read needs a positive maximum")
         var source = Received(connection = &self)
         return try self.ahead.text(&source, (usize)maximum, false)
 
     ## Send all of `data`.
-    pub mutating func write_bytes(data: const u8[]) -> !:
+    pub func write_bytes(data: const u8[]) -> !:
         try io.write_all(&self, data)
 
     ## Send all of `text`.
-    pub mutating func write_text(text: str) -> !:
+    pub func write_text(text: str) -> !:
         try io.write_all(&self, text.bytes)
 
     ## Disable Nagle coalescing when enabled. This is a latency policy, not a
     ## delivery guarantee; writes may still be buffered by the OS or network.
-    pub mutating func set_no_delay(enabled: bool) -> !:
+    pub func set_no_delay(enabled: bool) -> !:
         try set_socket_integer(try self.socket.require(), 6, 1, 1 if enabled else 0)
 
     ## Whether TCP no-delay (Nagle off) is set.
@@ -199,7 +199,7 @@ pub struct Connection: Reader, Writer:
 
     ## Enable OS TCP keepalive probes. Timing and retry defaults remain host
     ## policy; keepalive does not provide an application operation deadline.
-    pub mutating func set_keepalive(enabled: bool) -> !:
+    pub func set_keepalive(enabled: bool) -> !:
         try set_socket_integer(try self.socket.require(), socket_level, keepalive_option, 1 if enabled else 0)
 
     ## Whether keepalive probing is enabled.
@@ -214,21 +214,21 @@ pub struct Connection: Reader, Writer:
 
     ## Change O_NONBLOCK without changing other status flags. Descriptor aliases
     ## share this setting; synchronize changes with all users of this socket.
-    pub mutating func set_nonblocking(enabled: bool) -> !:
+    pub func set_nonblocking(enabled: bool) -> !:
         try set_nonblocking(try self.socket.require(), enabled)
         self.socket.nonblocking = enabled
 
     ## Whether the socket is in nonblocking mode.
     pub func is_nonblocking() -> bool!:
         if platform.windows:
-            discard(try self.socket.require())
+            _ = try self.socket.require()
             return self.socket.nonblocking
         else:
             return (try socket_status_flags(try self.socket.require()) & nonblocking_flag) != 0
 
     ## Request kernel buffering in bytes, not a guaranteed transfer size. The OS
     ## may cap or round the request; receive_buffer returns its reported setting.
-    pub mutating func set_receive_buffer(bytes: i32) -> !:
+    pub func set_receive_buffer(bytes: i32) -> !:
         try set_socket_buffer(try self.socket.require(), receive_buffer_option, bytes)
 
     ## The receive buffer size in bytes.
@@ -237,7 +237,7 @@ pub struct Connection: Reader, Writer:
 
     ## Request kernel buffering in bytes. Linux reports a doubled bookkeeping
     ## size; both hosts may adjust the request. This does not change user buffers.
-    pub mutating func set_send_buffer(bytes: i32) -> !:
+    pub func set_send_buffer(bytes: i32) -> !:
         try set_socket_buffer(try self.socket.require(), send_buffer_option, bytes)
 
     ## The send buffer size in bytes.
@@ -249,12 +249,12 @@ pub struct Connection: Reader, Writer:
         return self.socket.value
 
     ## Consume ownership before the OS call. Repeated close is safe even after failure.
-    pub mutating func close() -> !:
+    pub func close() -> !:
         self.ahead.release()
         try self.socket.close()
 
     ## Best-effort cleanup for unwinding; use close to observe delayed errors.
-    pub mutating func destroy():
+    pub func destroy():
         self.ahead.release()
         self.socket.destroy()
 
@@ -262,5 +262,5 @@ pub struct Connection: Reader, Writer:
 struct Received: Reader:
     var connection: Connection*
 
-    mutating func read(buffer: u8[]) -> usize!:
+    func read(buffer: u8[]) -> usize!:
         return try self.connection.receive(buffer)

@@ -28,7 +28,7 @@ Add the dependency with `luc add dymokomi/luce-std`, or in `package.prisma`:
 ```prisma
 def dependency "luce-std" {
     str owner = "dymokomi"
-    str version = "^0.3.0"
+    str version = "^0.4.0"
 }
 ```
 

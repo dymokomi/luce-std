@@ -34,30 +34,30 @@ pub func main(arguments: c.str[]) -> i32!:
     assert((try through_link.metadata()).inode == data.inode)
     try through_link.close()
     var link_rejected = false
-    discard(directory.open_file("file_link", follow_symlinks = false) catch failure:
+    _ = directory.open_file("file_link", follow_symlinks = false) catch failure:
         assert(failure.code == files.symlink_loop)
         link_rejected = true
         var empty: files.File
-        recover empty)
+        recover empty
     assert(link_rejected)
     assert((try directory.entry_metadata("link", false)).kind == files.FileKind.symlink)
     assert((try directory.entry_metadata("link")).kind == files.FileKind.directory)
     assert((try directory.entry_metadata("dangling", false)).kind == files.FileKind.symlink)
     var rejected = false
-    discard(directory.open_directory("link", false) catch failure:
+    _ = directory.open_directory("link", false) catch failure:
         assert(failure.code == files.not_directory or failure.code == files.symlink_loop)
         rejected = true
         var empty: files.Directory
-        recover empty)
+        recover empty
     assert(rejected)
     let link_path = try paths.join((str)arguments[2], "link")
     defer link_path.release()
     rejected = false
-    discard(files.Directory.open((c.str)link_path.value, false) catch failure:
+    _ = files.Directory.open((c.str)link_path.value, false) catch failure:
         assert(failure.code == files.not_directory or failure.code == files.symlink_loop)
         rejected = true
         var empty: files.Directory
-        recover empty)
+        recover empty
     assert(rejected)
     var child = try directory.open_directory("sub", false)
     defer child.destroy()
@@ -67,18 +67,18 @@ pub func main(arguments: c.str[]) -> i32!:
     try followed.close()
     try directory.close()
     var closed_rejected = false
-    discard(directory.open_file("data") catch failure:
+    _ = directory.open_file("data") catch failure:
         assert(failure.code == io.closed)
         closed_rejected = true
         var empty: files.File
-        recover empty)
+        recover empty
     assert(closed_rejected)
     assert((try child.entry_metadata("payload")).size == 7)
     rejected = false
-    discard(directory.entry_metadata("data") catch failure:
+    _ = directory.entry_metadata("data") catch failure:
         assert(failure.code == io.closed)
         rejected = true
-        recover data)
+        recover data
     assert(rejected)
     try child.close()
     print("ok directory-relative operations after rename")

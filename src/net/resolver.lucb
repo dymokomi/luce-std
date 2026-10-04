@@ -21,7 +21,7 @@ pub struct ResolvedAddresses:
 
     ## Release through the original allocator, regardless of the current context.
     ## Repeated destruction is safe; previously borrowed views become invalid.
-    pub mutating func destroy():
+    pub func destroy():
         if self.data.length > 0:
             let owner = self.owner else trap("resolved addresses lost their allocator")
             free(self.data) in owner
@@ -60,7 +60,7 @@ pub func resolve_all(host: c.str, port: u16, version: IpVersion? = none) -> Reso
     if count == 0:
         error(unknown_host, "the host has no usable stream address for the requested IP version")
     let owner = memory.allocator
-    let data = try alloc SocketAddress[count]
+    let data = try new SocketAddress[count] ---
     var used: usize = 0
     current = query.head
     while let entry = current:
@@ -75,7 +75,7 @@ struct ResolverQuery:
     var head: AddressInfo*?
     var family: i32
 
-    static func open(host: c.str, version: IpVersion?) -> ResolverQuery!:
+    func open(host: c.str, version: IpVersion?) -> ResolverQuery!:
         if platform.windows:
             try windows_socket_startup()
         var family: i32 = 0
@@ -91,7 +91,7 @@ struct ResolverQuery:
         let head = found else error(unknown_host, "unknown host")
         return ResolverQuery(head = head, family = family)
 
-    mutating func destroy():
+    func destroy():
         if let head = self.head:
             self.head = none
             freeaddrinfo(head)
@@ -102,7 +102,7 @@ func resolved_endpoint(entry: const AddressInfo*, port: u16, family: i32) -> Soc
         return none
     let raw = info_address(entry) else return none
     var address = decode_address(raw, entry.address_length) catch failure:
-        discard(failure)
+        _ = failure
         return none
     let matches = (entry.family == inet and address.ip.kind == IpVersion.ipv4) or (entry.family == inet6 and address.ip.kind == IpVersion.ipv6)
     if not matches:

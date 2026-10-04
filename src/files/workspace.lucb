@@ -24,8 +24,8 @@ let get_path: i32 = 50
 pub func canonical(path: c.str) -> interop.Owned[str]!:
     if platform.windows:
         let handle = try windows_path_handle(path, true)
-        defer discard(CloseHandle(handle))
-        let wide = try alloc u16[32768]
+        defer _ = CloseHandle(handle)
+        let wide = try new u16[32768] ---
         defer free(wide)
         let count = GetFinalPathNameByHandleW(handle, wide.data, (u32)wide.length, 0)
         if count == 0 or count >= wide.length:
@@ -49,7 +49,7 @@ pub func canonical(path: c.str) -> interop.Owned[str]!:
         # answer or failure stands)
         let descriptor = posix_open(path, event_only)
         if descriptor >= 0:
-            defer discard(close(descriptor))
+            defer _ = close(descriptor)
             var buffer: u8[1024] = ---
             if fcntl(descriptor, get_path, &buffer[0]) >= 0:
                 var length: usize = 0
@@ -121,7 +121,7 @@ pub struct TemporaryDirectory:
         with memory.heap:
             name = strings.copy(created.value) catch failure:
                 remove_directory((c.str)created.value) catch cleanup:
-                    discard(cleanup)
+                    _ = cleanup
                 error(failure.code, failure.message)
         self.name = name
 
@@ -129,23 +129,23 @@ pub struct TemporaryDirectory:
     pub func path() -> str:
         return self.name
 
-    mutating func release_name():
+    func release_name():
         if self.name.length > 0:
             with memory.heap:
                 strings.release(self.name)
             self.name = ""
 
     ## Remove the directory tree; reports the first failure.
-    pub mutating func close() -> !:
+    pub func close() -> !:
         if self.name.length == 0:
             return
         try remove_tree((c.str)self.name)
         self.release_name()
 
     ## Best-effort removal, releasing memory regardless.
-    pub mutating func destroy():
+    pub func destroy():
         self.close() catch failure:
-            discard(failure)
+            _ = failure
         self.release_name()
 
 ## The interop type of a temporary directory.

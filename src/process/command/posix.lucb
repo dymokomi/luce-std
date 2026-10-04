@@ -12,7 +12,7 @@ extern func setpgid(pid: i32, group: i32) -> i32
 extern func open(path: c.str, flags: i32, ...) -> i32
 
 func stop_command(pid: i32):
-    discard(kill(-pid, 9))
+    _ = kill(-pid, 9)
     terminate(pid)
 
 func capture_command(pid: i32, out: Capture*, err: Capture*, state: CommandState*) -> i32!:

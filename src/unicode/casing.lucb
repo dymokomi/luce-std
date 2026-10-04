@@ -32,7 +32,7 @@ func cased(text: str, kind: u8, turkic: bool, max_bytes: usize?) -> str!:
     var empty: u8[]
     let length = try case_pass(text, kind, turkic, empty, false, max_bytes)
     let capacity = length +? 1 else error(memory.exhausted, "the cased text size overflowed")
-    let output = try alloc u8[capacity]
+    let output = try new u8[capacity] ---
     errdefer free(output)
     let written = try case_pass(text, kind, turkic, output[..<length], true, max_bytes)
     if written != length:
@@ -60,7 +60,7 @@ func case_pass(text: str, kind: u8, turkic: bool, output: u8[], writing: bool, m
                 if next > output.length:
                     error(utf8.invalid_sequence, "the text changed during Unicode casing")
                 let encoded = utf8.encode(value, output[position..<next]) else trap("a Unicode scalar did not fit its encoded length")
-                discard(encoded)
+                _ = encoded
             position = next
         # A character can be both Cased and Case_Ignorable. Context skips it in
         # that case, matching the default casing rule's Case_Ignorable sequence.

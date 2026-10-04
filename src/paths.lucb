@@ -158,21 +158,21 @@ func join_text(left: str, right: str) -> str!:
 ## The join rule, appended to a caller's buffer. Shared by `join_into`.
 func join_write(b: core.FormatBuffer*, left: str, right: str):
     if is_absolute(right) or drive_prefix(right) or left.length == 0:
-        discard(core.format_put(b, right.bytes.data, right.length))
+        _ = core.format_put(b, right.bytes.data, right.length)
         return
     if platform.windows and is_rooted(right):
         let prefix = root(left)
         var end = prefix.length
         while end > 0 and separator(prefix.bytes[end - 1]):
             end -= 1
-        discard(core.format_put(b, prefix.bytes.data, end))
-        discard(core.format_put(b, right.bytes.data, right.length))
+        _ = core.format_put(b, prefix.bytes.data, end)
+        _ = core.format_put(b, right.bytes.data, right.length)
         return
     let drive_only = drive_prefix(left) and left.length == 2
-    discard(core.format_put(b, left.bytes.data, left.length))
+    _ = core.format_put(b, left.bytes.data, left.length)
     if not (separator(left.bytes[left.length - 1]) or drive_only):
-        discard(core.format_put(b, "/".bytes.data, 1))
-    discard(core.format_put(b, right.bytes.data, right.length))
+        _ = core.format_put(b, "/".bytes.data, 1)
+    _ = core.format_put(b, right.bytes.data, right.length)
 
 ## Join into `buffer` without allocating, returning a view of it, or "" when it does
 ## not fit. Same rule as `join`, but the caller owns the storage — a stack array or an
@@ -195,9 +195,9 @@ pub func join_into(buffer: u8[], left: str, right: str) -> str:
 ## text, as `join`'s does.
 pub func normalize(path: str) -> interop.Owned[str]!:
     let prefix = root(path)
-    let buffer = try alloc u8[path.length + 2]
+    let buffer = try new u8[path.length + 2] ---
     defer free(buffer)
-    let starts = try alloc usize[path.length + 1]
+    let starts = try new usize[path.length + 1] ---
     defer free(starts)
     var used = prefix.length
     for index in 0..<used: buffer[index] = prefix.bytes[index]

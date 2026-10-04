@@ -17,7 +17,7 @@ struct SocketHandle:
 
     ## Linux sets close-on-exec atomically with creation. macOS requires a
     ## separate fcntl call; callers must serialize concurrent fork/exec there.
-    static func create(kind: i32, version: IpVersion) -> SocketHandle!:
+    func create(kind: i32, version: IpVersion) -> SocketHandle!:
         if platform.windows:
             try windows_socket_startup()
             let descriptor = WSASocketW(inet if version == IpVersion.ipv4 else inet6, kind, 0, none, 0, 128)
@@ -37,7 +37,7 @@ struct SocketHandle:
 
     ## Ownership transfers on entry, including failure. Preserve existing
     ## descriptor flags and close once if setting close-on-exec fails.
-    static func adopt(descriptor: platform.SocketDescriptor) -> SocketHandle!:
+    func adopt(descriptor: platform.SocketDescriptor) -> SocketHandle!:
         if descriptor < 0:
             error(closed, "the socket descriptor is invalid")
         if platform.windows:
@@ -54,7 +54,7 @@ struct SocketHandle:
                 flags = fcntl(descriptor, get_descriptor_flags)
             if flags < 0:
                 let code = socket_error(socket_errno())
-                discard(close(descriptor))
+                _ = close(descriptor)
                 error(code, "socket descriptor flags could not be queried")
             if (flags & descriptor_close_on_exec) == 0:
                 var result = fcntl(descriptor, set_descriptor_flags, flags | descriptor_close_on_exec)
@@ -62,7 +62,7 @@ struct SocketHandle:
                     result = fcntl(descriptor, set_descriptor_flags, flags | descriptor_close_on_exec)
                 if result < 0:
                     let code = socket_error(socket_errno())
-                    discard(close(descriptor))
+                    _ = close(descriptor)
                     error(code, "the socket could not be marked close-on-exec")
             return SocketHandle(value = descriptor)
 
@@ -70,15 +70,15 @@ struct SocketHandle:
         let descriptor = self.value else error(closed, "the socket is closed")
         return descriptor
 
-    mutating func close() -> !:
+    func close() -> !:
         let descriptor = self.value else return
         self.value = none
         if close(descriptor) != 0:
             error(socket_error(socket_errno()), "the socket could not be closed")
 
-    mutating func destroy():
+    func destroy():
         self.close() catch failure:
-            discard(failure)
+            _ = failure
 
 func socket_address(descriptor: platform.SocketDescriptor, peer: bool = false) -> SocketAddress!:
     var raw: NativeAddress

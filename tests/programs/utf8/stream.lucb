@@ -64,10 +64,10 @@ func malformed(corpus: const u8[]) -> !:
             assert(decoder.is_failed() and not decoder.is_pending())
             let expected_code = utf8.invalid_sequence if kind == 1 else utf8.incomplete_sequence
             rejected = false
-            discard(decoder.push('A') catch failure:
+            _ = decoder.push('A') catch failure:
                 assert(failure.code == expected_code)
                 rejected = true
-                recover none)
+                recover none
             assert(rejected)
             rejected = false
             decoder.finish() catch failure:

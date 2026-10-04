@@ -19,7 +19,7 @@ pub let depth_limit: ErrorCode = ErrorCode.package(34)
 ## it to retain it. Error-message storage must outlive the walk, as for other
 ## borrowed Base errors. Callbacks run serially in depth-first enumeration order.
 pub interface WalkVisitor:
-    mutating func visit(path: str, info: Metadata, depth: usize) -> bool!
+    func visit(path: str, info: Metadata, depth: usize) -> bool!
 
 ## Visit root at depth zero, then its descendants, without following directory
 ## symlinks below root. Root uses ordinary OS path resolution. Labels are built
@@ -83,7 +83,7 @@ struct Collected: WalkVisitor:
     var names: owned.Gathered
     var skipped: usize
 
-    mutating func visit(path: str, info: Metadata, depth: usize) -> bool!:
+    func visit(path: str, info: Metadata, depth: usize) -> bool!:
         if depth > 0:
             try self.names.add((str)path.bytes[self.skipped..])
         return true
@@ -103,7 +103,7 @@ struct WalkState:
     var path: strings.Builder
     var owner: memory.Allocator
 
-    static func start(root: c.str, expected: Metadata, owner: memory.Allocator) -> WalkState!:
+    func start(root: c.str, expected: Metadata, owner: memory.Allocator) -> WalkState!:
         var directory = try Directory.open(root)
         errdefer directory.destroy()
         let info = try directory.metadata()
@@ -113,7 +113,7 @@ struct WalkState:
             var path = try strings.Builder.create(64)
             errdefer path.destroy()
             try path.put((str)root)
-            let frames = try alloc WalkFrame[8]
+            let frames = try new WalkFrame[8] ---
             frames[0] = WalkFrame(directory = directory, device = info.device, inode = info.inode,
                                   path_length = path.view().length)
             return WalkState(frames = frames, count = 1, path = path, owner = owner)
@@ -126,11 +126,11 @@ struct WalkState:
 
     ## Ownership transfers only after growth succeeds. The caller closes child
     ## on failure; after success this frame is its sole owner.
-    mutating func push(child: Directory, info: Metadata) -> !:
+    func push(child: Directory, info: Metadata) -> !:
         if self.count == self.frames.length:
             let capacity = self.frames.length *? 2 else error(memory.exhausted, "the traversal stack is too large")
             with self.owner:
-                let grown = try alloc WalkFrame[capacity]
+                let grown = try new WalkFrame[capacity] ---
                 memory.copy(grown, self.frames, self.count)
                 free(self.frames)
                 self.frames = grown
@@ -138,7 +138,7 @@ struct WalkState:
                                             path_length = self.path.view().length)
         self.count += 1
 
-    mutating func pop() -> !:
+    func pop() -> !:
         let index = self.count - 1
         self.frames[index].directory.close() catch failure:
             self.count -= 1
@@ -147,7 +147,7 @@ struct WalkState:
         if self.count > 0:
             try self.path.truncate(self.frames[self.count - 1].path_length)
 
-    mutating func destroy():
+    func destroy():
         while self.count > 0:
             self.count -= 1
             self.frames[self.count].directory.destroy()

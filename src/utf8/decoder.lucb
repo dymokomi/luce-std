@@ -25,7 +25,7 @@ pub struct Decoder:
     ## continuation bytes immediately, including prefixes that can only encode
     ## an overlong value, surrogate, or value above U+10FFFF. The failing byte is
     ## consumed; no replacement scalar is emitted and input is never replayed.
-    pub mutating func push(byte: u8) -> char?!:
+    pub func push(byte: u8) -> char?!:
         try self.check_failure()
         if self.remaining == 0:
             if byte < 128:
@@ -67,7 +67,7 @@ pub struct Decoder:
     ## Validate EOF. Empty streams and complete scalars succeed; an unfinished
     ## scalar reports incomplete_sequence. Success is idempotent and does not
     ## seal the decoder: more bytes may follow when the caller resumes a stream.
-    pub mutating func finish() -> !:
+    pub func finish() -> !:
         try self.check_failure()
         if self.remaining != 0:
             self.failure = 2
@@ -83,7 +83,7 @@ pub struct Decoder:
         return self.failure != 0
 
     ## Discard any partial scalar and latched error; begin an independent stream.
-    pub mutating func reset():
+    pub func reset():
         self.scalar = 0
         self.remaining = 0
         self.minimum = 0

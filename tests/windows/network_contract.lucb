@@ -46,10 +46,10 @@ func udp(version: net.IpVersion, dual: bool) -> !:
     assert(empty == 0 and empty_sender.equals(remote))
     try client.send_to("too long".bytes, destination)
     var truncated = false
-    discard(server.receive_from(data) catch failure:
+    _ = server.receive_from(data) catch failure:
         assert(failure.code == net.message_too_large)
         truncated = true
-        recover (0, net.SocketAddress()))
+        recover (0, net.SocketAddress())
     assert(truncated)
     try client.send_to("next".bytes, destination)
     let (next, next_sender) = try server.receive_from(data)
@@ -60,14 +60,14 @@ func deadline_contract() -> !:
     defer listener.destroy()
     try listener.set_nonblocking(true)
     var expired = false
-    discard(listener.wait(deadline = try net.Deadline.after(10000000)) catch failure:
+    _ = listener.wait(deadline = try net.Deadline.after(10000000)) catch failure:
         assert(failure.code == net.timed_out)
         expired = true
-        recover net.Readiness())
+        recover net.Readiness()
     assert(expired)
     var client = try net.Connection.connect(try listener.address(), deadline = try net.Deadline.after(1000000000), nonblocking = true)
     defer client.destroy()
-    discard(try listener.wait(deadline = try net.Deadline.after(1000000000)))
+    _ = try listener.wait(deadline = try net.Deadline.after(1000000000))
     var peer = try listener.accept(nonblocking = true)
     defer peer.destroy()
     assert(try peer.is_nonblocking())
@@ -80,18 +80,18 @@ func deadline_contract() -> !:
     var reader = try net.DeadlineStream.over(&peer, try net.Deadline.after(10000000))
     var data: u8[4]
     expired = false
-    discard(reader.read(data) catch failure:
+    _ = reader.read(data) catch failure:
         assert(failure.code == net.timed_out)
         expired = true
-        recover 0)
+        recover 0
     assert(expired)
     var cancellation: sync.Cancellation
     cancellation.request()
     var cancelled = false
-    discard(peer.wait(cancellation = &cancellation) catch failure:
+    _ = peer.wait(cancellation = &cancellation) catch failure:
         assert(failure.code == net.cancelled)
         cancelled = true
-        recover net.Readiness())
+        recover net.Readiness()
     assert(cancelled)
     try io.write_all(&client, "ping".bytes)
     var fresh = try net.DeadlineStream.over(&peer, try net.Deadline.after(1000000000))

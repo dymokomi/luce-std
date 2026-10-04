@@ -76,14 +76,14 @@ func quote_windows(command: u8[], used: usize*, argument: str):
             continue
         let count = slashes * 2 + 1 if byte == '"' else slashes
         for index in 0..<count:
-            discard(index)
+            _ = index
             command[*used] = 92
             *used += 1
         command[*used] = byte
         *used += 1
         slashes = 0
     for index in 0..<slashes * 2:
-        discard(index)
+        _ = index
         command[*used] = 92
         *used += 1
     command[*used] = '"'
@@ -102,7 +102,7 @@ func capture_windows(file: void*) -> str!:
     let length = win_tell(file)
     if length < 0 or win_seek(file, 0, 0) != 0:
         error(failed, "a child stream could not be read")
-    let bytes = try alloc u8[(usize)length + 1]
+    let bytes = try new u8[(usize)length + 1] ---
     if length > 0 and fread(bytes.data, 1, (usize)length, file) != (usize)length:
         free(bytes)
         error(failed, "a child stream could not be read")
@@ -116,7 +116,7 @@ func temporary_windows() -> void*!:
     if count == 0 or (usize)count + 33 >= path.length:
         error(failed, "the child temporary directory is unavailable")
     for attempt in 0..<128:
-        discard(attempt)
+        _ = attempt
         var random: u8[16]
         try os.random_bytes(random)
         let digits = "0123456789abcdef".bytes
@@ -130,11 +130,11 @@ func temporary_windows() -> void*!:
             error(failed, "a child capture file could not be created")
         let descriptor = win_open_handle((isize)handle, 32898)
         if descriptor < 0:
-            discard(CloseHandle(handle))
+            _ = CloseHandle(handle)
             error(failed, "a child capture descriptor could not be created")
         if let stream = win_fdopen(descriptor, "w+b"):
             return stream
-        discard(win_close(descriptor))
+        _ = win_close(descriptor)
         error(failed, "a child capture stream could not be created")
     error(failed, "no unused child capture name was found")
 
@@ -160,11 +160,11 @@ func run_windows(program: c.str, arguments: const c.str[], directory: c.str, env
         let width = ((str)argument).length *? 2 else error(failed, "the process command is too long")
         room = room +? width else error(failed, "the process command is too long")
         room = room +? 3 else error(failed, "the process command is too long")
-    let command = try alloc u8[room]
+    let command = try new u8[room] ---
     defer free(command)
     var used: usize = 0
     let spelled_room = name.length +? extra else error(failed, "the process command is too long")
-    let spelled = try alloc u8[spelled_room]
+    let spelled = try new u8[spelled_room] ---
     defer free(spelled)
     var length: usize = 0
     if prefixed:
@@ -196,19 +196,19 @@ func run_windows(program: c.str, arguments: const c.str[], directory: c.str, env
         selected_environment = try environment_windows(overrides)
     defer release_storage(selected_environment)
     let output = try temporary_windows()
-    defer discard(fclose(output))
+    defer _ = fclose(output)
     let errors = try temporary_windows()
-    defer discard(fclose(errors))
+    defer _ = fclose(errors)
     let input = fopen("NUL", "rb") else error(failed, "the child input could not be opened")
-    defer discard(fclose(input))
+    defer _ = fclose(input)
     let out_handle = try inherit_file(output)
-    defer discard(CloseHandle(out_handle))
+    defer _ = CloseHandle(out_handle)
     let err_handle = try inherit_file(errors)
-    defer discard(CloseHandle(err_handle))
+    defer _ = CloseHandle(err_handle)
     let in_handle = try inherit_file(input)
-    defer discard(CloseHandle(in_handle))
+    defer _ = CloseHandle(in_handle)
     var startup: WinStartup
-    startup.size = (u32)sizeof(WinStartup)
+    startup.size = (u32)memory.size_of(WinStartup)
     startup.flags = 256
     startup.input = in_handle
     startup.output = out_handle
@@ -220,13 +220,13 @@ func run_windows(program: c.str, arguments: const c.str[], directory: c.str, env
         error(failed, "the process could not be started")
     let process = child.process else trap("CreateProcess returned no process")
     let child_thread = child.thread else trap("CreateProcess returned no thread")
-    defer discard(CloseHandle(process))
-    defer discard(CloseHandle(child_thread))
+    defer _ = CloseHandle(process)
+    defer _ = CloseHandle(child_thread)
     if let observer = control:
         try monitor_windows(process, child_thread, output, errors, observer)
     elif WaitForSingleObject(process, 4294967295) != 0:
-        discard(TerminateProcess(process, 1))
-        discard(WaitForSingleObject(process, 4294967295))
+        _ = TerminateProcess(process, 1)
+        _ = WaitForSingleObject(process, 4294967295)
         error(failed, "waiting for the process failed")
     var code: u32 = 0
     if GetExitCodeProcess(process, &code) == 0:

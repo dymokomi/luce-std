@@ -54,10 +54,10 @@ pub func main(arguments: c.str[]) -> i32!:
         assert(target.value == "hard")
         assert((try files.metadata("symbolic", false)).kind == files.FileKind.symlink)
         var refused = false
-        discard(directory.open_file("symbolic", follow_symlinks = false) catch failure:
+        _ = directory.open_file("symbolic", follow_symlinks = false) catch failure:
             assert(failure.code == files.symlink_loop)
             refused = true
-            recover files.File())
+            recover files.File()
         assert(refused)
         try files.remove_file("symbolic")
         print("ok symbolic links and no-follow")

@@ -16,7 +16,7 @@ pub struct Datagram:
 
     ## IPv6 sockets are IPv6-only by default. Set ipv6_only=false to permit
     ## mapped IPv4 packets; it has no effect when binding an IPv4 address.
-    pub static func bind(address: SocketAddress, ipv6_only: bool = true) -> Datagram!:
+    pub func bind(address: SocketAddress, ipv6_only: bool = true) -> Datagram!:
         var raw: NativeAddress
         let length = try address.write_native(&raw)
         var acquired = try SocketHandle.create(datagram, address.ip.kind)
@@ -104,21 +104,21 @@ pub struct Datagram:
 
     ## Change O_NONBLOCK without changing other status flags. Descriptor aliases
     ## share this setting; synchronize changes with all users of this socket.
-    pub mutating func set_nonblocking(enabled: bool) -> !:
+    pub func set_nonblocking(enabled: bool) -> !:
         try set_nonblocking(try self.socket.require(), enabled)
         self.socket.nonblocking = enabled
 
     ## Whether the socket is in nonblocking mode.
     pub func is_nonblocking() -> bool!:
         if platform.windows:
-            discard(try self.socket.require())
+            _ = try self.socket.require()
             return self.socket.nonblocking
         else:
             return (try socket_status_flags(try self.socket.require()) & nonblocking_flag) != 0
 
     ## Request kernel buffering in bytes, not a guaranteed transfer size. The OS
     ## may cap or round the request; receive_buffer returns its reported setting.
-    pub mutating func set_receive_buffer(bytes: i32) -> !:
+    pub func set_receive_buffer(bytes: i32) -> !:
         try set_socket_buffer(try self.socket.require(), receive_buffer_option, bytes)
 
     ## The receive buffer size in bytes.
@@ -127,7 +127,7 @@ pub struct Datagram:
 
     ## Request kernel buffering in bytes. Linux reports a doubled bookkeeping
     ## size; both hosts may adjust the request. This does not change user buffers.
-    pub mutating func set_send_buffer(bytes: i32) -> !:
+    pub func set_send_buffer(bytes: i32) -> !:
         try set_socket_buffer(try self.socket.require(), send_buffer_option, bytes)
 
     ## The send buffer size in bytes.
@@ -139,9 +139,9 @@ pub struct Datagram:
         return self.socket.value
 
     ## Consume ownership before the OS call. Repeated close is safe even after failure.
-    pub mutating func close() -> !:
+    pub func close() -> !:
         try self.socket.close()
 
     ## Best-effort cleanup for unwinding; use close to observe delayed errors.
-    pub mutating func destroy():
+    pub func destroy():
         self.socket.destroy()

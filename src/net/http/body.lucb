@@ -42,7 +42,7 @@ pub struct HttpBodyDecoder:
     var failure: ErrorCode
 
     ## A decoder for a body of `kind`.
-    pub static func create(kind: HttpBodyKind, length: u64 = 0, maximum: u64 = 1073741824) -> HttpBodyDecoder!:
+    pub func create(kind: HttpBodyKind, length: u64 = 0, maximum: u64 = 1073741824) -> HttpBodyDecoder!:
         if kind == HttpBodyKind.tunnel:
             error(http_unsupported, "a tunnel has no HTTP body decoder")
         if kind == HttpBodyKind.fixed and length > maximum:
@@ -59,7 +59,7 @@ pub struct HttpBodyDecoder:
         return not self.failed and self.phase == 6
 
     ## Decode one step from `data`.
-    pub mutating func consume(data: const u8[]) -> HttpBodyStep!:
+    pub func consume(data: const u8[]) -> HttpBodyStep!:
         if self.failed:
             error(self.failure, "HTTP body decoder has failed")
         return self.advance(data) catch problem:
@@ -68,7 +68,7 @@ pub struct HttpBodyDecoder:
             error(problem.code, problem.message)
 
     ## Assert the body ended cleanly.
-    pub mutating func finish() -> !:
+    pub func finish() -> !:
         if self.failed:
             error(self.failure, "HTTP body decoder has failed")
         if self.kind == HttpBodyKind.until_eof:
@@ -78,7 +78,7 @@ pub struct HttpBodyDecoder:
             self.failure = io.unexpected_eof
             error(io.unexpected_eof, "HTTP body ended before its framing completed")
 
-    mutating func advance(data: const u8[]) -> HttpBodyStep!:
+    func advance(data: const u8[]) -> HttpBodyStep!:
         var at: usize = 0
         while at < data.length and self.phase != 6:
             if self.phase == 0 or self.phase == 2:

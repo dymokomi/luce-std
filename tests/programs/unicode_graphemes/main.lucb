@@ -44,17 +44,17 @@ pub func main(arguments: c.str[]) -> i32!:
         for value in 128..<256:
             byte[0] = (u8)value
             var rejected = false
-            discard(unicode.GraphemeIterator.over((str)byte) catch failure:
+            _ = unicode.GraphemeIterator.over((str)byte) catch failure:
                 assert(failure.code == utf8.invalid_sequence)
                 rejected = true
-                recover unicode.GraphemeIterator())
+                recover unicode.GraphemeIterator()
             assert(rejected)
         var malformed: u8[4] = [237, 160, 128, 65]
         var rejected = false
-        discard(unicode.GraphemeIterator.over((str)malformed) catch failure:
+        _ = unicode.GraphemeIterator.over((str)malformed) catch failure:
             assert(failure.code == utf8.invalid_sequence)
             rejected = true
-            recover unicode.GraphemeIterator())
+            recover unicode.GraphemeIterator()
         assert(rejected)
     print("ok Unicode extended grapheme boundaries")
     return 0

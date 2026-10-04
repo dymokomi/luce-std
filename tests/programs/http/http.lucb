@@ -140,7 +140,7 @@ pub func content_type(path: str) -> str:
 pub func respond(connection: net.Connection*, status: u32, kind: str, body: const u8[], keep_alive: bool) -> !:
     var head: u8[512]
     let connection_header = "keep-alive" if keep_alive else "close"
-    let text = try format(head, f"HTTP/1.1 {status} {reason(status)}\r\nContent-Type: {kind}\r\nContent-Length: {body.length}\r\nConnection: {connection_header}\r\nServer: luce-base\r\n\r\n")
+    let text = try strings.format(head, f"HTTP/1.1 {status} {reason(status)}\r\nContent-Type: {kind}\r\nContent-Length: {body.length}\r\nConnection: {connection_header}\r\nServer: luce-base\r\n\r\n")
     try write_all(connection, text.bytes)
     if body.length > 0:
         try write_all(connection, body)
@@ -182,7 +182,7 @@ test "a request without a version is rejected":
     let parsed = parse(text.bytes, end) catch failure:
         rejected = failure.code == bad_request
         recover empty_request(text.bytes[..<0])
-    discard(parsed.method.length)
+    _ = parsed.method.length
     assert(rejected, "the request should have been rejected")
 
 test "content types follow the extension":

@@ -21,7 +21,7 @@ pub struct TemporaryFile: io.Reader, io.Writer:
     ## filtered by umask. The OS supplies 128 random filename bits per attempt;
     ## collisions retry up to 128 times. Entropy acquisition may block. No
     ## existing entry is opened or overwritten, and failure retains no allocation.
-    pub static func create(directory: c.str, permissions: u32 = 384) -> TemporaryFile!:
+    pub func create(directory: c.str, permissions: u32 = 384) -> TemporaryFile!:
         let candidate = try paths.join((str)directory, ".luce-00000000000000000000000000000000")
         defer candidate.release()
         let name = try heap_text(candidate.value)
@@ -50,19 +50,19 @@ pub struct TemporaryFile: io.Reader, io.Writer:
         return self.name else ""
 
     ## Read into `buffer`; the bytes read.
-    pub mutating func read(buffer: u8[]) -> usize!:
+    pub func read(buffer: u8[]) -> usize!:
         return try self.file.read(buffer)
 
     ## Write `data`; the bytes written.
-    pub mutating func write(data: const u8[]) -> usize!:
+    pub func write(data: const u8[]) -> usize!:
         return try self.file.write(data)
 
     ## Move the read/write offset and report the new one.
-    pub mutating func seek(offset: i64, origin: SeekOrigin = SeekOrigin.start) -> i64!:
+    pub func seek(offset: i64, origin: SeekOrigin = SeekOrigin.start) -> i64!:
         return try self.file.seek(offset, origin)
 
     ## Flush the file's data to the device.
-    pub mutating func sync() -> !:
+    pub func sync() -> !:
         try self.file.sync()
 
     ## Close successfully, then rename over destination. A close failure does
@@ -72,18 +72,18 @@ pub struct TemporaryFile: io.Reader, io.Writer:
     ## With synchronize=true, flush the temporary data before publication and
     ## request write-through rename semantics on Windows. Other callers must sync
     ## data and the destination directory themselves when those guarantees matter.
-    pub mutating func publish(destination: c.str, replace: bool = true, synchronize: bool = false) -> !:
+    pub func publish(destination: c.str, replace: bool = true, synchronize: bool = false) -> !:
         let name = self.name else error(io.closed, "the temporary file has no owned pathname")
         try self.file.close()
         try rename((c.str)name, destination, replace, synchronize)
         self.release_name()
 
-    mutating func release_name():
+    func release_name():
         if let name = self.name:
             release_heap_text(name)
             self.name = none
 
-    mutating func remove_name() -> !:
+    func remove_name() -> !:
         let name = self.name else return
         remove_file((c.str)name) catch failure:
             if failure.code != missing:
@@ -93,18 +93,18 @@ pub struct TemporaryFile: io.Reader, io.Writer:
     ## Close and remove the temporary entry. Report the first failure; still
     ## attempt removal after a close failure. A failed removal retains path()
     ## for retry. Repeated successful discard calls are safe.
-    pub mutating func dispose() -> !:
+    pub func dispose() -> !:
         self.file.close() catch failure:
             self.remove_name() catch cleanup:
-                discard(cleanup)
+                _ = cleanup
             error(failure.code, failure.message)
         try self.remove_name()
 
     ## Best-effort cleanup, releasing pathname memory even if the OS refuses
     ## removal. Such a refusal can leave a file behind; use discard to observe it.
-    pub mutating func destroy():
+    pub func destroy():
         self.dispose() catch failure:
-            discard(failure)
+            _ = failure
         self.release_name()
 
 ## A NUL-terminated copy of `text` on the process heap, which any thread may release.
@@ -142,7 +142,7 @@ struct Replacement:
     var temporary: TemporaryFile
     var synchronize: bool
 
-    static func prepare(path: c.str, permissions: u32, synchronize: bool) -> Replacement!:
+    func prepare(path: c.str, permissions: u32, synchronize: bool) -> Replacement!:
         let parent_name = try strings.copy(paths.directory((str)path))
         defer strings.release(parent_name)
         var parent: File
@@ -152,7 +152,7 @@ struct Replacement:
         let temporary = try TemporaryFile.create((c.str)parent_name, permissions)
         return Replacement(parent = parent, temporary = temporary, synchronize = synchronize)
 
-    mutating func finish(path: c.str, replace: bool, published: bool*?) -> !:
+    func finish(path: c.str, replace: bool, published: bool*?) -> !:
         if self.synchronize:
             try self.temporary.sync()
         try self.temporary.publish(path, replace, self.synchronize)
@@ -162,6 +162,6 @@ struct Replacement:
             try self.parent.sync()
             try self.parent.close()
 
-    mutating func destroy():
+    func destroy():
         self.temporary.destroy()
         self.parent.destroy()

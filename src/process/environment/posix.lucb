@@ -38,7 +38,7 @@ func environment_posix(overrides: const c.str[], inherited: (c.str?)*) -> (c.str
         count += 1
     let capacity = count +? overrides.length else error(failed, "the environment is too large")
     let size = capacity +? 1 else error(failed, "the environment is too large")
-    let result = try alloc (c.str?)[size]
+    let result = try new (c.str?)[size] ---
     errdefer free(result)
     var used: usize = 0
     for index in 0..<count:
