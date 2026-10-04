@@ -8,9 +8,7 @@
 #
 #==============================================================================================
 
-import interop
 import thread
-import strings
 import utf8
 
 struct CommandState:
@@ -43,7 +41,8 @@ func command_text(text: str) -> str!:
 
 ## Launch without invoking a shell. `arguments` excludes the program name.
 ## Output merges stdout/stderr in observation order, bounded by output_limit.
-## close cancels and joins; poll with is_finished without blocking the UI.
+## wait blocks until the program ends; poll with is_finished without blocking the UI;
+## close cancels a program still running, then joins.
 pub struct Command:
     var storage: CommandState*?
     var worker: thread.Handle?
@@ -117,6 +116,18 @@ pub struct Command:
             return try interop.copy_text("")
         return try interop.copy_text(self.state().failure)
 
+    ## Block until the program ends, then its exit code. A program that could not be
+    ## started, outgrew its output limit or was cancelled is a failure.
+    pub mutating func wait() -> i64!:
+        let state = self.state()
+        if let worker = self.worker:
+            self.worker = none
+            worker.join() catch failure:
+                trap("a command worker could not be joined")
+        if state.code < 0:
+            error(failed, state.failure if state.failure.length > 0 else "the command did not finish")
+        return state.code
+
     ## Request cancellation of the child process tree.
     pub func cancel():
         if let state = self.storage:
@@ -124,11 +135,11 @@ pub struct Command:
 
     ## Wait for the worker, reap the child, and release resources.
     pub mutating func close():
-        let worker = self.worker else return
-        self.cancel()
-        worker.join() catch failure:
-            trap("a command worker could not be joined")
-        self.worker = none
+        if let worker = self.worker:
+            self.cancel()
+            worker.join() catch failure:
+                trap("a command worker could not be joined")
+            self.worker = none
         let state = self.storage else return
         self.storage = none
         command_dispose(state)
@@ -165,8 +176,8 @@ func command_entry(raw: void*?):
         state.done.store(true, .release)
         return
     state.code = (i64)outcome.0
-    release(outcome.1)
-    release(outcome.2)
+    release_output(outcome.1)
+    release_output(outcome.2)
     state.done.store(true, .release)
 
 func command_append(state: CommandState*, bytes: const u8[]) -> !:

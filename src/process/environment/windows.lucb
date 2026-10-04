@@ -33,16 +33,16 @@ func environment_windows(overrides: const c.str[]) -> u16[]!:
         while inherited[cursor] != 0:
             cursor += 1
         cursor += 1
-    let owned = try alloc (u16[])[overrides.length]
-    defer free(owned)
+    let overriding = try alloc (u16[])[overrides.length]
+    defer free(overriding)
     var converted: usize = 0
-    defer environment_windows_release(owned, converted)
+    defer environment_windows_release(overriding, converted)
     for index in 0..<overrides.length:
         discard(try environment_name(overrides[index]))
-        owned[index] = try windows_text.wide(overrides[index], failed)
+        overriding[index] = try windows_text.wide(overrides[index], failed)
         converted += 1
         for prior in 0..<index:
-            if environment_windows_compare(owned[index], owned[prior]) == 0:
+            if environment_windows_compare(overriding[index], overriding[prior]) == 0:
                 error(failed, "an environment override repeats a name")
     let capacity = count +? overrides.length else error(failed, "the environment is too large")
     let entries = try alloc (u16[])[capacity]
@@ -57,14 +57,14 @@ func environment_windows(overrides: const c.str[]) -> u16[]!:
         let entry = u16[](&inherited[start], cursor - start)
         var replaced = false
         for index in 0..<converted:
-            if environment_windows_compare(entry, owned[index]) == 0:
+            if environment_windows_compare(entry, overriding[index]) == 0:
                 replaced = true
                 break
         if not replaced:
             entries[used] = entry
             used += 1
     for index in 0..<converted:
-        entries[used] = owned[index]
+        entries[used] = overriding[index]
         used += 1
     for index in 1..<used:
         let entry = entries[index]

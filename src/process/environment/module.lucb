@@ -1,0 +1,90 @@
+#==============================================================================================
+#
+#   environment - The process's environment and working directory
+#
+#   DESCRIPTION:
+#       Reading and changing environment variables, listing them all, and the working
+#       directory, for this process and the programs it starts.
+#
+#==============================================================================================
+
+extern func getcwd(buffer: u8*, size: usize) -> u8*?
+
+# mark: Environment variables =================================================================
+
+## The value of environment variable `name`, or none when it is not set. A Base caller gets
+## a view that the next change to the environment may end; Luce copies it.
+pub func variable(name: c.str) -> str?:
+    if not valid_name(name):
+        return none
+    return os.env(name)
+
+## Set environment variable `name` to `value`, for this process and the programs it starts.
+## Other threads must not read or change the environment meanwhile.
+pub func set_variable(name: c.str, value: c.str) -> !:
+    if not valid_name(name):
+        error(failed, "an environment variable name must be nonempty and without `=`")
+    os.set_env(name, value) catch failure:
+        error(failed, failure.message)
+
+## Remove environment variable `name`; one that is not set is already removed.
+pub func unset_variable(name: c.str) -> !:
+    if not valid_name(name):
+        error(failed, "an environment variable name must be nonempty and without `=`")
+    os.unset_env(name) catch failure:
+        error(failed, failure.message)
+
+## Every environment variable, as `NAME=value` texts in the order the system keeps them.
+## The result owns its texts, as `files.list`'s does.
+pub func variables() -> interop.Owned[const str[]]!:
+    var texts: owned.Gathered
+    errdefer texts.release()
+    if platform.windows:
+        let block = GetEnvironmentStringsW() else error(failed, "the environment is unavailable")
+        defer discard(FreeEnvironmentStringsW(block))
+        var cursor: usize = 0
+        while block[cursor] != 0:
+            let start = cursor
+            while block[cursor] != 0:
+                cursor += 1
+            # `=C:=C:\work` and its kind are the shell's drive directories, not variables
+            if block[start] != 61:
+                let text = try windows_text.narrow(u16[](&block[start], cursor - start), failed)
+                defer strings.release(text)
+                try texts.add(text)
+            cursor += 1
+    else:
+        let entries = *environment_address()
+        var index: usize = 0
+        while let entry = entries[index]:
+            try texts.add((str)entry)
+            index += 1
+    return try texts.finish()
+
+func valid_name(name: c.str) -> bool:
+    let text = (str)name
+    return text.length > 0 and strings.find(text, "=") == none
+
+# mark: Working directory and identity ========================================================
+
+## The working directory, as an owned text.
+pub func current_directory() -> interop.Owned[str]!:
+    if platform.windows:
+        var directory: str
+        with memory.heap:
+            directory = os.cwd() catch failure:
+                error(failed, failure.message)
+        return try owned.adopt_text(directory)
+    else:
+        var buffer: u8[4096] = ---
+        let found = getcwd(&buffer[0], buffer.length) else error(failed, "the working directory cannot be read")
+        return try owned.copy_text((str)(c.str)found)
+
+## Make `path` the working directory.
+pub func change_directory(path: c.str) -> !:
+    os.change_dir(path) catch failure:
+        error(failed, failure.message)
+
+## This process's identifier.
+pub func id() -> i32:
+    return os.pid()

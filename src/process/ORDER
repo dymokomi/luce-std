@@ -5,6 +5,7 @@ termination/posix.lucb
 termination/windows.lucb
 environment/posix.lucb
 environment/windows.lucb
+environment/module.lucb
 command/module.lucb
 command/posix.lucb
 command/windows.lucb

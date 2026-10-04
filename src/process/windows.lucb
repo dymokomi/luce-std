@@ -102,11 +102,12 @@ func capture_windows(file: void*) -> str!:
     let length = win_tell(file)
     if length < 0 or win_seek(file, 0, 0) != 0:
         error(failed, "a child stream could not be read")
-    let bytes = try alloc u8[(usize)length]
-    if length > 0 and fread(bytes.data, 1, bytes.length, file) != bytes.length:
+    let bytes = try alloc u8[(usize)length + 1]
+    if length > 0 and fread(bytes.data, 1, (usize)length, file) != (usize)length:
         free(bytes)
         error(failed, "a child stream could not be read")
-    return (str)bytes
+    bytes[(usize)length] = 0
+    return (str)bytes[..<(usize)length]
 
 ## Atomic, non-inheritable, delete-on-close captures use the Unicode temp path.
 func temporary_windows() -> void*!:
@@ -231,9 +232,13 @@ func run_windows(program: c.str, arguments: const c.str[], directory: c.str, env
     if GetExitCodeProcess(process, &code) == 0:
         error(failed, "the process exit status is unavailable")
     if control != none:
-        return ((i32)code, "", "")
+        let none_out = try captured("")
+        let none_err = captured("") catch failure:
+            release_output(none_out)
+            error(failure.code, failure.message)
+        return ((i32)code, none_out, none_err)
     let out = try capture_windows(output)
     let err = capture_windows(errors) catch failure:
-        release(out)
+        release_output(out)
         error(failure.code, failure.message)
     return ((i32)code, out, err)

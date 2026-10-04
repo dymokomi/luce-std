@@ -68,4 +68,20 @@ pub func main(arguments: str[]) -> i32!:
     let result = try unicode.output()
     defer result.release()
     assert(result.value == "éλ😀")
+    var waited = try process.Command(executable.value, ["stream"])
+    defer waited.close()
+    assert(try waited.wait() == 7)
+    assert(try waited.wait() == 7)
+    let streamed = try waited.output()
+    defer streamed.release()
+    assert(streamed.value == "first\nsecond\n")
+    var stopped = try process.Command(executable.value, ["sleep"])
+    defer stopped.close()
+    stopped.cancel()
+    var refused = false
+    discard(stopped.wait() catch cancelled:
+        assert(cancelled.code == process.failed)
+        refused = true
+        recover 0)
+    assert(refused)
     return 0
