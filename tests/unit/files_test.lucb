@@ -3,7 +3,9 @@
 import c
 import files
 import io
+import memory
 import strings
+import thread
 
 test "a file round trip":
     let directory = io.path.temp()
@@ -32,6 +34,20 @@ test "a temporary file loses its name once open and still reads back":
     assert((try opened.read(back)) == 7)
     assert((str)back[..<7] == "scratch")
     try opened.close()
+
+func discard_temporary(context: void*?):
+    let made = (files.TemporaryFile*)(context else trap("no temporary file"))
+    made.destroy()
+
+test "a temporary file made on one thread is discarded on another":
+    var made: files.TemporaryFile
+    with memory.heap:
+        made = try files.TemporaryFile.create((c.str)io.path.temp())
+    let name = try strings.copy(made.path())
+    defer strings.release(name)
+    var worker = try thread.spawn(discard_temporary, (void*)&made)
+    try worker.join()
+    assert(not files.exists((c.str)name))
 
 test "canonical paths resolve links, and a missing entry is missing":
     let base = try files.canonical((c.str)io.path.temp())

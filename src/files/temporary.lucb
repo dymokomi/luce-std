@@ -11,10 +11,11 @@
 # mark: The temporary file ====================================================================
 
 ## A temporary file and its owned pathname. The zero value is closed. Copying does
-## not duplicate ownership. Borrow the object for I/O and serialize its use.
+## not duplicate ownership. Borrow the object for I/O and serialize its use. The
+## pathname lives on the process heap, so any thread may close or discard the file.
 pub struct TemporaryFile: io.Reader, io.Writer:
     var file: File
-    var name: interop.Owned[str]?
+    var name: str?
 
     ## Create an exclusive close-on-exec file in directory, with permissions
     ## filtered by umask. The OS supplies 128 random filename bits per attempt;
@@ -22,10 +23,12 @@ pub struct TemporaryFile: io.Reader, io.Writer:
     ## existing entry is opened or overwritten, and failure retains no allocation.
     pub static func create(directory: c.str, permissions: u32 = 384) -> TemporaryFile!:
         let candidate = try paths.join((str)directory, ".luce-00000000000000000000000000000000")
-        errdefer candidate.release()
+        defer candidate.release()
+        let name = try heap_text(candidate.value)
+        errdefer release_heap_text(name)
         let digits = "0123456789abcdef"
-        let data = (u8*)candidate.value.bytes.data
-        let suffix = candidate.value.length - 32
+        let data = (u8*)name.bytes.data
+        let suffix = name.length - 32
         var attempt: usize = 0
         while attempt < 128:
             var random: u8[16]
@@ -34,18 +37,17 @@ pub struct TemporaryFile: io.Reader, io.Writer:
             for i in 0..<random.length:
                 data[suffix + i * 2] = digits.bytes[random[i] >> 4]
                 data[suffix + i * 2 + 1] = digits.bytes[random[i] & 15]
-            let file = File.open((c.str)candidate.value, OpenMode.create_new_read_write, permissions) catch failure:
+            let file = File.open((c.str)name, OpenMode.create_new_read_write, permissions) catch failure:
                 if failure.code == already_exists:
                     attempt += 1
                     continue
                 error(failure.code, failure.message)
-            return TemporaryFile(file = file, name = candidate)
+            return TemporaryFile(file = file, name = name)
         error(already_exists, "no unused temporary filename was found")
 
     ## Borrowed NUL-terminated pathname, valid until publication or cleanup.
     pub func path() -> str:
-        let name = self.name else return ""
-        return name.value
+        return self.name else ""
 
     ## Read into `buffer`; the bytes read.
     pub mutating func read(buffer: u8[]) -> usize!:
@@ -73,17 +75,17 @@ pub struct TemporaryFile: io.Reader, io.Writer:
     pub mutating func publish(destination: c.str, replace: bool = true, synchronize: bool = false) -> !:
         let name = self.name else error(io.closed, "the temporary file has no owned pathname")
         try self.file.close()
-        try rename((c.str)name.value, destination, replace, synchronize)
+        try rename((c.str)name, destination, replace, synchronize)
         self.release_name()
 
     mutating func release_name():
         if let name = self.name:
-            name.release()
+            release_heap_text(name)
             self.name = none
 
     mutating func remove_name() -> !:
         let name = self.name else return
-        remove_file((c.str)name.value) catch failure:
+        remove_file((c.str)name) catch failure:
             if failure.code != missing:
                 error(failure.code, failure.message)
         self.release_name()
@@ -104,6 +106,16 @@ pub struct TemporaryFile: io.Reader, io.Writer:
         self.dispose() catch failure:
             discard(failure)
         self.release_name()
+
+## A NUL-terminated copy of `text` on the process heap, which any thread may release.
+func heap_text(text: str) -> str!:
+    with memory.heap:
+        return try strings.copy(text)
+
+## Release a text `heap_text` made, from whichever thread holds it.
+func release_heap_text(text: str):
+    with memory.heap:
+        strings.release(text)
 
 # mark: Atomic writes =========================================================================
 
