@@ -11,6 +11,7 @@ python3 tests/run.py --base "$compiler" "$@"
 luce="${LUCE:-../luce/build/luce}"
 if [ -x "$luce" ]; then
     python3 tests/luce/run.py --luce "$luce"
+    python3 tests/programs/net_protocols/interop.py --luce "$luce" --base "$compiler"
 else
     echo "SKIP luce surface: no Luce compiler at $luce (set LUCE)"
 fi

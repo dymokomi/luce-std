@@ -1,6 +1,6 @@
 ## Test-only boundary: borrowed thread-local result buffers let Luce prove that
 ## returned text is copied before another call overwrites the Base storage.
-import net
+from luce_std import net
 import io
 
 local var accept_output: u8[28]
