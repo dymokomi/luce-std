@@ -4,7 +4,7 @@
 #
 #   DESCRIPTION:
 #       An owned TCP connection: connect, read, write, shutdown, socket options and readiness
-#       waiting.
+#       waiting, and the line, text and byte reads a Luce program uses through `net.connect`.
 #
 #==============================================================================================
 
@@ -18,12 +18,16 @@ pub enum ShutdownDirection as u8:
 
 ## One owned TCP connection implementing borrowed Reader and Writer interfaces.
 ## Zero is closed. Copying does not duplicate ownership; copies must not be
-## independently closed. Synchronize calls on one owner.
+## independently closed. Synchronize calls on one owner. Luce sees a Connection as an
+## object, made by `net.connect` or `Listener.accept_connection` and closed by `with`.
 pub struct Connection: Reader, Writer:
     var socket: SocketHandle
     ## Whether the socket is marked against `SIGPIPE` (macOS); `write` marks it on first
     ## use, so a connection built any other way than `over` is guarded too.
     var guarded: bool
+    ## Bytes `read_line` and `read_text` received beyond what they answered; `read`
+    ## answers them first.
+    var ahead: readahead.ReadAhead
 
     ## Establish a TCP connection with an optional absolute deadline/cancellation.
     ## Connection setup is nonblocking internally; the returned socket is blocking
@@ -33,13 +37,13 @@ pub struct Connection: Reader, Writer:
         try check_operation(deadline, cancellation)
         var raw: NativeAddress
         let length = try address.write_native(&raw)
-        var owned = try SocketHandle.create(stream, address.ip.kind)
-        errdefer owned.destroy()
-        let fd = try owned.require()
+        var acquired = try SocketHandle.create(stream, address.ip.kind)
+        errdefer acquired.destroy()
+        let fd = try acquired.require()
         if address.ip.kind == IpVersion.ipv6:
             try set_socket_integer(fd, ipv6_level, ipv6_only_option, 0)
         try set_nonblocking(fd, true)
-        if connect(fd, &raw, length) != 0:
+        if socket_connect(fd, &raw, length) != 0:
             let number = socket_errno()
             let in_progress = 10035 if platform.windows else (36 if platform.macos else 115)
             let already_pending = 10037 if platform.windows else (37 if platform.macos else 114)
@@ -52,8 +56,8 @@ pub struct Connection: Reader, Writer:
                 error(socket_error(pending_error), "the pending connection failed")
         try check_operation(deadline, cancellation)
         try set_nonblocking(fd, nonblocking)
-        owned.nonblocking = nonblocking
-        return Connection.from_socket(owned)
+        acquired.nonblocking = nonblocking
+        return Connection.from_socket(acquired)
 
     ## Take ownership of a socket the caller made (a `socketpair`, an inherited
     ## descriptor), including on failure. Set close-on-exec, preserving existing
@@ -65,8 +69,8 @@ pub struct Connection: Reader, Writer:
     pub static func over(descriptor: platform.SocketDescriptor) -> Connection!:
         return Connection.from_socket(try SocketHandle.adopt(descriptor))
 
-    static func from_socket(owned: SocketHandle) -> Connection:
-        var connection = Connection(socket = owned, guarded = false)
+    static func from_socket(acquired: SocketHandle) -> Connection:
+        var connection = Connection(socket = acquired, guarded = false)
         discard(connection.guard())
         return connection
 
@@ -134,6 +138,13 @@ pub struct Connection: Reader, Writer:
     ## Receive some bytes. For nonempty storage, zero is peer EOF; empty storage
     ## returns zero without probing the peer. This call does not fill the buffer.
     pub mutating func read(buffer: u8[]) -> usize!:
+        if self.ahead.count() > 0:
+            discard(try self.socket.require())
+            return self.ahead.take(buffer)
+        return try self.receive(buffer)
+
+    ## One receive from the socket itself, under the bytes read ahead.
+    mutating func receive(buffer: u8[]) -> usize!:
         let descriptor = try self.socket.require()
         if buffer.length == 0:
             return 0
@@ -144,6 +155,38 @@ pub struct Connection: Reader, Writer:
         if received < 0:
             error(socket_error(socket_errno()), "the connection could not receive data")
         return (usize)received
+
+    # mark: Lines, text and bytes ============================================================
+
+    ## The next line without its `\n` or `\r\n`; at the end of the stream the unfinished
+    ## last line, and none after it. A line that is not UTF-8 is invalid_text.
+    pub mutating func read_line() -> str?!:
+        var source = Received(connection = &self)
+        return try self.ahead.line(&source)
+
+    ## What arrives next, up to `maximum` bytes, waiting only while nothing has; empty when
+    ## the peer has finished sending. The view lasts until the next read.
+    pub mutating func read_bytes(maximum: i64 = 65536) -> const u8[]!:
+        if maximum < 1:
+            error(invalid_options, "a read needs a positive maximum")
+        var source = Received(connection = &self)
+        return try self.ahead.bytes(&source, (usize)maximum, false)
+
+    ## What arrives next as text, as read_bytes reads it, ending on a whole character; a
+    ## character cut in two waits for the next read. Text that is not UTF-8 is invalid_text.
+    pub mutating func read_text(maximum: i64 = 65536) -> str!:
+        if maximum < 1:
+            error(invalid_options, "a read needs a positive maximum")
+        var source = Received(connection = &self)
+        return try self.ahead.text(&source, (usize)maximum, false)
+
+    ## Send all of `data`.
+    pub mutating func write_bytes(data: const u8[]) -> !:
+        try io.write_all(&self, data)
+
+    ## Send all of `text`.
+    pub mutating func write_text(text: str) -> !:
+        try io.write_all(&self, text.bytes)
 
     ## Disable Nagle coalescing when enabled. This is a latency policy, not a
     ## delivery guarantee; writes may still be buffered by the OS or network.
@@ -207,8 +250,17 @@ pub struct Connection: Reader, Writer:
 
     ## Consume ownership before the OS call. Repeated close is safe even after failure.
     pub mutating func close() -> !:
+        self.ahead.release()
         try self.socket.close()
 
     ## Best-effort cleanup for unwinding; use close to observe delayed errors.
     pub mutating func destroy():
+        self.ahead.release()
         self.socket.destroy()
+
+## The socket under a connection's read-ahead bytes.
+struct Received: Reader:
+    var connection: Connection*
+
+    mutating func read(buffer: u8[]) -> usize!:
+        return try self.connection.receive(buffer)

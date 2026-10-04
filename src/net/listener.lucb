@@ -8,7 +8,8 @@
 #==============================================================================================
 
 ## One owned TCP listener. Zero is closed. Copying does not duplicate ownership;
-## copies must not be independently closed. Synchronize calls on one owner.
+## copies must not be independently closed. Synchronize calls on one owner. Luce sees a
+## Listener as an object, made by `net.listen` and closed by `with`.
 pub struct Listener:
     var socket: SocketHandle
 
@@ -21,20 +22,20 @@ pub struct Listener:
             error(invalid_options, "the listener backlog must be positive")
         var raw: NativeAddress
         let length = try address.write_native(&raw)
-        var owned = try SocketHandle.create(stream, address.ip.kind)
-        errdefer owned.destroy()
-        let fd = try owned.require()
+        var acquired = try SocketHandle.create(stream, address.ip.kind)
+        errdefer acquired.destroy()
+        let fd = try acquired.require()
         try set_socket_integer(fd, socket_level, reuse_address_option, 1)
         if address.ip.kind == IpVersion.ipv6:
             try set_socket_integer(fd, ipv6_level, ipv6_only_option, 1 if ipv6_only else 0)
         if bind(fd, &raw, length) != 0:
             error(socket_error(socket_errno()), "the listener could not bind its address")
-        var result = listen(fd, backlog)
+        var result = socket_listen(fd, backlog)
         while result < 0 and socket_errno() == socket_interrupted:
-            result = listen(fd, backlog)
+            result = socket_listen(fd, backlog)
         if result != 0:
             error(socket_error(socket_errno()), "the listener could not begin listening")
-        return Listener(socket = owned)
+        return Listener(socket = acquired)
 
     ## Query the bound endpoint, including an automatically assigned port.
     pub func address() -> SocketAddress!:
@@ -54,6 +55,21 @@ pub struct Listener:
         errdefer connection.destroy()
         try connection.set_nonblocking(nonblocking)
         return connection
+
+    ## Wait for the next connection and answer it as an object, for Luce; `accept` answers
+    ## it as a value.
+    pub func accept_connection() -> interop.Reference[Connection]!:
+        var reservation = try interop.Reservation[Connection](connection_type)
+        errdefer reservation.cancel()
+        var accepted = try self.accept()
+        let native = new Connection(socket = accepted.socket, guarded = accepted.guarded) catch failure:
+            accepted.destroy()
+            error(failure.code, failure.message)
+        return reservation.publish(native)
+
+    ## The port the listener is bound to, also when the system picked it.
+    pub func port() -> u16!:
+        return (try self.address()).port
 
     ## Wait for advisory readiness without allocating. Expiration reports timed_out;
     ## cancellation reports cancelled. Use nonblocking I/O after readiness because

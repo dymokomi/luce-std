@@ -42,12 +42,12 @@ struct SocketHandle:
             error(closed, "the socket descriptor is invalid")
         if platform.windows:
             try windows_socket_startup()
-            var owned = SocketHandle(value = descriptor)
-            errdefer owned.destroy()
+            var acquired = SocketHandle(value = descriptor)
+            errdefer acquired.destroy()
             if SetHandleInformation((void*)descriptor, 1, 0) == 0:
                 error(failed, "socket inheritance could not be disabled")
             try set_nonblocking(descriptor, false)
-            return owned
+            return acquired
         else:
             var flags = fcntl(descriptor, get_descriptor_flags)
             while flags < 0 and socket_errno() == socket_interrupted:

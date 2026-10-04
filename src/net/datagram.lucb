@@ -19,14 +19,14 @@ pub struct Datagram:
     pub static func bind(address: SocketAddress, ipv6_only: bool = true) -> Datagram!:
         var raw: NativeAddress
         let length = try address.write_native(&raw)
-        var owned = try SocketHandle.create(datagram, address.ip.kind)
-        errdefer owned.destroy()
-        let fd = try owned.require()
+        var acquired = try SocketHandle.create(datagram, address.ip.kind)
+        errdefer acquired.destroy()
+        let fd = try acquired.require()
         if address.ip.kind == IpVersion.ipv6:
             try set_socket_integer(fd, ipv6_level, ipv6_only_option, 1 if ipv6_only else 0)
         if bind(fd, &raw, length) != 0:
             error(socket_error(socket_errno()), "the datagram socket could not bind its address")
-        return Datagram(socket = owned, version = address.ip.kind)
+        return Datagram(socket = acquired, version = address.ip.kind)
 
     ## Query the bound endpoint, including an automatically assigned port.
     pub func address() -> SocketAddress!:

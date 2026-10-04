@@ -1,0 +1,80 @@
+#==============================================================================================
+#
+#   tcp - Connections and listeners as objects
+#
+#   DESCRIPTION:
+#       Connecting by host name, listening, and name lookup in the form a Luce program calls:
+#       connections and listeners are objects it closes with `with`, addresses are text.
+#
+#==============================================================================================
+
+## The interop type of a TCP connection.
+pub let connection_type: interop.Type[Connection] = interop.Type[Connection]("Connection", Connection.destroy, closeable = true)
+
+## The interop type of a TCP listener.
+pub let listener_type: interop.Type[Listener] = interop.Type[Listener]("Listener", Listener.destroy, closeable = true)
+
+## The interop type of a UDP socket: Luce holds one only as an object, never as a copy.
+pub let datagram_type: interop.Type[Datagram] = interop.Type[Datagram]("Datagram", Datagram.destroy, closeable = true)
+
+## The text read is not valid UTF-8.
+pub let invalid_text: ErrorCode = readahead.invalid_text
+
+## Connect to `port` on `host`, a name or a numeric address, trying each address the name
+## resolves to in turn. A positive `timeout` bounds each attempt, in seconds; resolving the
+## name is not covered by it. The connection blocks on reads and writes.
+pub func connect(host: c.str, port: u16, timeout: f64 = 0.0) -> interop.Reference[Connection]!:
+    var reservation = try interop.Reservation[Connection](connection_type)
+    errdefer reservation.cancel()
+    var connected = try connect_any(host, port, timeout)
+    let native = new Connection(socket = connected.socket, guarded = connected.guarded) catch failure:
+        connected.destroy()
+        error(failure.code, failure.message)
+    return reservation.publish(native)
+
+func connect_any(host: c.str, port: u16, timeout: f64) -> Connection!:
+    if timeout < 0.0 or timeout > 31536000.0:
+        error(invalid_options, "a timeout is between zero and a year of seconds")
+    var addresses = try resolve_all(host, port)
+    defer addresses.destroy()
+    var last_code = unknown_host
+    var last_message = "the host has no usable stream address"
+    for address in addresses.view():
+        var deadline = Deadline()
+        if timeout > 0.0:
+            deadline = try Deadline.after((u64)(timeout * 1000000000.0))
+        let connection = Connection.connect(address, deadline) catch failure:
+            last_code = failure.code
+            last_message = "the connection could not reach its peer"
+            continue
+        return connection
+    error(last_code, last_message)
+
+## Listen for TCP connections on `port` at `host`: `"0.0.0.0"` for every IPv4 interface,
+## `"::"` for IPv6, `"localhost"` or `"127.0.0.1"` for this machine only. Port 0 picks a
+## free port, which `port()` tells.
+pub func listen(host: c.str, port: u16, backlog: i32 = 128) -> interop.Reference[Listener]!:
+    var reservation = try interop.Reservation[Listener](listener_type)
+    errdefer reservation.cancel()
+    var bound = try Listener.bind(try resolve(host, port), backlog)
+    let native = new Listener(socket = bound.socket) catch failure:
+        bound.destroy()
+        error(failure.code, failure.message)
+    return reservation.publish(native)
+
+## The addresses `host` resolves to, as numeric text in the resolver's order, without
+## repeats. The result owns its texts, as `files.list`'s does.
+pub func lookup(host: c.str) -> interop.Owned[const str[]]!:
+    var addresses = try resolve_all(host, 0)
+    defer addresses.destroy()
+    var texts: owned.Gathered
+    errdefer texts.release()
+    for address in addresses.view():
+        var buffer: u8[39]
+        let text = try address.ip.render(buffer)
+        var seen = false
+        for earlier in texts.view():
+            seen = seen or earlier == text
+        if not seen:
+            try texts.add(text)
+    return try texts.finish()

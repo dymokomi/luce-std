@@ -102,6 +102,11 @@ pub struct IpAddress:
         memory.move(destination, self.octets[..<count], count)
         return count
 
+    ## The address as text, `192.0.2.1` or `2001:db8::1`, owned.
+    pub func text() -> interop.Owned[str]!:
+        var buffer: u8[39]
+        return try owned.copy_text(try self.render(buffer))
+
     ## Format into borrowed storage without allocation or a trailing NUL. IPv6
     ## uses lowercase hex, the first longest zero run, and never compresses one
     ## zero field. Mapped IPv6 uses ::ffff: followed by dotted IPv4. A 39-byte buffer

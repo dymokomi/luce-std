@@ -5,6 +5,7 @@ address.lucb
 resolver.lucb
 listener.lucb
 connection.lucb
+tcp.lucb
 datagram.lucb
 handles.lucb
 options.lucb

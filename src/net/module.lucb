@@ -8,8 +8,11 @@
 #==============================================================================================
 
 import c
+import interop
 import platform
 import memory
+import owned
+import readahead
 import io
 import strings
 import utf8
@@ -20,11 +23,11 @@ from io import Reader, Writer
 
 extern func socket(domain: i32, kind: i32, protocol: i32) -> platform.SocketDescriptor
 extern func bind(descriptor: platform.SocketDescriptor, address: const void*, length: u32) -> i32
-extern func listen(descriptor: platform.SocketDescriptor, backlog: i32) -> i32
+extern func socket_listen as "listen"(descriptor: platform.SocketDescriptor, backlog: i32) -> i32
 extern func accept(descriptor: platform.SocketDescriptor, address: void*?, length: u32*?) -> platform.SocketDescriptor
 extern func accept4(descriptor: platform.SocketDescriptor, address: void*?, length: u32*?, flags: i32) -> platform.SocketDescriptor
 extern func fcntl(descriptor: platform.SocketDescriptor, command: i32, ...) -> i32
-extern func connect(descriptor: platform.SocketDescriptor, address: const void*, length: u32) -> i32
+extern func socket_connect as "connect"(descriptor: platform.SocketDescriptor, address: const void*, length: u32) -> i32
 extern func posix_send as "send"(descriptor: platform.SocketDescriptor, data: const void*, length: usize, flags: i32) -> isize
 extern func posix_recv as "recv"(descriptor: platform.SocketDescriptor, buffer: void*, length: usize, flags: i32) -> isize
 extern func posix_sendto as "sendto"(descriptor: platform.SocketDescriptor, data: const void*, length: usize, flags: i32, address: const void*, address_length: u32) -> isize

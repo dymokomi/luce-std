@@ -77,6 +77,11 @@ pub struct SocketAddress:
     pub func equals(other: SocketAddress) -> bool:
         return self.ip.equals(other.ip) and self.port == other.port and self.scope_id == other.scope_id
 
+    ## The canonical numeric endpoint text, `127.0.0.1:80` or `[::1]:80`, owned.
+    pub func text() -> interop.Owned[str]!:
+        var buffer: u8[58]
+        return try owned.copy_text(try self.render(buffer))
+
     ## Canonical numeric endpoint text. IPv6 is bracketed; a nonzero scope is
     ## decimal. A 58-byte buffer always suffices. The returned view borrows buffer,
     ## has no trailing NUL, and insufficient storage is left unchanged (io.full).
