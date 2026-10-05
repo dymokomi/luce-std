@@ -8,12 +8,14 @@ import thread
 import platform
 import io
 
-## Waits up to a second for `descriptor` to be ready for `interest` through a poller.
+## Waits up to five seconds for `descriptor` to be ready for `interest` through a poller.
+## The wait ends as soon as it is ready; the margin is for Windows, which reports a refused
+## loopback connect only after retrying the SYN (about two seconds after start_connect).
 func wait_ready(descriptor: platform.SocketDescriptor, interest: net.WaitInterest) -> net.Readiness:
     var poller = net.Poller.create(1) else trap("a poller")
     defer poller.destroy()
     poller.watch(0, descriptor, interest) else trap("the descriptor is watched")
-    let deadline = net.Deadline.after(1000000000) else trap("a deadline")
+    let deadline = net.Deadline.after(5000000000) else trap("a deadline")
     let count = poller.wait(deadline) else trap("the wait")
     assert(count == 1)
     return poller.readiness(0) else trap("the slot's readiness")
