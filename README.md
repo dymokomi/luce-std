@@ -12,7 +12,7 @@ Base and serves Luce and Base programs alike.
 | `from luce_std import files` | Files and directories: whole-file text and bytes, `File` objects, listings, walks, metadata, copying, renaming, temporary directories |
 | `from luce_std import paths` | Lexical filesystem paths: join, normalize, split |
 | `from luce_std import process` | Running programs (`run`, background `Command`), environment variables, the working directory |
-| `from luce_std import net` | TCP connections and listeners by host name, name lookup, UDP; HTTP and WebSocket wire formats for Base |
+| `from luce_std import net` | TCP connections and listeners by host name, name lookup, UDP; HTTP and WebSocket wire formats for Base; for event loops, connects that do not wait (`Connection.start_connect`, `finish_connect`) and name lookups on a thread of their own (`Lookup`) |
 | `from luce_std import clock` | The monotonic clock, durations, sleeping, calendar dates and ISO 8601 |
 | `from luce_std import random` | A seeded pseudo-random generator |
 | `from luce_std import math` | The mathematical functions |

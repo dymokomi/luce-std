@@ -11,6 +11,7 @@ handles.lucb
 options.lucb
 readiness.lucb
 deadline_stream.lucb
+lookup.lucb
 http/types.lucb
 http/syntax.lucb
 http/head.lucb

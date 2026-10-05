@@ -1,0 +1,105 @@
+## The pieces of `net` an event loop drives: a connection begun without waiting
+## (`Connection.start_connect`, completed by `finish_connect` after write readiness), its
+## failure when nothing listens, and host name resolution off the caller's thread
+## (`Lookup`): a numeric address answered at once, a name answered on a thread that signals
+## a watched descriptor, a failed name, and a lookup abandoned while it runs.
+import net
+import thread
+import platform
+import io
+
+## Waits up to a second for `descriptor` to be ready for `interest` through a poller.
+func wait_ready(descriptor: platform.SocketDescriptor, interest: net.WaitInterest) -> net.Readiness:
+    var poller = net.Poller.create(1) else trap("a poller")
+    defer poller.destroy()
+    poller.watch(0, descriptor, interest) else trap("the descriptor is watched")
+    let deadline = net.Deadline.after(1000000000) else trap("a deadline")
+    let count = poller.wait(deadline) else trap("the wait")
+    assert(count == 1)
+    return poller.readiness(0) else trap("the slot's readiness")
+
+test "start_connect begins a connection without waiting; finish_connect completes it after write readiness":
+    var listener = net.Listener.bind(net.SocketAddress.loopback(0)) else trap("a listener")
+    defer listener.destroy()
+    let address = listener.address() else trap("its address")
+    var connection = net.Connection.start_connect(address) else trap("the connect starts")
+    defer connection.destroy()
+    assert(connection.is_nonblocking() else false)
+    let ready = wait_ready(connection.descriptor() else trap("a descriptor"), net.WaitInterest.write)
+    assert(ready.writable)
+    assert(connection.finish_connect() else false)
+    # Completed: asking again answers true at once.
+    assert(connection.finish_connect() else false)
+    var accepted = listener.accept() else trap("the connection is accepted")
+    defer accepted.destroy()
+    let hello: u8[5] = ['h', 'e', 'l', 'l', 'o']
+    assert((connection.write(hello) else 0) == 5)
+    var buffer: u8[8]
+    assert((accepted.read(buffer) else 0) == 5)
+    # Nothing to read on the nonblocking side: would_block, not a wait.
+    var refused = false
+    _ = connection.read(buffer) catch failure:
+        assert(failure.code == io.would_block)
+        refused = true
+        recover 0
+    assert(refused)
+
+test "finish_connect reports a refused connection":
+    var listener = net.Listener.bind(net.SocketAddress.loopback(0)) else trap("a listener")
+    let address = listener.address() else trap("its address")
+    listener.destroy()
+    var connection = net.Connection.start_connect(address) catch failure:
+        # Some hosts refuse a loopback connection at once.
+        assert(failure.code == net.connection_refused)
+        return
+    defer connection.destroy()
+    var outcome: ErrorCode? = none
+    for _ in 0..<100:
+        let done = connection.finish_connect() catch failure:
+            outcome = failure.code
+            break
+        assert(not done)
+        _ = wait_ready(connection.descriptor() else trap("a descriptor"), net.WaitInterest.write)
+    assert(outcome == net.connection_refused)
+
+test "Lookup answers a numeric address at once, without a thread":
+    var lookup = net.Lookup.start("127.0.0.1", 8080) else trap("the lookup starts")
+    defer lookup.destroy()
+    assert(lookup.descriptor() == none and lookup.finished())
+    var addresses = lookup.take() else trap("the answer")
+    defer addresses.destroy()
+    assert(addresses.view().length == 1 and addresses.view()[0].port == 8080)
+    assert(addresses.view()[0].ip.equals(net.IpAddress.parse("127.0.0.1") else trap("parses")))
+    var again = false
+    _ = lookup.take() catch failure:
+        assert(failure.code == net.closed)
+        again = true
+        recover net.ResolvedAddresses()
+    assert(again)
+
+test "Lookup resolves a name on its own thread and signals its descriptor":
+    var lookup = net.Lookup.start("localhost", 80) else trap("the lookup starts")
+    defer lookup.destroy()
+    let descriptor = lookup.descriptor() else trap("a name is resolved on a thread")
+    let ready = wait_ready(descriptor, net.WaitInterest.read)
+    assert(ready.readable and lookup.finished())
+    var addresses = lookup.take() else trap("localhost resolves")
+    defer addresses.destroy()
+    assert(addresses.view().length >= 1)
+    for address in addresses.view():
+        assert(address.port == 80)
+
+test "Lookup reports a name that does not resolve, and may be abandoned while it runs":
+    var failed = net.Lookup.start("no-such-host.invalid", 80) else trap("the lookup starts")
+    defer failed.destroy()
+    var reported = false
+    _ = failed.take() catch failure:
+        assert(failure.code == net.unknown_host or failure.code == net.resolution_temporary or failure.code == net.failed)
+        reported = true
+        recover net.ResolvedAddresses()
+    assert(reported)
+    # Abandoned at once: the threads finish on their own and release their state.
+    for _ in 0..<8:
+        var abandoned = net.Lookup.start("localhost", 443) else trap("the lookup starts")
+        abandoned.destroy()
+    thread.sleep(50)

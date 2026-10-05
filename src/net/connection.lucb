@@ -28,6 +28,8 @@ pub struct Connection: Reader, Writer:
     ## Bytes `read_line` and `read_text` received beyond what they answered; `read`
     ## answers them first.
     var ahead: readahead.ReadAhead
+    ## Whether `start_connect` left the connection in progress; `finish_connect` clears it.
+    var connecting: bool
 
     ## Establish a TCP connection with an optional absolute deadline/cancellation.
     ## Connection setup is nonblocking internally; the returned socket is blocking
@@ -35,29 +37,44 @@ pub struct Connection: Reader, Writer:
     ## resolution is separate and is not covered by this connection deadline.
     pub static func connect(address: SocketAddress, deadline: Deadline = Deadline(), cancellation: sync.Cancellation*? = none, nonblocking: bool = false) -> Connection!:
         try check_operation(deadline, cancellation)
-        var raw: NativeAddress
-        let length = try address.write_native(&raw)
-        var acquired = try SocketHandle.create(stream, address.ip.kind)
+        var (acquired, connecting) = try open_connecting(address)
         errdefer acquired.destroy()
         let fd = try acquired.require()
-        if address.ip.kind == IpVersion.ipv6:
-            try set_socket_integer(fd, ipv6_level, ipv6_only_option, 0)
-        try set_nonblocking(fd, true)
-        if socket_connect(fd, &raw, length) != 0:
-            let number = socket_errno()
-            let in_progress = 10035 if platform.windows else (36 if platform.macos else 115)
-            let already_pending = 10037 if platform.windows else (37 if platform.macos else 114)
-            if number != in_progress and number != already_pending and number != socket_interrupted:
-                error(socket_error(number), "the connection could not reach its peer")
+        if connecting:
             _ = try wait_socket(fd, WaitInterest.write, deadline, cancellation)
             try check_operation(deadline, cancellation)
-            let pending_error = try get_socket_integer(fd, socket_level, 4103 if platform.macos or platform.windows else 4)
-            if pending_error != 0:
-                error(socket_error(pending_error), "the pending connection failed")
+            try check_connected(fd)
         try check_operation(deadline, cancellation)
         try set_nonblocking(fd, nonblocking)
         acquired.nonblocking = nonblocking
         return Connection.from_socket(acquired)
+
+    ## Begin a TCP connection without waiting for it, for an event loop: the socket is
+    ## nonblocking and the connection may still be in progress. Wait for write readiness
+    ## (a `Poller`, the loop's own wait), then call `finish_connect`, which tells whether
+    ## it has completed and reports its failure. Failure here closes the new descriptor.
+    pub static func start_connect(address: SocketAddress) -> Connection!:
+        var (acquired, connecting) = try open_connecting(address)
+        acquired.nonblocking = true
+        var connection = Connection.from_socket(acquired)
+        connection.connecting = connecting
+        return connection
+
+    ## Whether a connection begun by `start_connect` has completed, checked without
+    ## waiting: false while it is in progress, true once connected (and for a connection
+    ## made any other way). A failed connection reports its error (connection_refused,
+    ## network_unreachable, timed_out, ...); close it then.
+    pub func finish_connect() -> bool!:
+        let descriptor = try self.socket.require()
+        if not self.connecting:
+            return true
+        var entry: NativePoll[1]
+        entry[0] = NativePoll(descriptor = descriptor, events = try poll_interest(WaitInterest.write))
+        if (try wait_poll(entry, Deadline.at(0), none)) == 0:
+            return false
+        try check_connected(descriptor)
+        self.connecting = false
+        return true
 
     ## Take ownership of a socket the caller made (a `socketpair`, an inherited
     ## descriptor), including on failure. Set close-on-exec, preserving existing
@@ -257,6 +274,33 @@ pub struct Connection: Reader, Writer:
     pub func destroy():
         self.ahead.release()
         self.socket.destroy()
+
+## A new nonblocking stream socket for `address` with its connect issued: the socket, and
+## whether the connection is still in progress. Failure closes the socket.
+func open_connecting(address: SocketAddress) -> (SocketHandle, bool)!:
+    var raw: NativeAddress
+    let length = try address.write_native(&raw)
+    var acquired = try SocketHandle.create(stream, address.ip.kind)
+    errdefer acquired.destroy()
+    let fd = try acquired.require()
+    if address.ip.kind == IpVersion.ipv6:
+        try set_socket_integer(fd, ipv6_level, ipv6_only_option, 0)
+    try set_nonblocking(fd, true)
+    if socket_connect(fd, &raw, length) == 0:
+        return (acquired, false)
+    let number = socket_errno()
+    let in_progress = 10035 if platform.windows else (36 if platform.macos else 115)
+    let already_pending = 10037 if platform.windows else (37 if platform.macos else 114)
+    if number != in_progress and number != already_pending and number != socket_interrupted:
+        error(socket_error(number), "the connection could not reach its peer")
+    return (acquired, true)
+
+## The outcome of a connection that was in progress until its socket became writable: its
+## pending error (`SO_ERROR`), if any.
+func check_connected(descriptor: platform.SocketDescriptor) -> !:
+    let pending_error = try get_socket_integer(descriptor, socket_level, 4103 if platform.macos or platform.windows else 4)
+    if pending_error != 0:
+        error(socket_error(pending_error), "the pending connection failed")
 
 ## The socket under a connection's read-ahead bytes.
 struct Received: Reader:

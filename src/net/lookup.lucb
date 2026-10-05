@@ -1,0 +1,172 @@
+#==============================================================================================
+#
+#   lookup - Host name resolution off the caller's thread
+#
+#   DESCRIPTION:
+#       `resolve_all` blocks in the OS resolver (getaddrinfo), which an event loop cannot
+#       afford. A Lookup runs that resolution on a thread of its own and signals its end on a
+#       descriptor the loop watches with everything else (a `Poller`, a loop's notifier), as
+#       curl's threaded resolver does. A numeric address needs no resolver and is ready at
+#       once. The OS resolver cannot be interrupted: a lookup abandoned while it runs lets its
+#       thread finish and release what it holds.
+#
+#==============================================================================================
+
+extern func socketpair(domain: i32, kind: i32, protocol: i32, descriptors: i32*) -> i32
+
+## What a lookup's thread and its owner share, in the C heap: the question, the answer and
+## the two ends of the signal. The thread writes a byte to `signal_out` once it has answered;
+## whichever of the two finishes last releases the state.
+struct LookupState:
+    var lock: sync.Mutex
+    var host: u8[]
+    var port: u16
+    var version: IpVersion?
+    var finished: bool
+    var abandoned: bool
+    var addresses: ResolvedAddresses
+    var failure: ErrorCode?
+    var signal_in: Connection
+    var signal_out: Connection
+
+    ## Release the state and everything it holds.
+    func release():
+        self.addresses.destroy()
+        self.signal_in.destroy()
+        self.signal_out.destroy()
+        if self.host.length > 0:
+            free(self.host) in memory.heap
+        let this = &self
+        free(this) in memory.heap
+
+## A host name resolution in progress. The zero value has nothing to resolve. Copying does
+## not duplicate ownership; destroy exactly one copy.
+pub struct Lookup:
+    var state: LookupState*?
+    ## The answer of a lookup that was ready at once (a numeric address).
+    var ready: ResolvedAddresses
+    var ready_failure: ErrorCode?
+    var taken: bool
+
+    ## Start resolving `host` for `port`, as `resolve_all` resolves it. A numeric address
+    ## is answered at once (`descriptor` is then none); a name is resolved on a new thread.
+    pub static func start(host: str, port: u16, version: IpVersion? = none) -> Lookup!:
+        if host.length == 0 or host.length > 1024:
+            error(invalid_options, "a host name is 1 to 1024 bytes")
+        if let address = IpAddress.parse(host):
+            if version == none or address.version() == version:
+                with memory.heap:
+                    let data = try new SocketAddress[1] ---
+                    data[0] = SocketAddress(ip = address, port = port)
+                    return Lookup(ready = ResolvedAddresses(data = data, owner = memory.heap))
+        let copy = try new u8[host.length + 1] --- in memory.heap
+        errdefer free(copy) in memory.heap
+        memory.copy(copy, host.bytes, host.length)
+        copy[host.length] = 0
+        var (signal_in, signal_out) = try signal_pair()
+        let state = new LookupState(host = copy, port = port, version = version, signal_in = signal_in, signal_out = signal_out) in memory.heap catch failure:
+            signal_in.destroy()
+            signal_out.destroy()
+            error(failure.code, failure.message)
+        let started = thread.spawn(lookup_main, state, name = "net lookup") catch failure:
+            state.release()
+            error(failure.code, "the lookup's thread could not start")
+        started.detach()
+        return Lookup(state = state)
+
+    ## The descriptor that becomes readable when the answer is ready, for a poller or an
+    ## event loop; none when it was ready at once. Never read or close it.
+    pub func descriptor() -> platform.SocketDescriptor?:
+        let state = self.state else return none
+        return state.signal_in.descriptor()
+
+    ## Whether the answer is ready.
+    pub func finished() -> bool:
+        let state = self.state else return true
+        state.lock.lock()
+        let finished = state.finished
+        state.lock.unlock()
+        return finished
+
+    ## The answer: the resolved endpoints in resolver order, or the resolution's error
+    ## (unknown_host, resolution_temporary, ...). Waits for it when it is not ready yet.
+    ## The answer can be taken once; the collection is the caller's to destroy.
+    pub func take() -> ResolvedAddresses!:
+        if self.taken:
+            error(closed, "the lookup's answer was taken")
+        let state = self.state else return try self.take_ready()
+        while not self.finished():
+            _ = try state.signal_in.wait(WaitInterest.read)
+        self.taken = true
+        state.lock.lock()
+        let addresses = state.addresses
+        state.addresses = ResolvedAddresses()
+        let failure = state.failure
+        state.lock.unlock()
+        if let code = failure:
+            error(code, "the host could not be resolved")
+        return addresses
+
+    func take_ready() -> ResolvedAddresses!:
+        self.taken = true
+        if let code = self.ready_failure:
+            error(code, "the host could not be resolved")
+        let addresses = self.ready
+        self.ready = ResolvedAddresses()
+        return addresses
+
+    ## Release the lookup. One still running is abandoned: its thread releases it.
+    pub func destroy():
+        self.ready.destroy()
+        let state = self.state else return
+        self.state = none
+        state.lock.lock()
+        let finished = state.finished
+        state.abandoned = true
+        state.lock.unlock()
+        if finished:
+            state.release()
+
+## The thread of a lookup: resolve, publish the answer, signal it (or release the state of
+## an abandoned lookup).
+func lookup_main(context: void*?):
+    let state = (LookupState*)(context else trap("a lookup without its state"))
+    var addresses = ResolvedAddresses()
+    var failure: ErrorCode? = none
+    with memory.heap:
+        addresses = resolve_all((c.str)(str)state.host[..<state.host.length - 1], state.port, state.version) catch problem:
+            failure = problem.code
+            recover ResolvedAddresses()
+    state.lock.lock()
+    state.addresses = addresses
+    state.failure = failure
+    state.finished = true
+    let abandoned = state.abandoned
+    if not abandoned:
+        let one: u8[1] = [1]
+        _ = state.signal_out.write(one) catch: recover 0
+    state.lock.unlock()
+    if abandoned:
+        state.release()
+
+## Two connected sockets, the first to watch and the second to write: a `socketpair` where
+## the host has one, a loopback TCP pair on Windows.
+func signal_pair() -> (Connection, Connection)!:
+    if platform.windows:
+        var listener = try Listener.bind(SocketAddress.loopback(0))
+        defer listener.destroy()
+        var outgoing = try Connection.connect(try listener.address())
+        errdefer outgoing.destroy()
+        let incoming = try listener.accept()
+        return (incoming, outgoing)
+    else:
+        var descriptors: i32[2] = [-1, -1]
+        let kind = stream if platform.macos else stream | socket_close_on_exec
+        if socketpair(1, kind, 0, &descriptors[0]) != 0:
+            error(socket_error(socket_errno()), "the lookup's signal could not be made")
+        var incoming = Connection.over((platform.SocketDescriptor)descriptors[0]) catch failure:
+            _ = close((platform.SocketDescriptor)descriptors[1])
+            error(failure.code, failure.message)
+        errdefer incoming.destroy()
+        let outgoing = try Connection.over((platform.SocketDescriptor)descriptors[1])
+        return (incoming, outgoing)
