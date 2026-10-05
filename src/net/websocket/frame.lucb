@@ -185,7 +185,7 @@ pub struct WebSocketDecoder:
     var failure: ErrorCode
 
     ## A message decoder for a client or server peer.
-    pub func create(from_client: bool, maximum_frame: u64 = 16777216, maximum_message: u64 = 16777216) -> WebSocketDecoder:
+    pub static func create(from_client: bool, maximum_frame: u64 = 16777216, maximum_message: u64 = 16777216) -> WebSocketDecoder:
         return WebSocketDecoder(from_client = from_client, maximum_frame = maximum_frame, sequence = WebSocketSequence(maximum = maximum_message))
 
     ## Decode from `input` into `output`.
@@ -253,7 +253,7 @@ pub struct WebSocketEncoder:
     var failure: ErrorCode
 
     ## A message encoder for a client or server peer.
-    pub func create(client: bool, maximum_frame: u64 = 16777216, maximum_message: u64 = 16777216) -> WebSocketEncoder:
+    pub static func create(client: bool, maximum_frame: u64 = 16777216, maximum_message: u64 = 16777216) -> WebSocketEncoder:
         return WebSocketEncoder(client = client, maximum_frame = maximum_frame, sequence = WebSocketSequence(maximum = maximum_message))
 
     ## Write a frame with `opcode` and `payload` to `destination`.

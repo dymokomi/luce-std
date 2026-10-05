@@ -15,7 +15,7 @@ pub struct Directory:
 
     ## Open a close-on-exec directory stream. With follow_symlinks=false, refuse
     ## a final symlink; intermediate path components still resolve normally.
-    pub func open(path: c.str, follow_symlinks: bool = true) -> Directory!:
+    pub static func open(path: c.str, follow_symlinks: bool = true) -> Directory!:
         return try open_directory_at(current_directory_fd, path, follow_symlinks)
 
     ## Borrow the descriptor until close. Do not close it or change its position.

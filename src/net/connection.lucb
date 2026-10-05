@@ -33,7 +33,7 @@ pub struct Connection: Reader, Writer:
     ## Connection setup is nonblocking internally; the returned socket is blocking
     ## unless nonblocking=true. Failure closes the newly acquired descriptor. DNS
     ## resolution is separate and is not covered by this connection deadline.
-    pub func connect(address: SocketAddress, deadline: Deadline = Deadline(), cancellation: sync.Cancellation*? = none, nonblocking: bool = false) -> Connection!:
+    pub static func connect(address: SocketAddress, deadline: Deadline = Deadline(), cancellation: sync.Cancellation*? = none, nonblocking: bool = false) -> Connection!:
         try check_operation(deadline, cancellation)
         var raw: NativeAddress
         let length = try address.write_native(&raw)
@@ -66,10 +66,10 @@ pub struct Connection: Reader, Writer:
     ## instead of ending the process. Make the connection while the peer is still there:
     ## macOS refuses the mark on a socket whose peer has already gone, and a write on
     ## such a connection answers `closed` without sending.
-    pub func over(descriptor: platform.SocketDescriptor) -> Connection!:
+    pub static func over(descriptor: platform.SocketDescriptor) -> Connection!:
         return Connection.from_socket(try SocketHandle.adopt(descriptor))
 
-    func from_socket(acquired: SocketHandle) -> Connection:
+    static func from_socket(acquired: SocketHandle) -> Connection:
         var connection = Connection(socket = acquired, guarded = false)
         _ = connection.guard()
         return connection

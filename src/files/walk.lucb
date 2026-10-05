@@ -103,7 +103,7 @@ struct WalkState:
     var path: strings.Builder
     var owner: memory.Allocator
 
-    func start(root: c.str, expected: Metadata, owner: memory.Allocator) -> WalkState!:
+    static func start(root: c.str, expected: Metadata, owner: memory.Allocator) -> WalkState!:
         var directory = try Directory.open(root)
         errdefer directory.destroy()
         let info = try directory.metadata()

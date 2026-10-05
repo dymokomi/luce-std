@@ -21,7 +21,7 @@ pub struct TemporaryFile: io.Reader, io.Writer:
     ## filtered by umask. The OS supplies 128 random filename bits per attempt;
     ## collisions retry up to 128 times. Entropy acquisition may block. No
     ## existing entry is opened or overwritten, and failure retains no allocation.
-    pub func create(directory: c.str, permissions: u32 = 384) -> TemporaryFile!:
+    pub static func create(directory: c.str, permissions: u32 = 384) -> TemporaryFile!:
         let candidate = try paths.join((str)directory, ".luce-00000000000000000000000000000000")
         defer candidate.release()
         let name = try heap_text(candidate.value)
@@ -142,7 +142,7 @@ struct Replacement:
     var temporary: TemporaryFile
     var synchronize: bool
 
-    func prepare(path: c.str, permissions: u32, synchronize: bool) -> Replacement!:
+    static func prepare(path: c.str, permissions: u32, synchronize: bool) -> Replacement!:
         let parent_name = try strings.copy(paths.directory((str)path))
         defer strings.release(parent_name)
         var parent: File

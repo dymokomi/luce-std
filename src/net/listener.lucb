@@ -17,7 +17,7 @@ pub struct Listener:
     ## pending connection queue; the value does not limit accepted connections.
     ## IPv6 listeners default to IPv6-only on both hosts. Set ipv6_only=false to
     ## also permit mapped IPv4 peers; the option has no effect for IPv4 listeners.
-    pub func bind(address: SocketAddress, backlog: i32 = 128, ipv6_only: bool = true) -> Listener!:
+    pub static func bind(address: SocketAddress, backlog: i32 = 128, ipv6_only: bool = true) -> Listener!:
         if backlog <= 0:
             error(invalid_options, "the listener backlog must be positive")
         var raw: NativeAddress

@@ -46,7 +46,7 @@ pub struct File: io.Reader, io.Writer:
     var ahead: readahead.ReadAhead
 
     ## Open a close-on-exec descriptor. Only the named creation modes create paths.
-    pub func open(path: c.str, mode: OpenMode = OpenMode.read, permissions: u32 = 420) -> File!:
+    pub static func open(path: c.str, mode: OpenMode = OpenMode.read, permissions: u32 = 420) -> File!:
         let temporary = mode == OpenMode.create_temporary
         let flags = try file_open_flags(OpenMode.create_new_read_write if temporary else mode, permissions)
         var fd = try open_descriptor(path, flags, permissions, temporary)

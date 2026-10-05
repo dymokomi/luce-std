@@ -16,14 +16,14 @@ pub struct Duration:
     pub let nanoseconds: i64
 
     ## `seconds` seconds, rounded to the nearest nanosecond.
-    pub func of_seconds(seconds: f64) -> Duration!:
+    pub static func of_seconds(seconds: f64) -> Duration!:
         let nanoseconds = seconds * 1000000000.0
         if not (nanoseconds >= -9.2e18 and nanoseconds <= 9.2e18):
             error(invalid, "a duration must be a finite number of seconds within 292 years")
         return Duration(nanoseconds = (i64)(nanoseconds + (0.5 if nanoseconds >= 0.0 else -0.5)))
 
     ## `milliseconds` milliseconds.
-    pub func of_milliseconds(milliseconds: i64) -> Duration:
+    pub static func of_milliseconds(milliseconds: i64) -> Duration:
         return Duration(nanoseconds = milliseconds * 1000000)
 
     ## The span in seconds, with its fraction.

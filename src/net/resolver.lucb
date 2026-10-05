@@ -75,7 +75,7 @@ struct ResolverQuery:
     var head: AddressInfo*?
     var family: i32
 
-    func open(host: c.str, version: IpVersion?) -> ResolverQuery!:
+    static func open(host: c.str, version: IpVersion?) -> ResolverQuery!:
         if platform.windows:
             try windows_socket_startup()
         var family: i32 = 0

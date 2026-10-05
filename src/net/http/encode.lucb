@@ -108,7 +108,7 @@ pub struct HttpBodyWriter: Writer:
     var failure: ErrorCode
 
     ## A body writer over `destination` for a body of `kind`.
-    pub func over(destination: Writer, kind: HttpBodyKind, length: u64 = 0) -> HttpBodyWriter!:
+    pub static func over(destination: Writer, kind: HttpBodyKind, length: u64 = 0) -> HttpBodyWriter!:
         if kind == HttpBodyKind.tunnel:
             error(http_unsupported, "a tunnel has no HTTP body writer")
         return HttpBodyWriter(destination = destination, kind = kind, remaining = length if kind == HttpBodyKind.fixed else 0, active = true)

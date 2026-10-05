@@ -18,7 +18,7 @@ pub struct GraphemeIterator:
     var offset: usize
 
     ## An iterator over the grapheme clusters of `text`, whose UTF-8 is validated up front.
-    pub func over(text: str) -> GraphemeIterator!:
+    pub static func over(text: str) -> GraphemeIterator!:
         if not utf8.valid(text.bytes):
             error(utf8.invalid_sequence, "invalid UTF-8 text")
         return GraphemeIterator(text = text)

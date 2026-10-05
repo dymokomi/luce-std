@@ -29,13 +29,13 @@ pub struct Deadline:
 
     ## Expire this many nanoseconds from now. Zero is an immediate check. A delay
     ## that exceeds the clock's representable range reports invalid_options.
-    pub func after(nanoseconds: u64) -> Deadline!:
+    pub static func after(nanoseconds: u64) -> Deadline!:
         let current = try monotonic_nanoseconds()
         let end = current +? nanoseconds else error(invalid_options, "the deadline exceeds the monotonic clock range")
         return Deadline(instant = end)
 
     ## Use an absolute nanosecond instant from the same monotonic origin as time.now.
-    pub func at(nanoseconds: u64) -> Deadline:
+    pub static func at(nanoseconds: u64) -> Deadline:
         return Deadline(instant = nanoseconds)
 
 ## Which readiness to wait for.
@@ -70,7 +70,7 @@ pub struct Poller:
     var owner: memory.Allocator?
 
     ## A poller for up to `capacity` descriptors.
-    pub func create(capacity: usize) -> Poller!:
+    pub static func create(capacity: usize) -> Poller!:
         if capacity == 0 or capacity > 2147483647:
             error(invalid_options, "poller capacity must be between one and i32 maximum")
         let entries = try new NativePoll[capacity] ---

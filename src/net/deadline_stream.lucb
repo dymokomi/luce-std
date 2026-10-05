@@ -22,7 +22,7 @@ pub struct DeadlineStream: Reader, Writer:
     var cancellation: sync.Cancellation*?
 
     ## Wrap `connection` so every transfer shares one absolute deadline.
-    pub func over(connection: Connection*, deadline: Deadline = Deadline(), cancellation: sync.Cancellation*? = none) -> DeadlineStream!:
+    pub static func over(connection: Connection*, deadline: Deadline = Deadline(), cancellation: sync.Cancellation*? = none) -> DeadlineStream!:
         try require_nonblocking(connection)
         return DeadlineStream(connection = connection, deadline = deadline, cancellation = cancellation)
 

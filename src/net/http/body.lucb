@@ -42,7 +42,7 @@ pub struct HttpBodyDecoder:
     var failure: ErrorCode
 
     ## A decoder for a body of `kind`.
-    pub func create(kind: HttpBodyKind, length: u64 = 0, maximum: u64 = 1073741824) -> HttpBodyDecoder!:
+    pub static func create(kind: HttpBodyKind, length: u64 = 0, maximum: u64 = 1073741824) -> HttpBodyDecoder!:
         if kind == HttpBodyKind.tunnel:
             error(http_unsupported, "a tunnel has no HTTP body decoder")
         if kind == HttpBodyKind.fixed and length > maximum:

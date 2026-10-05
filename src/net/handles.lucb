@@ -17,7 +17,7 @@ struct SocketHandle:
 
     ## Linux sets close-on-exec atomically with creation. macOS requires a
     ## separate fcntl call; callers must serialize concurrent fork/exec there.
-    func create(kind: i32, version: IpVersion) -> SocketHandle!:
+    static func create(kind: i32, version: IpVersion) -> SocketHandle!:
         if platform.windows:
             try windows_socket_startup()
             let descriptor = WSASocketW(inet if version == IpVersion.ipv4 else inet6, kind, 0, none, 0, 128)
@@ -37,7 +37,7 @@ struct SocketHandle:
 
     ## Ownership transfers on entry, including failure. Preserve existing
     ## descriptor flags and close once if setting close-on-exec fails.
-    func adopt(descriptor: platform.SocketDescriptor) -> SocketHandle!:
+    static func adopt(descriptor: platform.SocketDescriptor) -> SocketHandle!:
         if descriptor < 0:
             error(closed, "the socket descriptor is invalid")
         if platform.windows:

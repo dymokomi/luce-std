@@ -16,7 +16,7 @@ pub struct Datagram:
 
     ## IPv6 sockets are IPv6-only by default. Set ipv6_only=false to permit
     ## mapped IPv4 packets; it has no effect when binding an IPv4 address.
-    pub func bind(address: SocketAddress, ipv6_only: bool = true) -> Datagram!:
+    pub static func bind(address: SocketAddress, ipv6_only: bool = true) -> Datagram!:
         var raw: NativeAddress
         let length = try address.write_native(&raw)
         var acquired = try SocketHandle.create(datagram, address.ip.kind)

@@ -13,10 +13,10 @@ pub struct Counting: memory.Allocator:
     pub var failures: usize
     pub var limit: usize
 
-    pub func unlimited() -> Counting:
+    pub static func unlimited() -> Counting:
         return Counting(live = 0, bytes = 0, peak_bytes = 0, peak_live = 0, allocations = 0, frees = 0, failures = 0, limit = 0)
 
-    pub func within(limit: usize) -> Counting:
+    pub static func within(limit: usize) -> Counting:
         var c = Counting.unlimited()
         c.limit = limit
         return c
