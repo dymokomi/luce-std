@@ -46,6 +46,11 @@ func test_http() -> !:
     assert(tunnel.body_kind == net.HttpBodyKind.tunnel)
     let eof = try net.http_parse_response("HTTP/1.1 200 OK\r\n\r\n".bytes, fields)
     assert(eof.body_kind == net.HttpBodyKind.until_eof and not eof.keep_alive)
+    # 1xx, 204 and 304 responses have no body whatever framing fields they carry
+    let bodiless: str[4] = ["HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n", "HTTP/1.1 304 Not Modified\r\nContent-Length: 12\r\n\r\n", "HTTP/1.1 103 Early Hints\r\nContent-Length: 0\r\n\r\n", "HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n"]
+    for text in bodiless:
+        let empty = try net.http_parse_response(text.bytes, fields)
+        assert(empty.body_kind == net.HttpBodyKind.empty and empty.keep_alive)
     var output: u8[4096]
     var outgoing: net.HttpField[1] = [net.HttpField(name = "Host", value = "example.test")]
     let encoded = try net.http_encode_head(output, net.HttpHead(method = "POST", target = "/", version = "HTTP/1.1", fields = outgoing, body_kind = net.HttpBodyKind.chunked, keep_alive = true))
