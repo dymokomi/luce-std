@@ -19,7 +19,7 @@ Base and serves Luce and Base programs alike.
 | `from luce_std import math32` | Single-precision mathematical functions |
 | `from luce_std import unicode` | Unicode 17.0.0 casing and normalization |
 | `from luce_std import utf8` | Strict UTF-8 scalar encoding and decoding |
-| `from luce_std import crash` | Crash reports |
+| `from luce_std import crash` | Crash reports in `~/.luce/crashes`, named after the program's package; hooks that save work after a trap (`on_crash`, `recovery_directory`, `note_recovery`); starting the program again to show its report (`relaunch_on_crash`, `report_to_show`), which luce-ui's crash window uses. Nothing is sent anywhere |
 
 ## Using it
 

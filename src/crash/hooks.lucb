@@ -1,0 +1,117 @@
+#==============================================================================================
+#
+#   hooks - What a program does once it has crashed
+#
+#   DESCRIPTION:
+#       After a trap's report is written, `follow_crash` runs the program's crash hooks
+#       on the thread that trapped, once, within a time budget, then starts the
+#       reporter when the program asked for one. A trap inside a hook ends the hooks;
+#       a fatal signal runs none, since nothing but async-signal-safe calls may run in
+#       its handler: a program that must not lose work saves it as it goes and looks
+#       in `recovery_directory` when it starts.
+#
+#==============================================================================================
+
+import ownership
+import thread
+
+## The hooks `on_crash` registered and the runtime context each was registered on: a
+## callback runs only on its own context's thread.
+var hooks: interop.Callback[unit, unit][]
+var hook_contexts: u64[]
+var hook_count: usize = 0
+## Whether the hooks are running; a trap inside one lands in `follow_crash` again.
+var hooks_running: bool = false
+## How long the hooks may run in all before the process ends without them.
+let hook_budget_milliseconds: u64 = 5000
+
+## Run `hook` after a trap, before the process ends: the place to save what can be
+## saved into `recovery_directory()` (and say so with `note_recovery`). Hooks run in
+## the order they were added, on the thread that trapped, and only the ones added on
+## that thread's runtime context; together they have five seconds, after which the
+## process ends anyway. A trap inside a hook is added to the report and skips the
+## hooks after it. A fatal signal (a segmentation fault and the like) runs no hooks.
+## Turns crash reports on when they are off.
+pub func on_crash(hook: interop.Callback[unit, unit]) -> !:
+    if not core.crash_reports_enabled():
+        try enable()
+    if hook_count == hooks.length:
+        let room = 4 if hooks.length == 0 else hooks.length * 2
+        let grown = try new interop.Callback[unit, unit][room] --- in memory.heap
+        let contexts = try new u64[room] --- in memory.heap
+        for index in 0..<hook_count:
+            grown[index] = hooks[index]
+            contexts[index] = hook_contexts[index]
+        if hooks.length > 0:
+            free(hooks) in memory.heap
+            free(hook_contexts) in memory.heap
+        hooks = grown
+        hook_contexts = contexts
+    hooks[hook_count] = hook.clone()
+    hook_contexts[hook_count] = ownership.context_id()
+    hook_count += 1
+
+## Say, from a crash hook, that a recovery copy was saved at `path`. The report
+## records it, and a crash window tells the user where it is. Outside a crash
+## hook it does nothing.
+pub func note_recovery(path: str):
+    if not hooks_running:
+        return
+    var line: u8[1200]
+    let text = strings.format(line, f"recovery: {path}\n") catch _:
+        return
+    add_to_report(text)
+
+## What `core` runs once a report is written: the hooks after a trap, then the
+## reporter. `signal` is 0 for a trap, else the fatal signal's number, when only
+## async-signal-safe work may follow.
+func follow_crash(signal: i32):
+    if signal != 0 or hooks_running:
+        start_reporter()
+        return
+    hooks_running = true
+    if hook_count > 0:
+        start_watch()
+        run_hooks()
+    start_reporter()
+
+## Every hook registered on this thread's runtime context, in order; a failure each
+## returns, and the hooks that belong to other threads, are noted in the report.
+func run_hooks():
+    let context = ownership.context_id()
+    var elsewhere: usize = 0
+    var line: u8[600]
+    for index in 0..<hook_count:
+        if hook_contexts[index] != context:
+            elsewhere += 1
+            continue
+        let outcome = hooks[index].invoke(())
+        outcome.get() catch failure:
+            add_to_report(strings.format(line, f"(a crash hook failed: {failure.message})\n") catch _: recover "(a crash hook failed)\n")
+        outcome.release()
+    if elsewhere > 0:
+        add_to_report(strings.format(line, f"({elsewhere} crash hooks belong to another thread and did not run)\n") catch _: recover "")
+
+## Start the thread that ends the process when the hooks overrun their budget.
+func start_watch():
+    let watch = thread.spawn(watch_hooks, none, name = "crash hooks") catch _:
+        return
+    watch.detach()
+
+## The hooks' time limit: past it, the process ends with the hooks still running.
+func watch_hooks(context: void*?):
+    _ = context
+    thread.sleep(hook_budget_milliseconds)
+    add_to_report("(the crash hooks ran out of time and were stopped)\n")
+    start_reporter()
+    quick_exit(1)
+
+## Append `text` to this process's report.
+func add_to_report(text: str):
+    if report_length == 0:
+        return
+    var file = files.File.open((c.str)&report_path[0], files.OpenMode.append) catch _:
+        return
+    defer file.destroy()
+    file.write_text(text) catch _:
+        return

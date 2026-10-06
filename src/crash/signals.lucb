@@ -1,0 +1,145 @@
+#==============================================================================================
+#
+#   signals - Fatal signals and unhandled exceptions
+#
+#   DESCRIPTION:
+#       The handlers that turn a segmentation fault, bus error, illegal instruction,
+#       arithmetic fault or abort (POSIX), or an unhandled exception (Windows), into a
+#       report. The report is written by `core`, from inside the handler, with only
+#       async-signal-safe calls; then `follow_crash` may start the reporter.
+#
+#==============================================================================================
+
+extern func linux_sigaction as "sigaction"(number: i32, action: const LinuxAction*, old: LinuxAction*?) -> i32
+extern func mac_sigaction as "sigaction"(number: i32, action: const MacAction*, old: MacAction*?) -> i32
+extern func linux_sigaltstack as "sigaltstack"(stack: const LinuxStack*, old: LinuxStack*?) -> i32
+extern func mac_sigaltstack as "sigaltstack"(stack: const MacStack*, old: MacStack*?) -> i32
+extern func SetUnhandledExceptionFilter(filter: (func(WindowsException*) -> i32)?) -> void*?
+
+## glibc's `struct sigaction` (x86-64 and arm64 alike).
+extern struct LinuxAction:
+    handler: func(i32, void*?, void*?) -> unit
+    mask: u64[16]
+    flags: i32
+    padding: i32
+    restorer: void*?
+
+## macOS's `struct sigaction`.
+extern struct MacAction:
+    handler: func(i32, void*?, void*?) -> unit
+    mask: u32
+    flags: i32
+
+## `stack_t` on Linux and on macOS: the same fields in a different order.
+extern struct LinuxStack:
+    base: void*?
+    flags: i32
+    padding: i32
+    size: usize
+
+extern struct MacStack:
+    base: void*?
+    size: usize
+    flags: i32
+    padding: i32
+
+## EXCEPTION_RECORD's leading fields, all the filter reads.
+extern struct WindowsExceptionRecord:
+    code: u32
+    flags: u32
+
+## EXCEPTION_POINTERS.
+extern struct WindowsException:
+    record: WindowsExceptionRecord*
+    context: void*
+
+## Whether the handlers are in place; `enable` may run more than once.
+var handlers_installed: bool = false
+
+## Catch the fatal signals (POSIX) or unhandled exceptions (Windows) of every thread.
+func install_fatal_handlers() -> !:
+    if handlers_installed:
+        return
+    handlers_installed = true
+    if platform.posix and not platform.wasm32:
+        try install_alternate_stack()
+        for number in [illegal_signal, abort_signal, arithmetic_signal, segmentation_signal, bus_signal()]:
+            install_handler(number)
+    if platform.windows:
+        # every thread's unhandled exception, where POSIX has signals
+        _ = SetUnhandledExceptionFilter(fatal_exception)
+
+let illegal_signal: i32 = 4
+let abort_signal: i32 = 6
+let arithmetic_signal: i32 = 8
+let segmentation_signal: i32 = 11
+
+## SIGBUS is 10 on macOS and 7 on Linux.
+func bus_signal() -> i32:
+    return 10 if platform.macos else 7
+
+## The handler gets the interrupted context (SA_SIGINFO), runs on the
+## alternate stack when there is one, so a stack overflow is reported too
+## (SA_ONSTACK), and runs again for a fault inside itself (SA_NODEFER), which
+## is how a stack walk that meets an unreadable frame ends.
+func install_handler(number: i32):
+    if platform.macos:
+        var action = MacAction(handler = fatal_action, mask = 0, flags = 0x40 | 0x1 | 0x10)
+        _ = mac_sigaction(number, &action, none)
+    elif platform.linux:
+        var action: LinuxAction = ---
+        action.handler = fatal_action
+        for index in 0..<(usize)16:
+            action.mask[index] = 0
+        action.flags = 0x4 | 0x08000000 | 0x40000000
+        action.padding = 0
+        action.restorer = none
+        _ = linux_sigaction(number, &action, none)
+
+## A stack for the main thread's fatal signals, so running out of stack can
+## still be reported. Other threads keep reporting on their own stacks.
+func install_alternate_stack() -> !:
+    let size: usize = 262144
+    let stack = try new u8[size] --- in memory.heap
+    if platform.macos:
+        var alternate = MacStack(base = (void*)stack.data, size = size, flags = 0, padding = 0)
+        _ = mac_sigaltstack(&alternate, none)
+    elif platform.linux:
+        var alternate = LinuxStack(base = (void*)stack.data, flags = 0, padding = 0, size = size)
+        _ = linux_sigaltstack(&alternate, none)
+
+func fatal_action(number: i32, info: void*?, context: void*?):
+    _ = info
+    core.report_fatal_signal_in(signal_name(number), number, context)
+
+func signal_name(number: i32) -> str:
+    if number == segmentation_signal:
+        return "SIGSEGV (invalid memory access)"
+    elif number == illegal_signal:
+        return "SIGILL (illegal instruction)"
+    elif number == arithmetic_signal:
+        return "SIGFPE (arithmetic fault)"
+    elif number == abort_signal:
+        return "SIGABRT (abort)"
+    else:
+        return "SIGBUS (bus error)"
+
+## A Windows exception nothing handled: named in the report as a signal is on POSIX.
+## The stack is walked from the exception's CONTEXT, where the fault happened.
+func fatal_exception(exception: WindowsException*) -> i32:
+    let code = exception.record.code
+    let context = (const void*)exception.context
+    if code == 0xC0000005:
+        core.report_fatal_signal_in("EXCEPTION_ACCESS_VIOLATION (invalid memory access)", 11, context)
+    if code == 0xC000001D:
+        core.report_fatal_signal_in("EXCEPTION_ILLEGAL_INSTRUCTION", 4, context)
+    if code == 0xC0000094 or code == 0xC0000095 or code == 0xC000008E or code == 0xC0000090:
+        core.report_fatal_signal_in("EXCEPTION_INT_DIVIDE_BY_ZERO or a floating-point fault (arithmetic fault)", 8, context)
+    if code == 0xC00000FD:
+        core.report_fatal_signal_in("EXCEPTION_STACK_OVERFLOW", 11, context)
+    if code == 0xC0000409:
+        core.report_fatal_signal_in("STATUS_STACK_BUFFER_OVERRUN (fast fail)", 6, context)
+    core.report_fatal_signal_in("an unhandled Windows exception", 6, context)
+
+test "SIGBUS is numbered by the platform":
+    assert(bus_signal() == (10 if platform.macos else 7))

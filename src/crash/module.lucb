@@ -1,0 +1,217 @@
+#==============================================================================================
+#
+#   crash - Crash reports
+#
+#   DESCRIPTION:
+#       A program that turns crash reports on gets a file per crash under
+#       ~/.luce/crashes: which program and version, the platform, the trap's
+#       position and message (or the fatal signal) and a native stack. Traps are
+#       the program's own; segmentation faults, bus errors, illegal instructions,
+#       arithmetic faults and aborts are caught on POSIX, and unhandled exceptions
+#       (access violations and the like) on Windows.
+#
+#       A program can ask for more than the file. Hooks (`on_crash`) run after a trap,
+#       before the process ends, to save what can be saved into the recovery directory.
+#       `relaunch_on_crash` starts the program again once the report is written, with
+#       the report's path in LUCE_CRASH_REPORT, so a program with a window (luce-ui) can
+#       show it from a fresh process; nothing is drawn from the one that crashed.
+#       Reports stay on the machine: nothing here sends them anywhere.
+#
+#==============================================================================================
+
+import c
+import core
+import files
+import interop
+import memory
+import os
+import paths
+import platform
+import strings
+import time
+
+extern func getpid() -> i32
+extern func GetCurrentProcessId() -> u32
+
+# mark: Enabling ===============================================================================
+
+## The program's name as reports carry it: letters, digits, `-` and `_`.
+var app_name: u8[64]
+var app_length: usize = 0
+## The report this process writes when it crashes, NUL-terminated; empty until `enable`.
+var report_path: u8[1100]
+var report_length: usize = 0
+
+## The directory reports go to: ~/.luce/crashes.
+pub func directory() -> interop.Owned[str]!:
+    return try luce_directory("crashes")
+
+## Turn crash reports on for this process. `app` names the program in the file
+## name and header (letters, digits, `-` and `_` are kept; anything else becomes
+## `-`); `version` goes in the header. Without them the program's own package
+## name and version are used (`platform.program`), or, for a program built
+## outside a package, its executable's name.
+pub func enable(app: str = "", version: str = "") -> !:
+    if platform.wasm32:
+        return
+    else:
+        let folder = try directory()
+        defer folder.release()
+        try files.ensure_directory(folder.value)
+        var named: u8[64]
+        let program = app if app.length > 0 else default_name(named)
+        let kept = safe_name(program, app_name)
+        app_length = kept.length
+        let versioned = version if version.length > 0 else platform.program_version
+        var stamp: u8[128]
+        let started = time.unix()
+        let pid = process_id()
+        let file_name = try strings.format(stamp, f"{kept}-{started}-{pid}.crash")
+        let path = try paths.join(folder.value, file_name)
+        defer path.release()
+        report_length = path.value.length if path.value.length < report_path.length - 1 else report_path.length - 1
+        memory.copy(report_path, path.value.bytes, report_length)
+        report_path[report_length] = 0
+        var header: u8[1024]
+        let text = try strings.format(header, f"luce crash report\napp: {program}\nversion: {versioned}\nplatform: {platform.name}\npid: {pid}\nstarted: {started}\n\n")
+        core.set_crash_report(path.value, text)
+        core.set_crash_handler(follow_crash)
+        try install_fatal_handlers()
+
+func process_id() -> i64:
+    if platform.windows:
+        return (i64)GetCurrentProcessId()
+    elif platform.posix and not platform.wasm32:
+        return (i64)getpid()
+    return 0
+
+## The name a program has without being given one: its package's, else its
+## executable's file name without `.exe`, into `buffer`.
+func default_name(buffer: u8[]) -> str:
+    if platform.program != "app":
+        return platform.program
+    let executable = os.executable() catch _:
+        return platform.program
+    defer strings.release(executable)
+    var name = paths.base(executable)
+    if strings.ends_with(name, ".exe"):
+        name = (str)name.bytes[..<name.length - 4]
+    let kept = name.length if name.length < buffer.length else buffer.length
+    memory.copy(buffer, name.bytes, kept)
+    return (str)buffer[..<kept]
+
+## The name reports carry for this process: the one `enable` was given, else the
+## default one, into `buffer`.
+func current_name(buffer: u8[]) -> str:
+    if app_length > 0:
+        return (str)app_name[..<app_length]
+    var named: u8[64]
+    return safe_name(default_name(named), buffer)
+
+## `app` with anything but letters, digits, `-` and `_` replaced by `-`, into `buffer`.
+func safe_name(app: str, buffer: u8[]) -> str:
+    var length: usize = 0
+    for byte in app.bytes:
+        if length >= buffer.length:
+            break
+        let kept = (byte >= 97 and byte <= 122) or (byte >= 65 and byte <= 90) or (byte >= 48 and byte <= 57) or byte == 45 or byte == 95
+        buffer[length] = byte if kept else 45
+        length += 1
+    if length == 0:
+        buffer[0] = 112
+        length = 1
+    return (str)buffer[..<length]
+
+## ~/.luce/`name`.
+func luce_directory(name: str) -> interop.Owned[str]!:
+    let home = try files.home_directory()
+    defer home.release()
+    let luce = try paths.join(home.value, ".luce")
+    defer luce.release()
+    return try paths.join(luce.value, name)
+
+# mark: Recovery ===============================================================================
+
+## The directory a crash hook saves recovery copies to, created when missing:
+## ~/.luce/recovery/<app>, named as reports name the program. A recovery copy goes
+## here, never over the user's own file, and the program looks here on its next start.
+pub func recovery_directory() -> interop.Owned[str]!:
+    let recovery = try luce_directory("recovery")
+    defer recovery.release()
+    var name: u8[64]
+    let folder = try paths.join(recovery.value, current_name(name))
+    errdefer folder.release()
+    try files.ensure_directory(folder.value)
+    return folder
+
+# mark: Reading back ===========================================================================
+
+## The newest report `app` left that nobody has taken, read and marked taken
+## (renamed to `.seen`), or empty text when there is none.
+pub func take_report(app: str) -> interop.Owned[str]!:
+    let folder = try directory()
+    defer folder.release()
+    var name: u8[64]
+    let prefix = safe_name(app, name)
+    let names = files.list((c.str)folder.value) catch _:
+        return try interop.copy_text("")
+    defer names.release()
+    # Names are app-started-pid.crash; the newest start is the largest number.
+    var newest: str = ""
+    var newest_started: i64 = -1
+    for entry in names.value:
+        if entry.length > prefix.length + 7 and strings.starts_with(entry, prefix) and entry.bytes[prefix.length] == 45 and strings.ends_with(entry, ".crash"):
+            let rest = (str)entry.bytes[prefix.length + 1..]
+            let dash = strings.find(rest, "-") else continue
+            let started = strings.parse_i64((str)rest.bytes[..<dash]) else continue
+            if started > newest_started:
+                newest_started = started
+                newest = entry
+    if newest.length == 0:
+        return try interop.copy_text("")
+    let path = try paths.join(folder.value, newest)
+    defer path.release()
+    return try read_report(path.value)
+
+## The report at `path`, read and marked taken (renamed to `.seen`, unless it is
+## one already), so `take_report` does not offer it again.
+pub func read_report(path: str) -> interop.Owned[str]!:
+    let text = try files.read_text(path, limit = 262144)
+    errdefer text.release()
+    if strings.ends_with(path, ".crash"):
+        var seen: u8[1100]
+        let seen_path = try strings.format(seen, f"{path}.seen")
+        let source = try strings.copy(path)
+        defer strings.release(source)
+        let target = try strings.copy(seen_path)
+        defer strings.release(target)
+        # A report that cannot be marked may show again; that is better than losing it.
+        files.rename((c.str)source, (c.str)target) catch failure:
+            _ = failure
+    return text
+
+## The report this process was started to show: the path in LUCE_CRASH_REPORT,
+## which `relaunch_on_crash` sets for the program it starts after a crash, or
+## none in an ordinary run.
+pub func report_to_show() -> str?:
+    if platform.wasm32:
+        return none
+    else:
+        let path = os.env(report_variable) else return none
+        return path if path.length > 0 else none
+
+## The environment variable that carries a report to show.
+let report_variable: c.str = "LUCE_CRASH_REPORT"
+
+test "a crash name keeps letters, digits, dashes and underscores":
+    var buffer: u8[64]
+    assert(safe_name("luced-2d", buffer) == "luced-2d")
+    assert(safe_name("Luced 2D.app", buffer) == "Luced-2D-app")
+    assert(safe_name("", buffer) == "p")
+
+test "a program is named by its package without being told":
+    var buffer: u8[64]
+    let named = default_name(buffer)
+    assert(named.length > 0)
+    if platform.program != "app":
+        assert(named == platform.program)

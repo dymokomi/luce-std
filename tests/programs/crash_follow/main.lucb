@@ -1,0 +1,100 @@
+## A program that crashes after asking for crash hooks and a relaunch; run.py checks what
+## followed. Started with LUCE_CRASH_REPORT (as the relaunch starts it), it plays the
+## reporter: it writes what it was asked to show into $HOME/reporter-<pid>.txt and quits,
+## or, with the argument `trap`, crashes again, which must start nothing, or, with
+## `reopen`, starts the program again as an ordinary run, which crashes in `hooks` mode.
+##
+##   hooks       two hooks; the first saves a recovery copy and notes it; then a trap
+##   hook-trap   the first hook traps: the second must not run
+##   slow-hook   a hook that never finishes: the budget ends the process
+##   signal      a null write: a fatal signal, which runs no hook
+from luce_std import crash
+from luce_std import files
+from luce_std import paths
+import interop
+import memory
+import os
+import ownership
+import strings
+import thread
+
+struct Saver:
+    var mode: str
+
+    func save(argument: unit) -> interop.Outcome[unit]:
+        _ = argument
+        if self.mode == "hook-trap":
+            trap("a trap inside a crash hook")
+        if self.mode == "slow-hook":
+            while true:
+                thread.sleep(1000)
+        let folder = crash.recovery_directory() catch failure:
+            trap(failure.message)
+        defer folder.release()
+        let copy = paths.join(folder.value, "scene.recovered") catch failure:
+            trap(failure.message)
+        defer copy.release()
+        files.write_text(copy.value, "the scene, as it was") catch failure:
+            trap(failure.message)
+        crash.note_recovery(copy.value)
+        return interop.Outcome[unit].success(interop.Owned[unit](()))
+
+    func second(argument: unit) -> interop.Outcome[unit]:
+        _ = argument
+        let home = os.env("HOME") else trap("no HOME")
+        var room: u8[1024]
+        let marker = strings.format(room, f"{home}/second-hook-ran") catch failure:
+            trap(failure.message)
+        files.write_text(marker, "yes") catch failure:
+            trap(failure.message)
+        return interop.Outcome[unit].success(interop.Owned[unit](()))
+
+    func close():
+        self.mode = ""
+
+    func trace(visit: func(ownership.Object*, void*) -> unit, context: void*):
+        _ = visit
+        _ = context
+
+let saver_type: interop.Type[Saver] = interop.Type[Saver]("crash test saver", Saver.close, Saver.trace)
+
+noinline func crash_here(address: usize):
+    let target = (usize*)(void*)address
+    target[0] = 7
+
+## The reporter's part: record the report it was started to show, then quit (or crash).
+func report(path: str, arguments: str[]) -> i32!:
+    try crash.enable()
+    try crash.relaunch_on_crash()
+    if arguments.length > 1 and arguments[1] == "trap":
+        trap("the reporter crashed too")
+    if arguments.length > 1 and arguments[1] == "reopen":
+        try crash.reopen()
+        return 0
+    let text = try crash.read_report(path)
+    defer text.release()
+    let home = os.env("HOME") else trap("no HOME")
+    var room: u8[1024]
+    let marker = try strings.format(room, f"{home}/reporter-{os.pid()}.txt")
+    var body: u8[300000]
+    try files.write_text(marker, try strings.format(body, f"arguments: {arguments.length}\npath: {path}\n{text.value}"))
+    return 0
+
+pub func main(arguments: str[]) -> i32!:
+    if let path = crash.report_to_show():
+        return try report(path, arguments)
+    let mode = arguments[1] if arguments.length > 1 else "hooks"
+    try crash.enable()
+    try crash.relaunch_on_crash()
+    let saver = try interop.Reference[Saver].adopt(new Saver(mode = mode) in memory.heap, saver_type, memory.heap)
+    defer saver.release()
+    let first = try interop.Callback[unit, unit].bind_mutating(saver, Saver.save)
+    defer first.release()
+    let second = try interop.Callback[unit, unit].bind_mutating(saver, Saver.second)
+    defer second.release()
+    try crash.on_crash(first)
+    try crash.on_crash(second)
+    if mode == "signal":
+        let parsed = strings.parse_u64(arguments[2] if arguments.length > 2 else "0") else 0
+        crash_here((usize)parsed)
+    trap("a deliberate trap after the hooks were set")
