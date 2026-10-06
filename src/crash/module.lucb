@@ -23,6 +23,7 @@ import c
 import core
 import files
 import interop
+import io
 import memory
 import os
 import paths
@@ -174,19 +175,25 @@ pub func take_report(app: str) -> interop.Owned[str]!:
     return try read_report(path.value)
 
 ## The report at `path`, read and marked taken (renamed to `.seen`, unless it is
-## one already), so `take_report` does not offer it again.
+## one already), so `take_report` does not offer it again. A report someone has taken
+## already is read under its `.seen` name: a program started again to show a report
+## finds it whichever reader came first.
 pub func read_report(path: str) -> interop.Owned[str]!:
-    let text = try files.read_text(path, limit = 262144)
+    let report = strings.ends_with(path, ".crash")
+    let seen_path = try strings.join([path, ".seen"], "")
+    defer strings.release(seen_path)
+    var taken = false
+    let text = files.read_text(path, limit = 262144) catch failure:
+        if not report or not files.exists((c.str)seen_path):
+            error(failure.code, failure.message)
+        taken = true
+        recover try files.read_text(seen_path, limit = 262144)
     errdefer text.release()
-    if strings.ends_with(path, ".crash"):
-        var seen: u8[1100]
-        let seen_path = try strings.format(seen, f"{path}.seen")
+    if report and not taken:
         let source = try strings.copy(path)
         defer strings.release(source)
-        let target = try strings.copy(seen_path)
-        defer strings.release(target)
         # A report that cannot be marked may show again; that is better than losing it.
-        files.rename((c.str)source, (c.str)target) catch failure:
+        files.rename((c.str)source, (c.str)seen_path) catch failure:
             _ = failure
     return text
 
@@ -210,6 +217,22 @@ func showing_report() -> bool:
 
 ## The environment variable that carries a report to show.
 let report_variable: c.str = "LUCE_CRASH_REPORT"
+
+test "a report taken already reads under its .seen name":
+    var digits: u8[24]
+    let pid = try strings.format(digits, f"{os.pid()}")
+    let room = try strings.join([io.path.temp(), "/luce-std-taken-", pid, ".crash"], "")
+    defer strings.release(room)
+    let seen = try strings.join([room, ".seen"], "")
+    defer strings.release(seen)
+    try files.write((c.str)room, "luce crash report\n".bytes)
+    let first = try read_report(room)
+    first.release()
+    assert(not files.exists((c.str)room) and files.exists((c.str)seen))
+    let again = try read_report(room)
+    defer again.release()
+    assert(again.value == "luce crash report\n")
+    try files.remove_file((c.str)seen)
 
 test "a crash name keeps letters, digits, dashes and underscores":
     var buffer: u8[64]

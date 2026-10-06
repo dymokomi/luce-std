@@ -8,6 +8,7 @@
 #
 #==============================================================================================
 
+import collections
 import thread
 import utf8
 
@@ -94,21 +95,22 @@ pub struct Command:
             # a child that has printed nothing has no buffer yet
             if self.state().used == 0:
                 return try interop.copy_text("")
-            var text = try strings.Builder.create(self.state().used)
+            var text: collections.Buffer
+            try text.reserve(self.state().used)
             defer text.destroy()
             var offset: usize = 0
             let bytes = self.state().output[..<self.state().used]
             while offset < bytes.length:
                 if let scalar = utf8.decode(bytes, offset):
                     if (u32)scalar.scalar == 0:
-                        try text.put("�")
+                        try text.put_text("�")
                     else:
                         _ = try text.write(bytes[offset..<offset + scalar.width])
                     offset += scalar.width
                 else:
-                    try text.put("�")
+                    try text.put_text("�")
                     offset += 1
-            return try interop.copy_text(text.view())
+            return try interop.copy_text(text.text())
 
     ## The captured standard error, as owned text.
     pub func error_message() -> interop.Owned[str]!:
@@ -171,7 +173,7 @@ func command_dispose(state: CommandState*):
 
 func command_entry(raw: void*?):
     let state = (CommandState*)(raw else return)
-    let outcome = run_controlled((c.str)state.program, state.arguments, (c.str)state.directory, state.environment if state.environment_count > 0 else none, state) catch failure:
+    let outcome = run_controlled((c.str)state.program, state.arguments, (c.str)state.directory, state.environment if state.environment_count > 0 else none, state, false) catch failure:
         state.failure = strings.copy(failure.message) catch ignored: recover ""
         state.done.store(true, .release)
         return

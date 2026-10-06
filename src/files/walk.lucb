@@ -49,13 +49,14 @@ pub func walk_with(root: c.str, visitor: WalkVisitor, max_depth: usize = 64) -> 
         if depth > max_depth:
             error(depth_limit, "directory traversal exceeded its depth limit")
         let info = try state.frames[index].directory.entry_metadata((c.str)name, false)
-        let parent_length = state.path.view().length
-        if parent_length > 0 and state.path.view().bytes[parent_length - 1] != '/':
-            try state.path.put("/")
-        try state.path.put(name)
-        let visit_children = try visitor.visit(state.path.view(), info, depth)
+        let parent_length = state.path.length()
+        if parent_length > 0 and state.path.view()[parent_length - 1] != '/':
+            try state.path.put_byte('/')
+        try state.path.put_text(name)
+        # NUL-terminated, so a visitor may hand the path to C as it is
+        let visit_children = try visitor.visit((str)try state.path.terminated(), info, depth)
         if info.kind != FileKind.directory or not visit_children:
-            try state.path.truncate(parent_length)
+            state.path.truncate(parent_length)
             continue
         if state.contains(info.device, info.inode):
             error(directory_cycle, "directory traversal encountered an ancestor again")
@@ -100,7 +101,7 @@ struct WalkFrame:
 struct WalkState:
     var frames: WalkFrame[]
     var count: usize
-    var path: strings.Builder
+    var path: collections.Buffer
     var owner: memory.Allocator
 
     static func start(root: c.str, expected: Metadata, owner: memory.Allocator) -> WalkState!:
@@ -110,12 +111,12 @@ struct WalkState:
         if info.device != expected.device or info.inode != expected.inode:
             error(failed, "the traversal root changed before it could be opened")
         with owner:
-            var path = try strings.Builder.create(64)
+            var path: collections.Buffer
             errdefer path.destroy()
-            try path.put((str)root)
+            try path.put_text((str)root)
             let frames = try new WalkFrame[8] ---
             frames[0] = WalkFrame(directory = directory, device = info.device, inode = info.inode,
-                                  path_length = path.view().length)
+                                  path_length = path.length())
             return WalkState(frames = frames, count = 1, path = path, owner = owner)
 
     func contains(device: u64, inode: u64) -> bool:
@@ -135,7 +136,7 @@ struct WalkState:
                 free(self.frames)
                 self.frames = grown
         self.frames[self.count] = WalkFrame(directory = child, device = info.device, inode = info.inode,
-                                            path_length = self.path.view().length)
+                                            path_length = self.path.length())
         self.count += 1
 
     func pop() -> !:
@@ -145,7 +146,7 @@ struct WalkState:
             error(failure.code, failure.message)
         self.count -= 1
         if self.count > 0:
-            try self.path.truncate(self.frames[self.count - 1].path_length)
+            self.path.truncate(self.frames[self.count - 1].path_length)
 
     func destroy():
         while self.count > 0:

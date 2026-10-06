@@ -3,8 +3,9 @@
 #   process - Running a child process to completion
 #
 #   DESCRIPTION:
-#       Run a program with arguments, capture its standard output and error, and return its
-#       exit status; the process's environment, working directory and own exit.
+#       Run a program with arguments, capture its standard output and error or let it write
+#       to ours, and return its exit status; the process's environment, working directory
+#       and own exit.
 #
 #==============================================================================================
 
@@ -108,7 +109,7 @@ pub struct Completed:
 ## Duplicate names are rejected (case-insensitively on Windows). The parent must
 ## serialize mutations of its process-wide environment during process creation.
 pub func run(program: c.str, arguments: const c.str[], directory: c.str = "", environment: const c.str[]? = none) -> interop.Owned[Completed]!:
-    let finished = try run_controlled(program, arguments, directory, environment, none)
+    let finished = try run_controlled(program, arguments, directory, environment, none, false)
     var texts = new str[2] --- catch failure:
         release_output(finished.1)
         release_output(finished.2)
@@ -118,9 +119,20 @@ pub func run(program: c.str, arguments: const c.str[], directory: c.str = "", en
     let storage = try owned.adopt_texts(texts)
     return interop.Owned[Completed](Completed(exit_code = finished.0, output = finished.1, error_output = finished.2), storage.owner)
 
-func run_controlled(program: c.str, arguments: const c.str[], directory: c.str, environment: const c.str[]?, control: CommandState*?) -> (i32, str, str)!:
+## Run `program` with `arguments` as `run` does, but writing to this process's standard
+## output and error as it goes, which suits a child whose output is the user's to read
+## (a test runner, a build step); wait for it and answer its exit status.
+pub func call(program: c.str, arguments: const c.str[], directory: c.str = "", environment: const c.str[]? = none) -> i32!:
+    let finished = try run_controlled(program, arguments, directory, environment, none, true)
+    release_output(finished.1)
+    release_output(finished.2)
+    return finished.0
+
+## `run`, `call` and `Command`'s child: with `inherit`, it writes to this process's
+## standard streams and the texts answered are empty.
+func run_controlled(program: c.str, arguments: const c.str[], directory: c.str, environment: const c.str[]?, control: CommandState*?, inherit: bool) -> (i32, str, str)!:
     if platform.windows:
-        return try run_windows(program, arguments, directory, environment, control)
+        return try run_windows(program, arguments, directory, environment, control, inherit)
     else:
         let slot = environment_address()
         var selected: (c.str?)[]
@@ -134,6 +146,8 @@ func run_controlled(program: c.str, arguments: const c.str[], directory: c.str, 
             argv[i + 1] = (void*)arguments[i]
             i += 1
         argv[arguments.length + 1] = none
+        if inherit:
+            return try call_posix(program, argv, directory, selected, slot)
         var out_pipe: i32[2]
         var err_pipe: i32[2]
         if pipe((i32*)&out_pipe) != 0:
@@ -198,6 +212,29 @@ func run_controlled(program: c.str, arguments: const c.str[], directory: c.str, 
             release_output(out_text)
             error(failure.code, failure.message)
         return ((status >> 8) & 255, out_text, err_text)
+
+## `call` on POSIX: the child keeps this process's standard streams; `argv` is freed.
+func call_posix(program: c.str, argv: void*?[], directory: c.str, selected: (c.str?)[], slot: (c.str?)**) -> (i32, str, str)!:
+    let pid = fork()
+    if pid < 0:
+        free(argv)
+        error(failed, "run")
+    if pid == 0:
+        if ((str)directory).length > 0 and chdir(directory) != 0:
+            _exit(127)
+        if selected.length > 0:
+            *slot = selected.data
+        _ = execvp(program, argv.data)
+        _exit(127)
+    free(argv)
+    let status = try wait_for(pid)
+    if (status & 127) != 0:
+        error(failed, "the program was stopped by a signal")
+    let out_text = try captured("")
+    let err_text = captured("") catch failure:
+        release_output(out_text)
+        error(failure.code, failure.message)
+    return ((status >> 8) & 255, out_text, err_text)
 
 ## Optional child state has no allocation when inherited unchanged.
 func release_storage[T](storage: T[]):

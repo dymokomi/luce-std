@@ -9,6 +9,7 @@
 #==============================================================================================
 
 import c
+import collections
 import interop
 import memory
 import windows_text

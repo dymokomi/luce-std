@@ -163,3 +163,17 @@ test "keep_text drops bytes that are not UTF-8":
     defer pool.destroy()
     let bad: u8[4] = [0x61, 0x62, 0xC0, 0x63]
     assert((try pool.keep_text(bad[0..])) == "ab")
+
+test "a list grows 1, 2, 4, 8 and a reserved one holds exactly what was asked":
+    var values: collections.List[i64]
+    defer values.destroy()
+    var seen: usize[4]
+    for index in 0..<8:
+        try values.append((i64)index)
+        if index < 4:
+            seen[index] = values.capacity()
+    assert(seen[0] == 1 and seen[1] == 2 and seen[2] == 4 and seen[3] == 4 and values.capacity() == 8)
+    var exact: collections.List[u8]
+    defer exact.destroy()
+    try exact.reserve(3)
+    assert(exact.capacity() == 3)

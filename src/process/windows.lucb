@@ -138,7 +138,9 @@ func temporary_windows() -> void*!:
         error(failed, "a child capture stream could not be created")
     error(failed, "no unused child capture name was found")
 
-func run_windows(program: c.str, arguments: const c.str[], directory: c.str, environment: const c.str[]?, control: CommandState*? = none) -> (i32, str, str)!:
+## `run_controlled` on Windows; with `inherit`, the child keeps this process's standard
+## handles and the texts answered are empty.
+func run_windows(program: c.str, arguments: const c.str[], directory: c.str, environment: const c.str[]?, control: CommandState*?, inherit: bool) -> (i32, str, str)!:
     let name = (str)program
     let cwd_text = (str)directory
     # A program named with a directory is found from `directory` when one is given, as the
@@ -195,6 +197,19 @@ func run_windows(program: c.str, arguments: const c.str[], directory: c.str, env
     if let overrides = environment:
         selected_environment = try environment_windows(overrides)
     defer release_storage(selected_environment)
+    var startup: WinStartup
+    startup.size = (u32)memory.size_of(WinStartup)
+    var child: WinProcess
+    if inherit:
+        if CreateProcessW(none, wide.data, none, none, 1, 1024, selected_environment.data if selected_environment.length > 0 else none,
+                          selected_directory.data if selected_directory.length > 0 else none, &startup, &child) == 0:
+            error(failed, "the process could not be started")
+        let code = try wait_windows(child)
+        let none_out = try captured("")
+        let none_err = captured("") catch failure:
+            release_output(none_out)
+            error(failure.code, failure.message)
+        return (code, none_out, none_err)
     let output = try temporary_windows()
     defer _ = fclose(output)
     let errors = try temporary_windows()
@@ -207,13 +222,10 @@ func run_windows(program: c.str, arguments: const c.str[], directory: c.str, env
     defer _ = CloseHandle(err_handle)
     let in_handle = try inherit_file(input)
     defer _ = CloseHandle(in_handle)
-    var startup: WinStartup
-    startup.size = (u32)memory.size_of(WinStartup)
     startup.flags = 256
     startup.input = in_handle
     startup.output = out_handle
     startup.errors = err_handle
-    var child: WinProcess
     if CreateProcessW(none, wide.data, none, none, 1, 134217728 | 1024 | (4 if control != none else 0),
                       selected_environment.data if selected_environment.length > 0 else none,
                       selected_directory.data if selected_directory.length > 0 else none, &startup, &child) == 0:
@@ -242,3 +254,18 @@ func run_windows(program: c.str, arguments: const c.str[], directory: c.str, env
         release_output(out)
         error(failure.code, failure.message)
     return ((i32)code, out, err)
+
+## Wait for a child `call` started and answer its exit status; its handles are closed.
+func wait_windows(child: WinProcess) -> i32!:
+    let process = child.process else trap("CreateProcess returned no process")
+    let child_thread = child.thread else trap("CreateProcess returned no thread")
+    defer _ = CloseHandle(process)
+    defer _ = CloseHandle(child_thread)
+    if WaitForSingleObject(process, 4294967295) != 0:
+        _ = TerminateProcess(process, 1)
+        _ = WaitForSingleObject(process, 4294967295)
+        error(failed, "waiting for the process failed")
+    var code: u32 = 0
+    if GetExitCodeProcess(process, &code) == 0:
+        error(failed, "the process exit status is unavailable")
+    return (i32)code

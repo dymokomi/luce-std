@@ -26,14 +26,14 @@ pub struct List[T]:
     pub func capacity() -> usize:
         return self.data.length
 
-    ## Make room for `additional` more values, at least doubling the capacity when it grows.
+    ## Make room for `additional` more values, at least doubling the capacity when it grows:
+    ## a list appended to one value at a time holds 1, 2, 4, 8... and one given `reserve(n)`
+    ## first holds exactly `n`, so many small lists cost no more than they hold.
     pub func reserve(additional: usize) -> !:
         let needed = self.used +? additional else error(memory.exhausted, "the list size overflows")
         if needed <= self.data.length:
             return
         var capacity = self.data.length *? 2 else needed
-        if capacity < 16:
-            capacity = 16
         if capacity < needed:
             capacity = needed
         let owner = self.owner else memory.allocator

@@ -47,6 +47,12 @@ test "run reports 127 when the program cannot be executed":
     let err = done.value.error_output
     assert(status == 127)
 
+test "call lets the child write to our streams and answers its exit status":
+    let arguments: c.str[2] = ["-c", "test -d . && exit 5"]
+    assert(try process.call("sh", arguments, directory = "/") == 5)
+    let none_at_all: c.str[1] = ["-n"]
+    assert(try process.call("luce-std-no-such-program", none_at_all[..<0]) == 127)
+
 test "environment variables are set, read, listed and removed":
     try process.set_variable("LUCE_STD_TEST_VARIABLE", "seven")
     assert(process.variable("LUCE_STD_TEST_VARIABLE") == "seven")

@@ -1,4 +1,5 @@
 import c
+import collections
 import files
 import io
 import memory
@@ -58,7 +59,7 @@ func test_http() -> !:
     let chunks = "3;name=\"a\\\"b\"\r\nabc\r\n2\r\nde\r\n0\r\nX-Checksum: test\r\n\r\nNEXT"
     for fragment in 1..=chunks.length:
         var decoder = try net.HttpBodyDecoder.create(net.HttpBodyKind.chunked, maximum = 5)
-        var body = try strings.Builder.create()
+        var body: collections.Buffer
         defer body.destroy()
         var at: usize = 0
         var trailers: usize = 0
@@ -72,7 +73,7 @@ func test_http() -> !:
                 assert(net.http_equal(trailer.name, "x-checksum") and trailer.value == "test")
                 trailers += 1
         try decoder.finish()
-        assert(body.view() == "abcde" and trailers == 1)
+        assert(body.text() == "abcde" and trailers == 1)
         assert((str)chunks.bytes[at..] == "NEXT")
     var fixed = try net.HttpBodyDecoder.create(net.HttpBodyKind.fixed, 2)
     assert((try fixed.consume("abc".bytes)).consumed == 2 and fixed.finished())
@@ -183,7 +184,7 @@ func test_websocket() -> !:
         var decoder = net.WebSocketDecoder.create(true)
         var output: u8[2]
         var at: usize = 0
-        var body = try strings.Builder.create()
+        var body: collections.Buffer
         defer body.destroy()
         var frames: usize = 0
         var messages: usize = 0
@@ -199,7 +200,7 @@ func test_websocket() -> !:
             if step.message_end:
                 messages += 1
         try decoder.finish()
-        assert(body.view() == "€!" and frames == 4 and messages == 1)
+        assert(body.text() == "€!" and frames == 4 and messages == 1)
     let bad: str[10] = [(str)(b"\xc1\x00"), (str)(b"\x83\x00"), (str)(b"\x81\x80\x00\x00\x00\x00"), (str)(b"\x89\x7e\x00\x7e"), (str)(b"\x09\x00"), (str)(b"\x82\x7e\x00\x01"), (str)(b"\x82\x7f\x80\x00\x00\x00\x00\x00\x00\x00"), (str)(b"\x80\x00"), (str)(b"\x81\x01\xff"), (str)(b"\x88\x01x")]
     for text in bad:
         var decoder = net.WebSocketDecoder.create(false)
