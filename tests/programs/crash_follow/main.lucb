@@ -81,8 +81,10 @@ func report(path: str, arguments: str[]) -> i32!:
     return 0
 
 pub func main(arguments: str[]) -> i32!:
-    if let path = crash.report_to_show():
-        return try report(path, arguments)
+    let shown = try crash.report_to_show()
+    defer shown.release()
+    if shown.value != "":
+        return try report(shown.value, arguments)
     let mode = arguments[1] if arguments.length > 1 else "hooks"
     try crash.enable()
     try crash.relaunch_on_crash()

@@ -191,14 +191,22 @@ pub func read_report(path: str) -> interop.Owned[str]!:
     return text
 
 ## The report this process was started to show: the path in LUCE_CRASH_REPORT,
-## which `relaunch_on_crash` sets for the program it starts after a crash, or
-## none in an ordinary run.
-pub func report_to_show() -> str?:
+## which `relaunch_on_crash` sets for the program it starts after a crash, as a
+## copy of its own; empty text in an ordinary run.
+pub func report_to_show() -> interop.Owned[str]!:
     if platform.wasm32:
-        return none
+        return try interop.copy_text("")
     else:
-        let path = os.env(report_variable) else return none
-        return path if path.length > 0 else none
+        # os.env answers a view another environment read may overwrite (Windows)
+        return try interop.copy_text(os.env(report_variable) else "")
+
+## Whether this process was started to show a report.
+func showing_report() -> bool:
+    if platform.wasm32:
+        return false
+    else:
+        let path = os.env(report_variable) else return false
+        return path.length > 0
 
 ## The environment variable that carries a report to show.
 let report_variable: c.str = "LUCE_CRASH_REPORT"

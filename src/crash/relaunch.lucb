@@ -91,7 +91,7 @@ pub func relaunch_on_crash() -> !:
     if platform.wasm32:
         return
     else:
-        if relaunching or report_to_show() != none:
+        if relaunching or showing_report():
             return
         if not core.crash_reports_enabled():
             try enable()
