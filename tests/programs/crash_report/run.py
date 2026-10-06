@@ -49,7 +49,7 @@ with tempfile.TemporaryDirectory(prefix="std-crash-") as temporary:
     (home / ".luce" / "crashes").mkdir(parents=True)
     env = dict(os.environ, HOME=str(home), USERPROFILE=str(home))
     executable = work / ("crashcheck.exe" if os.name == "nt" else "crashcheck")
-    for flags in [["--native"], ["--native", "--release"]]:
+    for flags in [["--native"], ["--native", "--release"], ["--backend=c"]]:
         subprocess.run([COMPILER, "build", ROOT / "tests/programs/crash_report/main.lucb", *flags, "-o", executable],
                        cwd=ROOT, check=True)
         for mode in ["main", "thread", "trap"]:

@@ -97,8 +97,8 @@ with tempfile.TemporaryDirectory(prefix="std-crash-follow-", ignore_cleanup_erro
         '#prisma 4.0\ndef package "crash-follow" {\n    str version = "2.5.0"\n'
         f'    def dependency "luce-std" {{\n        str path = {json.dumps(ROOT.as_posix())}\n    }}\n}}\n')
     executable = work / ("crash-follow.exe" if WINDOWS else "crash-follow")
-    # the C backend's traps go through its C runtime, which writes no report
-    for flags in [["--native"], ["--native", "--release"]]:
+    # every backend traps through `core`: the report, the hooks and the relaunch alike
+    for flags in [["--native"], ["--native", "--release"], ["--backend=c"]]:
         subprocess.run([COMPILER, "build", project / "src/main.lucb", *flags, "-o", executable], check=True)
         label = " ".join(flags)
 
