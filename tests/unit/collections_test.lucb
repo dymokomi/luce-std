@@ -1,0 +1,165 @@
+## The `collections` module: lists grow and keep order, buffers hold bytes and text, and a
+## pool's copies stay where they are.
+import c
+import memory
+import strings
+import collections
+
+struct Row:
+    var id: i64
+    var weight: f64
+
+test "a list grows by doubling and keeps every value":
+    with memory.heap:
+        var values: collections.List[i64]
+        defer values.destroy()
+        assert(values.length() == 0 and values.capacity() == 0 and values.view().length == 0)
+        for value in 0..<100000:
+            try values.append((i64)value * 3)
+        assert(values.length() == 100000)
+        let capacity = values.capacity()
+        assert(capacity >= 100000 and capacity < 200000)
+        for index in 0..<values.length():
+            assert(values.at(index) == (i64)index * 3)
+
+test "remove and insert keep the order of the rest":
+    var values: collections.List[i64]
+    defer values.destroy()
+    for value in 0..<10:
+        try values.append((i64)value)
+    values.remove(0)
+    values.remove(8)
+    values.remove(3, 2)
+    let expected: i64[6] = [1, 2, 3, 6, 7, 8]
+    assert(values.length() == 6)
+    for index in 0..<values.length():
+        assert(values.at(index) == expected[index])
+    try values.insert(0, 100)
+    try values.insert(3, 200)
+    try values.insert(values.length(), 300)
+    let after: i64[9] = [100, 1, 2, 200, 3, 6, 7, 8, 300]
+    assert(values.length() == 9)
+    for index in 0..<9:
+        assert(values.view()[index] == after[index])
+    values.remove(0, values.length())
+    assert(values.length() == 0)
+    values.remove(0, 0)
+
+test "items change values in place; set and truncate":
+    var rows: collections.List[Row]
+    defer rows.destroy()
+    for id in 0..<20:
+        try rows.append(Row(id = (i64)id, weight = 0.0))
+    let items = rows.items()
+    for index in 0..<items.length:
+        items[index].weight = (f64)items[index].id * 0.5
+    rows.set(4, Row(id = 40, weight = 1.0))
+    assert(rows.at(3).weight == 1.5 and rows.at(4).id == 40)
+    rows.truncate(5)
+    assert(rows.length() == 5 and rows.at(4).id == 40)
+    let capacity = rows.capacity()
+    rows.clear()
+    assert(rows.length() == 0 and rows.capacity() == capacity)
+    try rows.append(Row(id = 7, weight = 0.0))
+    assert(rows.view()[0].id == 7)
+
+test "a view stays valid while the list does not grow":
+    var values: collections.List[i64]
+    defer values.destroy()
+    try values.reserve(64)
+    let capacity = values.capacity()
+    let before = values.items()
+    for value in 0..<capacity:
+        try values.append((i64)value)
+    assert(values.capacity() == capacity and values.items().data == before.data)
+
+test "a destroyed list is empty and may be used again":
+    var values: collections.List[i64]
+    values.destroy()
+    try values.append(5)
+    values.destroy()
+    assert(values.length() == 0 and values.capacity() == 0)
+    try values.append(6)
+    assert(values.at(0) == 6)
+    values.destroy()
+
+test "a list keeps the allocator of its first growth":
+    var room: u8[4096]
+    var fixed = memory.FixedBuffer.over(room[0..])
+    var values: collections.List[i64]
+    with fixed:
+        try values.append(1)
+    for value in 0..<(i64)100:
+        try values.append(value)
+    assert(values.length() == 101 and values.at(100) == 99)
+    assert((usize)values.view().data >= (usize)room[0..].data and (usize)values.view().data < (usize)room[0..].data + 4096)
+    values.destroy()
+
+test "a buffer appends bytes, text, numbers and formatted fields":
+    var buffer: collections.Buffer
+    defer buffer.destroy()
+    assert(buffer.length() == 0 and buffer.text() == "")
+    try buffer.put_text("id")
+    try buffer.put_byte('\t')
+    try buffer.put_number(-9223372036854775807 - 1)
+    try buffer.put_byte(' ')
+    try buffer.put_number(0)
+    try buffer.put(b" ok")
+    try strings.write_f64(&buffer, 2.5, ".2f")
+    assert(buffer.text() == "id\t-9223372036854775808 0 ok2.50")
+    buffer.remove(0, 3)
+    buffer.truncate(20)
+    assert(buffer.text() == "-9223372036854775808")
+    buffer.clear()
+    assert(buffer.view().length == 0)
+
+test "a buffer's text stops where its UTF-8 does":
+    var buffer: collections.Buffer
+    defer buffer.destroy()
+    try buffer.put_text("caf\u{e9}")
+    try buffer.put_byte(0xFF)
+    try buffer.put_text("tail")
+    assert(buffer.view().length == 10 and buffer.text() == "caf\u{e9}")
+
+test "terminated writes a NUL after the contents":
+    var buffer: collections.Buffer
+    defer buffer.destroy()
+    let empty = try buffer.terminated()
+    assert(((str)empty) == "" and buffer.length() == 0)
+    for _ in 0..<1000:
+        try buffer.put_text("abc")
+    let name = try buffer.terminated()
+    assert(buffer.length() == 3000 and buffer.view().data[3000] == 0)
+    assert(((str)name).bytes.length == 3000)
+
+test "a pool's copies stay put while more are kept":
+    with memory.heap:
+        var pool: collections.TextPool
+        defer pool.destroy()
+        assert((try pool.keep_text(b"")) == "")
+        var source: collections.Buffer
+        defer source.destroy()
+        var first: str = ""
+        var kept: collections.List[str]
+        defer kept.destroy()
+        for index in 0..<20000:
+            source.clear()
+            try source.put_text("row ")
+            try source.put_number((i64)index)
+            let text = try pool.keep_text(source.view())
+            try kept.append(text)
+        var big: u8[100000]
+        memory.set(big[0..], 'x')
+        let large = try pool.keep(big[0..])
+        assert(large.length == 100000 and large[99999] == 'x')
+        for index in 0..<kept.length():
+            source.clear()
+            try source.put_text("row ")
+            try source.put_number((i64)index)
+            assert(kept.at(index) == source.text())
+
+test "keep_text drops bytes that are not UTF-8":
+    var pool: collections.TextPool
+    defer pool.destroy()
+    let bad: u8[4] = [0x61, 0x62, 0xC0, 0x63]
+    assert((try pool.keep_text(bad[0..])) == "ab")

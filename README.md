@@ -19,6 +19,7 @@ Base and serves Luce and Base programs alike.
 | `from luce_std import math32` | Single-precision mathematical functions |
 | `from luce_std import unicode` | Unicode 17.0.0 casing and normalization |
 | `from luce_std import utf8` | Strict UTF-8 scalar encoding and decoding |
+| `from luce_std import collections` | Growable storage for Base: `List[T]`, a byte `Buffer`, and a `TextPool` of copies that never move |
 | `from luce_std import crash` | Crash reports in `~/.luce/crashes`, named after the program's package; hooks that save work after a trap (`on_crash`, `recovery_directory`, `note_recovery`); starting the program again to show its report (`relaunch_on_crash`, `report_to_show`), which luce-ui's crash window uses. Nothing is sent anywhere |
 
 ## Using it
@@ -66,6 +67,44 @@ for name in names.value:
 The storage comes from the allocator current at the call; texts are NUL-terminated, so they
 may be passed on as `c.str`. Objects Luce holds (`files.File`, `files.TemporaryDirectory`,
 `net.Connection`, `net.Listener`, `process.Command`) remain ordinary values in Base.
+
+### Growable storage
+
+`collections` is for Base only; Luce has its own `list` and `bytes`. A zero value of each
+type is empty and ready. The first growth takes the current allocator and keeps it, as
+`strings.Builder` does; `destroy` gives the storage back, after which the value may be used
+again.
+
+```lucb
+from luce_std import collections
+
+var rows: collections.List[Row]
+defer rows.destroy()
+try rows.append(Row(id = 1))
+try rows.insert(0, Row(id = 0))
+rows.remove(1)                      # keeps the order of the rest; remove(index, count) for a run
+for row in rows.view(): ...         # const Row[]; rows.items() is a Row[] to change or sort
+
+var line: collections.Buffer        # an io.Writer
+defer line.destroy()
+try line.put_text("total ")
+try line.put_number(42)
+try strings.write_f64(&line, 2.5, ".2f")
+print(line.text())                  # the bytes as far as they are valid UTF-8
+let path = try line.terminated()    # a c.str, valid until the next change
+
+var pool: collections.TextPool      # copies stay where they are until pool.destroy()
+let name = try pool.keep_text(column_bytes)
+```
+
+- `List[T]`: `length`, `capacity`, `reserve`, `append`, `insert`, `remove(index, count = 1)`,
+  `truncate`, `at`, `set`, `view`, `items`, `clear`, `destroy`. The capacity at least
+  doubles when it grows, so `view` and `items` are valid until the next `append`, `insert`
+  or `reserve`. An index out of range traps, as indexing a span does.
+- `Buffer`: `put`, `put_text`, `put_byte`, `put_number`, `write` (io.Writer), `remove`,
+  `truncate`, `view`, `text`, `terminated`, `length`, `reserve`, `clear`, `destroy`.
+- `TextPool`: `keep(bytes)`, `keep_text(bytes)` (cut where the bytes stop being valid UTF-8),
+  `destroy`. Copies go into 64 KiB chunks; a larger one gets a chunk of its own.
 
 ## Depends on
 

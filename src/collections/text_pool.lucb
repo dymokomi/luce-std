@@ -1,0 +1,48 @@
+#==============================================================================================
+#
+#   text_pool - Copies of text at addresses that never move
+#
+#   DESCRIPTION:
+#       Text kept while the bytes it came from change, such as a database row's columns read
+#       one after another. Copies go into 64 KiB chunks; none moves or is given back before
+#       the pool is destroyed.
+#
+#==============================================================================================
+
+let chunk_size: usize = 65536
+
+## Copies of bytes and text, each valid until `destroy`. A zero value is empty and ready;
+## chunks come from the allocator current at the first copy.
+pub struct TextPool:
+    var chunks: List[u8[]]
+    var used: usize
+
+    ## A copy of `data`.
+    pub func keep(data: const u8[]) -> const u8[]!:
+        if data.length == 0:
+            var empty: const u8[]
+            return empty
+        let count = self.chunks.length()
+        if count == 0 or self.chunks.at(count - 1).length - self.used < data.length:
+            try self.chunks.reserve(1)
+            let owner = self.chunks.owner else memory.allocator
+            let size = data.length if data.length > chunk_size else chunk_size
+            try self.chunks.append(try new u8[size] --- in owner)
+            self.used = 0
+        let room = self.chunks.at(self.chunks.length() - 1)[self.used..<self.used + data.length]
+        memory.copy(room, data, data.length)
+        self.used += data.length
+        return room
+
+    ## A copy of `data` as text, as far as it is valid UTF-8.
+    pub func keep_text(data: const u8[]) -> str!:
+        return (str)(try self.keep(data[..<(utf8.invalid_offset(data) else data.length)]))
+
+    ## Give every copy back; the pool is empty and may be used again.
+    pub func destroy():
+        if self.chunks.length() > 0:
+            let owner = self.chunks.owner else trap("a text pool lost its allocator")
+            for chunk in self.chunks.view():
+                free(chunk) in owner
+        self.chunks.destroy()
+        self.used = 0

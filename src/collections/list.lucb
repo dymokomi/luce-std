@@ -1,0 +1,106 @@
+#==============================================================================================
+#
+#   list - A growable array of plain values
+#
+#   DESCRIPTION:
+#       Values stored side by side, as in Python's list or Rust's Vec; the capacity doubles
+#       when it runs out. Views borrow the storage until the next change that may grow it.
+#
+#==============================================================================================
+
+## A growable array of plain values. A zero value is empty and ready. The first growth
+## takes the current allocator and keeps it, so a list may cross `with` blocks; `destroy`
+## gives the storage back to it. Views from `view` and `items` stay valid until the next
+## `append`, `insert` or `reserve` that grows the list, or `destroy`. Copying a list copies
+## the reference to its storage, not the values.
+pub struct List[T]:
+    var data: T[]
+    var used: usize
+    var owner: memory.Allocator?
+
+    ## How many values the list holds.
+    pub func length() -> usize:
+        return self.used
+
+    ## How many values fit before the list grows.
+    pub func capacity() -> usize:
+        return self.data.length
+
+    ## Make room for `additional` more values, at least doubling the capacity when it grows.
+    pub func reserve(additional: usize) -> !:
+        let needed = self.used +? additional else error(memory.exhausted, "the list size overflows")
+        if needed <= self.data.length:
+            return
+        var capacity = self.data.length *? 2 else needed
+        if capacity < 16:
+            capacity = 16
+        if capacity < needed:
+            capacity = needed
+        let owner = self.owner else memory.allocator
+        let grown = try new T[capacity] --- in owner
+        memory.copy(grown, self.data, self.used)
+        if self.data.length > 0:
+            free(self.data) in owner
+        self.data = grown
+        self.owner = owner
+
+    ## Add `value` at the end.
+    pub func append(value: T) -> !:
+        try self.reserve(1)
+        self.data[self.used] = value
+        self.used += 1
+
+    ## Put `value` before the value at `index` (at the end when `index` is the length),
+    ## moving the rest up by one. An index past the end traps.
+    pub func insert(index: usize, value: T) -> !:
+        if index > self.used:
+            trap("list insert index out of range")
+        try self.reserve(1)
+        memory.move(self.data[index + 1..], self.data[index..], self.used - index)
+        self.data[index] = value
+        self.used += 1
+
+    ## Remove `count` values from `index` on, keeping the order of the rest. A run that
+    ## does not lie within the list traps.
+    pub func remove(index: usize, count: usize = 1):
+        if index > self.used or count > self.used - index:
+            trap("list remove out of range")
+        let end = index + count
+        memory.move(self.data[index..], self.data[end..], self.used - end)
+        self.used -= count
+
+    ## Drop the values from `length` on. A length past the end traps.
+    pub func truncate(length: usize):
+        if length > self.used:
+            trap("list truncate past its end")
+        self.used = length
+
+    ## The value at `index`.
+    pub func at(index: usize) -> T:
+        return self.view()[index]
+
+    ## Replace the value at `index`.
+    pub func set(index: usize, value: T):
+        self.items()[index] = value
+
+    ## The values, to read.
+    pub func view() -> const T[]:
+        return self.data[..<self.used]
+
+    ## The values, to change in place or sort.
+    pub func items() -> T[]:
+        return self.data[..<self.used]
+
+    ## Forget the values, keeping the storage.
+    pub func clear():
+        self.used = 0
+
+    ## Give the storage back; the list is empty and may be used again.
+    pub func destroy():
+        if self.data.length > 0:
+            let owner = self.owner else trap("a list lost its allocator")
+            free(self.data) in owner
+        var empty: T[]
+        self.data = empty
+        self.used = 0
+        self.owner = none

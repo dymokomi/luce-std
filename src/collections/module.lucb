@@ -1,0 +1,17 @@
+#==============================================================================================
+#
+#   collections - Growable storage: a list of values, a byte buffer, a pool of kept text
+#
+#   DESCRIPTION:
+#       `List[T]` grows an array of plain values, `Buffer` a run of bytes that is also an
+#       `io.Writer`, and `TextPool` keeps copies of text at addresses that never move. A zero
+#       value of each is empty and ready; the first allocation takes the current allocator,
+#       every later one uses that same allocator, and `destroy` gives the storage back to it.
+#
+#==============================================================================================
+
+import c
+import io
+import memory
+import strings
+import utf8

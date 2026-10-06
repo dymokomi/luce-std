@@ -1,0 +1,82 @@
+#==============================================================================================
+#
+#   buffer - A growable run of bytes
+#
+#   DESCRIPTION:
+#       Bytes appended piece by piece, like Python's bytearray, then read as bytes, as text,
+#       or as a NUL-terminated string for a C function. A Buffer is an io.Writer, so the
+#       `strings.write_*` formatters write into it.
+#
+#==============================================================================================
+
+## A growable run of bytes; a zero value is empty and ready. Storage follows `List`'s
+## rules: the allocator current at the first growth, views valid until the next change
+## that may grow it, `destroy` to give it back.
+pub struct Buffer: io.Writer:
+    var bytes: List[u8]
+
+    ## How many bytes the buffer holds.
+    pub func length() -> usize:
+        return self.bytes.length()
+
+    ## Make room for `additional` more bytes.
+    pub func reserve(additional: usize) -> !:
+        try self.bytes.reserve(additional)
+
+    ## Append `data`.
+    pub func put(data: const u8[]) -> !:
+        try self.bytes.reserve(data.length)
+        memory.copy(self.bytes.data[self.bytes.used..], data, data.length)
+        self.bytes.used += data.length
+
+    ## Append the bytes of `text`.
+    pub func put_text(text: str) -> !:
+        try self.put(text.bytes)
+
+    ## Append one byte.
+    pub func put_byte(value: u8) -> !:
+        try self.bytes.append(value)
+
+    ## Append `value` in decimal, as `{value}` shows it; `strings.write_i64` takes a
+    ## format specification.
+    pub func put_number(value: i64) -> !:
+        var digits: u8[24]
+        try self.put_text(try strings.format_i64(value, digits[0..]))
+
+    ## Append `data` (io.Writer): all of it, or nothing when the buffer cannot grow.
+    pub func write(data: const u8[]) -> usize!:
+        try self.put(data)
+        return data.length
+
+    ## Remove `count` bytes from `index` on, moving the rest down. A run that does not lie
+    ## within the buffer traps.
+    pub func remove(index: usize, count: usize):
+        self.bytes.remove(index, count)
+
+    ## Drop the bytes from `length` on. A length past the end traps.
+    pub func truncate(length: usize):
+        self.bytes.truncate(length)
+
+    ## The bytes.
+    pub func view() -> const u8[]:
+        return self.bytes.view()
+
+    ## The bytes as text, as far as they are valid UTF-8.
+    pub func text() -> str:
+        let data = self.bytes.view()
+        return (str)data[..<(utf8.invalid_offset(data) else data.length)]
+
+    ## The bytes as a C string: a NUL is written after them, outside the contents. Valid
+    ## until the next change; bytes holding a NUL end the string early.
+    pub func terminated() -> c.str!:
+        try self.bytes.reserve(1)
+        self.bytes.data[self.bytes.used] = 0
+        return (c.str)(str)self.bytes.view()
+
+    ## Forget the bytes, keeping the storage.
+    pub func clear():
+        self.bytes.clear()
+
+    ## Give the storage back; the buffer is empty and may be used again.
+    pub func destroy():
+        self.bytes.destroy()
