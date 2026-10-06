@@ -17,30 +17,21 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: luce-std
-      - name: Read compiler and dependency pins
-        id: pins
-        run: |
-          echo "base=$(cat luce-std/bootstrap/BASE)" >> "$GITHUB_OUTPUT"
-      # the compiler is built apart, with the luce-std it pins, so that this commit's API
-      # changes test this package rather than the compiler's own use of an older one
+      # the compiler is built apart, with luce-std's main (every dependency is at main,
+      # luce-base docs/CI.md), so that this commit's API changes test this package rather
+      # than the compiler's own use of luce-std
       - uses: actions/checkout@v7
         with:
           repository: dymokomi/luce-base
-          ref: ${{ steps.pins.outputs.base }}
           path: compiler/luce-base
-      - name: Read the compiler's luce-std pin
-        id: compiler
-        run: echo "std=$(cat compiler/luce-base/bootstrap/STD)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: dymokomi/luce-std
-          ref: ${{ steps.compiler.outputs.std }}
           path: compiler/luce-std
       # the package's program checks use luce-base's tools beside this checkout
       - uses: actions/checkout@v7
         with:
           repository: dymokomi/luce-base
-          ref: ${{ steps.pins.outputs.base }}
           path: luce-base
       - name: Select Clang
         run: |

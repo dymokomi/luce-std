@@ -12,31 +12,18 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: luce-std
-      - name: Read compiler and dependency pins
-        id: pins
-        shell: pwsh
-        run: |
-          "base=$(Get-Content luce-std/bootstrap/BASE)" >> $env:GITHUB_OUTPUT
-      # the compiler is built apart, with the luce-std it pins (correctness.yml says why)
+      # the compiler is built apart, with luce-std's main (correctness.yml says why)
       - uses: actions/checkout@v7
         with:
           repository: dymokomi/luce-base
-          ref: ${{ steps.pins.outputs.base }}
           path: compiler/luce-base
-      - name: Read the compiler's luce-std pin
-        id: compiler
-        shell: pwsh
-        run: |
-          "std=$(Get-Content compiler/luce-base/bootstrap/STD)" >> $env:GITHUB_OUTPUT
       - uses: actions/checkout@v7
         with:
           repository: dymokomi/luce-std
-          ref: ${{ steps.compiler.outputs.std }}
           path: compiler/luce-std
       - uses: actions/checkout@v7
         with:
           repository: dymokomi/luce-base
-          ref: ${{ steps.pins.outputs.base }}
           path: luce-base
       - uses: msys2/setup-msys2@v2
         with:
