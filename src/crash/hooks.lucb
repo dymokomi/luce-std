@@ -15,41 +15,82 @@
 import ownership
 import thread
 
-## The hooks `on_crash` registered and the runtime context each was registered on: a
-## callback runs only on its own context's thread.
-var hooks: interop.Callback[unit, unit][]
-var hook_contexts: u64[]
+## The hooks `on_crash` added and not yet removed, in order. The registry does not keep
+## them alive: whoever holds a hook's handle does, and removing it unregisters it.
+var hooks: Hook*[]
 var hook_count: usize = 0
 ## Whether the hooks are running; a trap inside one lands in `follow_crash` again.
 var hooks_running: bool = false
 ## How long the hooks may run in all before the process ends without them.
 let hook_budget_milliseconds: u64 = 5000
 
+## A crash hook `on_crash` added. It runs while it is held: `remove`, or releasing the
+## last reference to it, takes it away and lets go of its callback (and whatever the
+## callback holds), as releasing a signal's `Connection` disconnects it.
+pub struct Hook:
+    var callback: interop.Callback[unit, unit]?
+    ## The runtime context the hook was added on: only that thread's trap runs it.
+    let context: u64
+
+    ## Take the hook away now; it is idempotent.
+    pub func remove():
+        let callback = self.callback else return
+        self.callback = none
+        unregister(&self)
+        callback.release()
+
+    ## Whether the hook is still registered.
+    pub func is_active() -> bool:
+        return self.callback != none
+
+    func dispose():
+        self.remove()
+
+    func trace(visit: func(ownership.Object*, void*) -> unit, context: void*):
+        if let callback = self.callback:
+            callback.trace(visit, context)
+
+## The interop type of a crash hook's handle.
+pub let hook_type: interop.Type[Hook] = interop.Type[Hook]("crash hook", Hook.dispose, Hook.trace)
+
 ## Run `hook` after a trap, before the process ends: the place to save what can be
-## saved into `recovery_directory()` (and say so with `note_recovery`). Hooks run in
-## the order they were added, on the thread that trapped, and only the ones added on
-## that thread's runtime context; together they have five seconds, after which the
-## process ends anyway. A trap inside a hook is added to the report and skips the
-## hooks after it. A fatal signal (a segmentation fault and the like) runs no hooks.
-## Turns crash reports on when they are off.
-pub func on_crash(hook: interop.Callback[unit, unit]) -> !:
+## saved into `recovery_directory()` (and say so with `note_recovery`). The answer is
+## the hook's handle: the hook runs while the handle is held, and releasing it (or
+## `Hook.remove`) takes the hook away, so a hook that captures a program's objects
+## does not keep them alive past the program's own close. Hooks run in the order they
+## were added, on the thread that trapped, and only the ones added on that thread's
+## runtime context; together they have five seconds, after which the process ends
+## anyway. A hook that fails or traps ends the hooks after it, and the report says so.
+## A fatal signal (a segmentation fault and the like) runs no hooks. Turns crash
+## reports on when they are off.
+pub func on_crash(hook: interop.Callback[unit, unit]) -> interop.Reference[Hook]!:
     if not core.crash_reports_enabled():
         try enable()
     if hook_count == hooks.length:
         let room = 4 if hooks.length == 0 else hooks.length * 2
-        let grown = try new interop.Callback[unit, unit][room] --- in memory.heap
-        let contexts = try new u64[room] --- in memory.heap
+        let grown = try new Hook*[room] --- in memory.heap
         for index in 0..<hook_count:
             grown[index] = hooks[index]
-            contexts[index] = hook_contexts[index]
         if hooks.length > 0:
             free(hooks) in memory.heap
-            free(hook_contexts) in memory.heap
         hooks = grown
-        hook_contexts = contexts
-    hooks[hook_count] = hook.clone()
-    hook_contexts[hook_count] = ownership.context_id()
+    let made = try interop.Reference[Hook].adopt(new Hook(callback = hook.clone(), context = ownership.context_id()) in memory.heap, hook_type, memory.heap)
+    hooks[hook_count] = made.value()
     hook_count += 1
+    return made
+
+## Take `hook` out of the registry, keeping the others in order.
+func unregister(hook: Hook*):
+    var kept: usize = 0
+    for index in 0..<hook_count:
+        if hooks[index] != hook:
+            hooks[kept] = hooks[index]
+            kept += 1
+    hook_count = kept
+    # an empty registry holds no storage, so a program that removes its hooks leaves none
+    if kept == 0 and hooks.length > 0:
+        free(hooks) in memory.heap
+        hooks = hooks[..<0]
 
 ## Say, from a crash hook, that a recovery copy was saved at `path`. The report
 ## records it, and a crash window tells the user where it is. Outside a crash
@@ -75,22 +116,23 @@ func follow_crash(signal: i32):
         run_hooks()
     start_reporter()
 
-## Every hook registered on this thread's runtime context, in order; a failure each
-## returns, and the hooks that belong to other threads, are noted in the report.
+## Every hook added on this thread's runtime context and still held, in order. One
+## that fails ends the run, with its failure in the report; a trap in one never returns.
 func run_hooks():
     let context = ownership.context_id()
-    var elsewhere: usize = 0
-    var line: u8[600]
-    for index in 0..<hook_count:
-        if hook_contexts[index] != context:
-            elsewhere += 1
+    var index: usize = 0
+    while index < hook_count:
+        let hook = hooks[index]
+        index += 1
+        if hook.context != context:
             continue
-        let outcome = hooks[index].invoke(())
+        let callback = hook.callback else continue
+        let outcome = callback.invoke(())
+        defer outcome.release()
+        var line: u8[600]
         outcome.get() catch failure:
-            add_to_report(strings.format(line, f"(a crash hook failed: {failure.message})\n") catch _: recover "(a crash hook failed)\n")
-        outcome.release()
-    if elsewhere > 0:
-        add_to_report(strings.format(line, f"({elsewhere} crash hooks belong to another thread and did not run)\n") catch _: recover "")
+            add_to_report(strings.format(line, f"(a crash hook failed: {failure.message}; the hooks after it did not run)\n") catch _: recover "(a crash hook failed)\n")
+            return
 
 ## Start the thread that ends the process when the hooks overrun their budget.
 func start_watch():

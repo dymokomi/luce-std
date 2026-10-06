@@ -8,6 +8,7 @@
 ##   hook-trap   the first hook traps: the second must not run
 ##   slow-hook   a hook that never finishes: the budget ends the process
 ##   signal      a null write: a fatal signal, which runs no hook
+##   removed     the first hook's handle is released before the trap: only the second runs
 from luce_std import crash
 from luce_std import files
 from luce_std import paths
@@ -94,8 +95,13 @@ pub func main(arguments: str[]) -> i32!:
     defer first.release()
     let second = try interop.Callback[unit, unit].bind_mutating(saver, Saver.second)
     defer second.release()
-    try crash.on_crash(first)
-    try crash.on_crash(second)
+    let saving = try crash.on_crash(first)
+    defer saving.release()
+    let marking = try crash.on_crash(second)
+    defer marking.release()
+    if mode == "removed":
+        saving.value().remove()
+        assert(not saving.value().is_active() and marking.value().is_active())
     if mode == "signal":
         let parsed = strings.parse_u64(arguments[2] if arguments.length > 2 else "0") else 0
         crash_here((usize)parsed)

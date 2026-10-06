@@ -132,6 +132,12 @@ with tempfile.TemporaryDirectory(prefix="std-crash-follow-", ignore_cleanup_erro
         reporter(home, found[0])
         print(f"PASS {label} a fatal signal relaunches without hooks", flush=True)
 
+        status, text, _, found = run(executable, home, "removed")
+        assert status == 1 and "recovery:" not in text, f"{label} removed: a removed hook ran"
+        assert (home / "second-hook-ran").exists(), "the hook still held did not run"
+        reporter(home, found[0])
+        print(f"PASS {label} a removed hook does not run", flush=True)
+
         # the reporter crashing starts nothing more
         shown = home / "shown.crash"
         shown.write_text("luce crash report\n")
