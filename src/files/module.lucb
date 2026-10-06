@@ -152,9 +152,9 @@ let nonblocking_open_flag: i32 = 4 if platform.macos or platform.wasm32 else 204
 let would_block_errno: i32 = 6 if platform.wasm32 else (35 if platform.macos else 11)
 let transfer_limit: usize = 1073741824
 let current_directory_fd: i32 = -2 if platform.macos or platform.wasm32 else -100
-## Linux keeps the generic `open` flag values on aarch64 and the x86-64 ones elsewhere.
-let directory_flag: i32 = 8192 if platform.wasm32 else (1048576 if platform.macos else (16384 if platform.arm64 else 65536))
-let no_follow_flag: i32 = 16777216 if platform.wasm32 else (256 if platform.macos else (32768 if platform.arm64 else 131072))
+## Linux takes the x86-64 `open` flag values.
+let directory_flag: i32 = 8192 if platform.wasm32 else (1048576 if platform.macos else 65536)
+let no_follow_flag: i32 = 16777216 if platform.wasm32 else (256 if platform.macos else 131072)
 let at_no_follow_flag: i32 = 1 if platform.wasm32 else (32 if platform.macos else 256)
 # mark: Error codes ===========================================================================
 
