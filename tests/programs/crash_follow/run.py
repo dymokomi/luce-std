@@ -43,10 +43,20 @@ def run(executable: Path, home: Path, *arguments, env_extra=None):
     started = time.monotonic()
     result = subprocess.run([executable, *arguments], env=env, capture_output=True, timeout=60)
     elapsed = time.monotonic() - started
-    # the reporter may have read and marked the report already
     found = [Path(str(path).removesuffix(".seen")) for path in reports(home)]
-    text = Path(f"{found[0]}.seen" if not found[0].exists() else found[0]).read_text(errors="replace") if found else ""
-    return result.returncode, text, elapsed, found
+    return result.returncode, report_text(found[0]) if found else "", elapsed, found
+
+
+def report_text(report: Path) -> str:
+    """The report's text, under its own name or, once the reporter has read it, `.seen`."""
+    for _ in range(100):
+        for path in (report, Path(f"{report}.seen")):
+            try:
+                return path.read_text(errors="replace")
+            except FileNotFoundError:
+                pass
+        time.sleep(0.05)
+    raise SystemExit(f"{report} vanished")
 
 
 def same_file(path: str, expected: Path) -> bool:
@@ -75,7 +85,8 @@ def reporter(home: Path, report: Path) -> str:
     return text
 
 
-with tempfile.TemporaryDirectory(prefix="std-crash-follow-") as temporary:
+# a reporter still finishing may write into the home while it is removed
+with tempfile.TemporaryDirectory(prefix="std-crash-follow-", ignore_cleanup_errors=True) as temporary:
     work = Path(temporary)
     home = work / "home"
     (home / ".luce" / "crashes").mkdir(parents=True)
