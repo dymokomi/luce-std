@@ -4,7 +4,6 @@ def package "net_protocol_interop" {
 
     def dependency "luce-std" {
         str owner = "dymokomi"
-        str version = "^0.3.2"
         str path = "../../../.."
     }
 }
