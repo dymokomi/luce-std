@@ -1,5 +1,7 @@
 # Bounded copies (check.lucb): exact binary contents, an empty file and a FIFO stream.
+# Windows has no FIFO to make, so there the stream is a file holding the same bytes.
 from luce_std import files, paths, process
+import platform
 
 let failed = ErrorCode.package(1)
 
@@ -40,11 +42,15 @@ pub func main(arguments: list[str]) -> int!:
     let empty = paths.join(work, "empty")
     files.write(source, payload)
     files.write(empty, b"")
-    _ = must("mkfifo", [fifo])
     let targets = [paths.join(work, "copied"), paths.join(work, "streamed"), paths.join(work, "empty-copy")]
-    with process.Command("sh", ["-c", f"printf streamed > '{fifo}'"]) as producer:
+    if platform.windows:
+        files.write(fifo, b"streamed")
         _ = must(check, [source, fifo, empty, targets[0], targets[1], targets[2]])
-        expect(producer.wait() == 0, "the FIFO producer failed")
+    else:
+        _ = must("mkfifo", [fifo])
+        with process.Command("sh", ["-c", f"printf streamed > '{fifo}'"]) as producer:
+            _ = must(check, [source, fifo, empty, targets[0], targets[1], targets[2]])
+            expect(producer.wait() == 0, "the FIFO producer failed")
     expect(files.read(targets[0]) == payload, "the copy differs")
     expect(files.read(targets[1]) == b"streamed", "the stream copy differs")
     expect(files.read(targets[2]) == b"", "the empty copy is not empty")

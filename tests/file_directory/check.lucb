@@ -2,6 +2,7 @@ import c
 import files
 import io
 import paths
+import platform
 import strings
 
 pub func main(arguments: c.str[]) -> i32!:
@@ -27,9 +28,10 @@ pub func main(arguments: c.str[]) -> i32!:
     try io.read_exact(&created, copied)
     assert((str)copied == "new")
     try created.close()
-    var pipe = try directory.open_file("pipe", follow_symlinks = false, nonblocking = true)
-    assert((try pipe.metadata()).kind == files.FileKind.fifo)
-    try pipe.close()
+    if not platform.windows:
+        var pipe = try directory.open_file("pipe", follow_symlinks = false, nonblocking = true)
+        assert((try pipe.metadata()).kind == files.FileKind.fifo)
+        try pipe.close()
     var through_link = try directory.open_file("file_link")
     assert((try through_link.metadata()).inode == data.inode)
     try through_link.close()

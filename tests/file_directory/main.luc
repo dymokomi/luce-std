@@ -1,6 +1,7 @@
-# A directory handle (check.lucb) across a rename: entries, links, a FIFO, files created
-# through it.
+# A directory handle (check.lucb) across a rename: entries, links, a FIFO (but on
+# Windows, which has none), files created through it.
 from luce_std import files, paths, process
+import platform
 
 let failed = ErrorCode.package(1)
 
@@ -38,7 +39,8 @@ pub func main(arguments: list[str]) -> int!:
     files.create_symlink("sub", paths.join(original, "link"))
     files.create_symlink("missing", paths.join(original, "dangling"))
     files.create_symlink("data", paths.join(original, "file_link"))
-    _ = must("mkfifo", [paths.join(original, "pipe")])
+    if not platform.windows:
+        _ = must("mkfifo", [paths.join(original, "pipe")])
     _ = must(check, [original, moved])
     expect(not files.exists(original), "the original directory is still there")
     expect(files.read(paths.join(moved, "sub/payload")) == b"payload", "the payload moved wrong")

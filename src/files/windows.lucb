@@ -22,8 +22,10 @@ extern func FindClose(search: void*) -> i32
 extern func MoveFileExW(source: u16*, destination: u16*, flags: u32) -> i32
 extern func win_open as "_wopen"(path: u16*, flags: i32, ...) -> i32
 extern func win_access as "_waccess"(path: u16*, mode: i32) -> i32
+extern func GetFileAttributesW(path: u16*) -> u32
+extern func GetFullPathNameW(path: u16*, capacity: u32, output: u16*?, name: void*?) -> u32
 extern func win_mkdir as "_wmkdir"(path: u16*) -> i32
-extern func win_rmdir as "_wrmdir"(path: u16*) -> i32
+extern func RemoveDirectoryW(path: u16*) -> i32
 extern func win_unlink as "_wunlink"(path: u16*) -> i32
 extern func win_handle as "_get_osfhandle"(descriptor: i32) -> isize
 extern func win_descriptor as "_open_osfhandle"(handle: isize, flags: i32) -> i32
@@ -32,6 +34,15 @@ extern func SetFileTime(handle: void*, created: const u64*?, accessed: const u64
 extern func CreateHardLinkW(destination: u16*, source: u16*, security: void*?) -> i32
 extern func CreateSymbolicLinkW(path: u16*, target: u16*, flags: u32) -> u8
 extern func DeviceIoControl(handle: void*, code: u32, input: void*?, input_size: u32, output: void*, output_size: u32, returned: u32*, overlapped: void*?) -> i32
+
+## GetFileAttributesW's failure, and the attributes of a symbolic link (a reparse point)
+## and of a directory.
+let invalid_attributes: u32 = 4294967295
+let reparse_point: u32 = 1024
+let directory_attribute: u32 = 16
+## The length from which a path is passed in its `\\?\` form: MAX_PATH (260) less the
+## 12 characters CreateDirectoryW keeps for an 8.3 name inside the directory.
+let long_path: usize = 248
 
 func windows_create_symlink(target: c.str, path: c.str, directory: bool?) -> !:
     var target_is_directory = false
@@ -149,6 +160,17 @@ extern struct WinFind:
     name: u16[260]
     alternate: u16[14]
 
+## FILE_RENAME_INFO as FileRenameInfoEx reads it: flags, a root directory handle, the
+## name's length in bytes and the name itself, at offset 20.
+extern struct WinRename:
+    flags: u32
+    root: void*?
+    length: u32
+    name: u16[32768]
+
+## FileRenameInfoEx's flags: replace an existing destination, with POSIX semantics.
+let rename_replace_posix: u32 = 3
+
 struct WinDirectory:
     var descriptor: i32
     var search: void*?
@@ -156,11 +178,81 @@ struct WinDirectory:
     var data: WinFind
     var name: u8[1041]
 
+## The UTF-16 form of `path` for the system's calls, with backslashes. A path as long as
+## `long_path` or longer is passed in its `\\?\` form, which MAX_PATH does not limit.
 func wide_path(path: c.str) -> u16[]!:
     let result = try windows_text.wide(path, invalid_options)
     for index in 0..<result.length:
         if result[index] == 47:
             result[index] = 92
+    if result.length - 1 < long_path or verbatim(result):
+        return result
+    return try long_form(result)
+
+## Rename `source` over `destination` (UTF-16, NUL-terminated) as POSIX does: the name
+## moves to the source's file at once, and handles open on the file it named keep that
+## file. MoveFileExW refuses a destination someone holds open, and the replaced file
+## keeps the name until its last handle closes; FileRenameInfoEx with POSIX semantics
+## (Windows 10 1607 on) does neither. Answers false where the system lacks it.
+func windows_replace(source: u16[], destination: u16[]) -> bool!:
+    var info: WinRename = ---
+    let count = (usize)GetFullPathNameW(destination.data, (u32)info.name.length, &info.name[0], none)
+    if count == 0 or count >= info.name.length:
+        error(windows_error(GetLastError()), "the destination could not be made absolute")
+    info.flags = rename_replace_posix
+    info.root = none
+    info.length = (u32)(count * 2)
+    # DELETE access, sharing everything; open a link itself (backup semantics for a directory)
+    let handle = CreateFileW(source.data, 65536, 7, none, 3, 33554432 | 2097152, none)
+    if (usize)handle == ~(usize)0:
+        error(windows_error(GetLastError()), "the entry could not be opened to rename")
+    defer _ = CloseHandle(handle)
+    if SetFileInformationByHandle(handle, 22, (void*)&info, (u32)(20 + count * 2 + 2)) != 0:
+        return true
+    let number = GetLastError()
+    # an older system, or a filesystem without POSIX semantics
+    if number == 1 or number == 50 or number == 87:
+        return false
+    error(windows_error(number), "the entry could not be renamed")
+
+## Whether the entry `path` (UTF-16, NUL-terminated) names is a symbolic link to a
+## directory, or another directory reparse point such as a junction.
+func symbolic_directory(path: u16[]) -> bool:
+    let attributes = GetFileAttributesW(path.data)
+    return attributes != invalid_attributes and (attributes & reparse_point) != 0 and (attributes & directory_attribute) != 0
+
+## Whether a backslashed path already names the system's namespace: `\\?\` or `\\.\`.
+func verbatim(path: u16[]) -> bool:
+    return path.length > 4 and path[0] == 92 and path[1] == 92 and (path[2] == 63 or path[2] == 46) and path[3] == 92
+
+## `path`, NUL-terminated, made absolute and normal (a `\\?\` path takes no `.` or `..`)
+## and given the `\\?\` prefix, or `\\?\UNC\` in place of a share's leading `\\`. It
+## takes `path` and frees it before allocating the answer, so a stack-like allocator gets
+## the space back.
+func long_form(path: u16[]) -> u16[]!:
+    var full: u16[32768] = ---
+    let count = (usize)GetFullPathNameW(path.data, (u32)full.length, &full[0], none)
+    let number = GetLastError()
+    free(path)
+    if count == 0 or count >= full.length:
+        error(windows_error(number), "the path could not be made absolute")
+    let share = count > 2 and full[0] == 92 and full[1] == 92
+    let skipped: usize = 2 if share else 0
+    let prefix: usize = 8 if share else 4
+    let result = try new u16[prefix + count - skipped + 1] ---
+    # \\?\ and, for a share, UNC\
+    result[0] = 92
+    result[1] = 92
+    result[2] = 63
+    result[3] = 92
+    if share:
+        result[4] = 85
+        result[5] = 78
+        result[6] = 67
+        result[7] = 92
+    for index in skipped..<count:
+        result[prefix + index - skipped] = full[index]
+    result[result.length - 1] = 0
     return result
 
 func windows_error(number: u32) -> ErrorCode:

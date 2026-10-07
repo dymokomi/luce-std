@@ -23,12 +23,22 @@ pub func exists_checked(path: c.str) -> bool!:
     if platform.windows:
         let text = try wide_path(path)
         defer free(text)
-        if win_access(text.data, 0) == 0:
+        if win_access(text.data, 0) != 0:
+            let number = c.errno()
+            if number == 2 or number == 20:
+                return false
+            error(classify_error(number), "the path could not be inspected")
+        # _waccess answers for a symbolic link itself, so a dangling link would exist: a
+        # link's target is checked by opening the path, which follows it as access() does.
+        let attributes = GetFileAttributesW(text.data)
+        if attributes == invalid_attributes or (attributes & reparse_point) == 0:
             return true
-        let number = c.errno()
-        if number == 2 or number == 20:
-            return false
-        error(classify_error(number), "the path could not be inspected")
+        let handle = windows_path_handle(path, true) catch failure:
+            if failure.code == missing or failure.code == not_directory:
+                return false
+            error(failure.code, "the path could not be inspected")
+        _ = CloseHandle(handle)
+        return true
     else:
         var result = access(path, 0)
         while result < 0 and c.errno() == c.interrupted:
@@ -67,7 +77,13 @@ pub func remove_file(path: c.str) -> !:
         let text = try wide_path(path)
         defer free(text)
         if win_unlink(text.data) != 0:
-            error(classify_error(c.errno()), "the file entry could not be removed")
+            let number = c.errno()
+            # a symbolic link to a directory is a directory entry to Windows, removed as one
+            if symbolic_directory(text):
+                if RemoveDirectoryW(text.data) != 0:
+                    return
+                error(windows_error(GetLastError()), "the file entry could not be removed")
+            error(classify_error(number), "the file entry could not be removed")
         return
     else:
         if unlink(path) != 0:
@@ -79,8 +95,12 @@ pub func remove_directory(path: c.str) -> !:
     if platform.windows:
         let text = try wide_path(path)
         defer free(text)
-        if win_rmdir(text.data) != 0:
-            error(classify_error(c.errno()), "the directory could not be removed")
+        # RemoveDirectoryW would remove a symbolic link to a directory, which rmdir refuses
+        if symbolic_directory(text):
+            error(not_directory, "a symbolic link is not a directory to remove")
+        # the CRT's _wrmdir reports a file as EINVAL; the system's own error names it
+        if RemoveDirectoryW(text.data) == 0:
+            error(windows_error(GetLastError()), "the directory could not be removed")
         return
     else:
         if rmdir(path) != 0:
@@ -102,7 +122,11 @@ pub func rename(source: c.str, destination: c.str, replace: bool = true, synchro
         defer free(to)
         let flags: u32 = (1 if replace else 0) | (8 if synchronize else 0)
         if MoveFileExW(from_path.data, to.data, flags) == 0:
-            error(windows_error(GetLastError()), "the entry could not be renamed")
+            let number = GetLastError()
+            # access denied: the destination is open, or names a replaced file still open
+            if number == 5 and replace and try windows_replace(from_path, to):
+                return
+            error(windows_error(number), "the entry could not be renamed")
         return
     else:
         var result: i32 = 0

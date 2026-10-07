@@ -10,6 +10,22 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifdef _WIN32
+#include <io.h>
+#include <windows.h>
+/* A reader shares deletion, as luce-std's own File.open does: Windows refuses to replace
+ * a file that a handle without FILE_SHARE_DELETE holds open. Binary mode keeps the C
+ * runtime from translating line ends. */
+static int open_reader(const char *path) {
+    HANDLE handle = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (handle == INVALID_HANDLE_VALUE) { errno = EACCES; return -1; }
+    return _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
+}
+#else
+static int open_reader(const char *path) { return open(path, O_RDONLY); }
+#endif
+
 #define READERS 3
 #define CAPACITY 65536
 static const char *publication_path;
@@ -30,7 +46,7 @@ void publication_verify(const unsigned char *data, size_t length) {
 
 static void snapshot(void) {
     int fd;
-    do { fd = open(publication_path, O_RDONLY); } while (fd < 0 && errno == EINTR);
+    do { fd = open_reader(publication_path); } while (fd < 0 && errno == EINTR);
     assert(fd >= 0);
     struct stat metadata;
     assert(fstat(fd, &metadata) == 0);
