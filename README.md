@@ -149,6 +149,12 @@ checks, the HTTP server driven by curl, the Unicode tables against their generat
 Luce programs `tests/luce_*`, each of which must print its expected output and leave no
 object alive.
 
+The same run passes on macOS, Linux and Windows. The checks whose C reference is POSIX code,
+with faults injected through `dlsym` or FIFOs made by `mkfifo`, skip themselves on Windows
+and say why; `tests/windows_files` and `tests/windows_network` check Windows' side of the
+file and network contracts instead, and skip elsewhere. On Windows, run it from Git's bash,
+whose `sh`, `echo` and `nm` some checks call.
+
 ## License
 
 MIT or Apache-2.0, at your option.

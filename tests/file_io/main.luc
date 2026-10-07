@@ -1,6 +1,7 @@
 # Real files and targeted syscall failures (check.lucb, with faults.c), reading a FIFO a
 # second process writes.
 from luce_std import files, paths, process
+import platform
 
 let failed = ErrorCode.package(1)
 
@@ -29,6 +30,9 @@ func expect(condition: bool, what: str) -> unit!:
         error(failed, what)
 
 pub func main(arguments: list[str]) -> int!:
+    if platform.windows:
+        print("skip: faults.c interposes the POSIX read and write calls through dlsym, and the check reads a FIFO")
+        return 0
     let (work, check) = prepare("file_io")
     let target = paths.join(work, "data")
     let fifo = paths.join(work, "input-fifo")

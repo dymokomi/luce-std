@@ -15,6 +15,9 @@ func cancel_now(context: void*):
     cancellation.request()
 
 pub func main(arguments: c.str[]) -> i32!:
+    if platform.windows:
+        print("skip: reference.c injects faults into a POSIX socketpair through dlsym")
+        return 0
     var pair: i32[2]
     assert(socketpair(1, 1, 0, &pair[0]) == 0)
     reference_begin(8, pair[0])

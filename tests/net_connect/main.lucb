@@ -1,6 +1,7 @@
 import sync
 import c
 from luce_std import net
+import platform
 
 extern func reference_begin(kind: i32)
 extern func reference_end() -> i32
@@ -11,6 +12,9 @@ func cancel_now(context: void*):
     cancellation.request()
 
 pub func main(arguments: c.str[]) -> i32!:
+    if platform.windows:
+        print("skip: reference.c simulates connects by interposing the POSIX socket calls through dlsym")
+        return 0
     let target = net.SocketAddress.loopback(1234)
     for kind in 1..<9:
         if kind == 5:

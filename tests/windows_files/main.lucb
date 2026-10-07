@@ -1,11 +1,29 @@
+## Windows' side of the file contract, in a scratch directory of its own: large seeks,
+## truncation, times, the read-only attribute, renaming and linking an open file,
+## directory-relative files, publication, symbolic links where Windows allows them, and
+## temporary files deleted with their last handle. The tests/file_* programs check POSIX
+## hosts.
 import c
-from luce_std import files
+import files
 import io
 import os
+import platform
 import strings
 
 pub func main(arguments: c.str[]) -> i32!:
-    try os.change_dir(arguments[1])
+    if not platform.windows:
+        print("skip: the Windows file contract")
+        return 0
+    let scratch = try files.create_temporary_directory((c.str)io.path.temp())
+    defer scratch.release()
+    try os.change_dir((c.str)scratch.value)
+    try contract()
+    # Windows removes no directory that is a process's working directory
+    try os.change_dir((c.str)io.path.temp())
+    try files.remove_tree((c.str)scratch.value)
+    return 0
+
+func contract() -> !:
     var file = try files.File.open("data", files.OpenMode.create_new_read_write)
     defer file.destroy()
     assert(try file.seek(5368709120) == 5368709120)
@@ -75,4 +93,3 @@ pub func main(arguments: c.str[]) -> i32!:
     try scratch.close()
     assert(not files.exists("scratch"))
     print("ok seek, truncate, times, attributes, open rename, hard links, relative files, publication, temporary")
-    return 0

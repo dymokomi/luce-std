@@ -1,16 +1,20 @@
 import c
 import io
 from luce_std import net
+import platform
 
-extern func reference_wait_readable(fd: i32)
-extern func reference_option(fd: i32, option: i32) -> i32
-extern func reference_flags(fd: i32) -> i32
+extern func reference_wait_readable(fd: platform.SocketDescriptor)
+extern func reference_option(fd: platform.SocketDescriptor, option: i32) -> i32
+extern func reference_flags(fd: platform.SocketDescriptor) -> i32
 extern func reference_nonblocking_flag() -> i32
 extern func reference_failed_descriptor_closed() -> i32
 extern func fault_arm(kind: i32)
 extern func fault_hits() -> i32
 
 pub func main(arguments: c.str[]) -> i32!:
+    if platform.windows:
+        print("skip: reference.c reads options back through the POSIX socket calls and injects faults through dlsym")
+        return 0
     var listener = try net.Listener.bind(net.SocketAddress.loopback(0))
     defer listener.destroy()
     let fd = listener.descriptor() else trap("listener descriptor")

@@ -3,6 +3,7 @@ import io
 from luce_std import net
 import memory
 import thread
+import platform
 
 extern func transfer_start(version: i32) -> u16
 extern func transfer_finish()
@@ -58,6 +59,9 @@ func worker(context: void*?):
             print(f"transfer client {client.identity}: {failure.message}")
 
 pub func main(arguments: c.str[]) -> i32!:
+    if platform.windows:
+        print("skip: reference.c runs POSIX socket peers on pthreads")
+        return 0
     for version in [4, 6]:
         let port = transfer_start((i32)version)
         var clients: Client[4]

@@ -1,18 +1,51 @@
-import sync
+## The socket checks against reference.c, which reads endpoints back through the POSIX
+## socket headers: a module of their own, so that a Windows build, which skips them,
+## neither compiles nor links them.
 import io
 from luce_std import net
+import platform
+
+extern func reference_endpoint(fd: platform.SocketDescriptor, peer: i32, bytes: u8*, port: u16*, scope: u32*) -> i32
+extern func reference_scope_closed() -> i32
+extern func reference_scope_released() -> i32
+extern func reference_ipv6_only(fd: platform.SocketDescriptor) -> i32
+
+func check_endpoint(fd: platform.SocketDescriptor, peer: bool, address: net.SocketAddress) -> !:
+    var expected: u8[16]
+    var port: u16
+    var scope: u32
+    let version = reference_endpoint(fd, 1 if peer else 0, &expected[0], &port, &scope)
+    assert(version == 4 or version == 6)
+    var actual: u8[16]
+    let count = try address.ip.write_octets(actual)
+    assert(count == (4 if version == 4 else 16))
+    var index: usize = 0
+    while index < count:
+        assert(actual[index] == expected[index])
+        index += 1
+    assert(address.port == port and address.scope_id == scope)
 
 func tcp(version: net.IpVersion, dual: bool) -> !:
     let binding = net.SocketAddress.any(0, version) if dual else net.SocketAddress.loopback(0, version)
     var listener = try net.Listener.bind(binding, ipv6_only = not dual)
     defer listener.destroy()
+    let listener_fd = listener.descriptor() else trap("listener descriptor missing")
     let bound = try listener.address()
+    try check_endpoint(listener_fd, false, bound)
+    if version == net.IpVersion.ipv6:
+        assert(reference_ipv6_only(listener_fd) == (0 if dual else 1))
     let destination = net.SocketAddress.loopback(bound.port, net.IpVersion.ipv4 if dual else version)
     var client = try net.Connection.connect(destination)
     defer client.destroy()
     var server = try listener.accept()
     defer server.destroy()
+    let client_fd = client.descriptor() else trap("client descriptor missing")
+    let server_fd = server.descriptor() else trap("server descriptor missing")
+    try check_endpoint(client_fd, false, try client.local_address())
+    try check_endpoint(client_fd, true, try client.peer_address())
+    try check_endpoint(server_fd, false, try server.local_address())
     let remote = try server.peer_address()
+    try check_endpoint(server_fd, true, remote)
     assert(remote.ip.is_ipv4_mapped() == dual)
     try io.write_all(&client, "ping".bytes)
     var data: u8[4]
@@ -28,7 +61,11 @@ func udp(version: net.IpVersion, dual: bool) -> !:
     let binding = net.SocketAddress.any(0, version) if dual else net.SocketAddress.loopback(0, version)
     var server = try net.Datagram.bind(binding, ipv6_only = not dual)
     defer server.destroy()
+    let fd = server.descriptor() else trap("datagram descriptor missing")
     let bound = try server.address()
+    try check_endpoint(fd, false, bound)
+    if version == net.IpVersion.ipv6:
+        assert(reference_ipv6_only(fd) == (0 if dual else 1))
     let client_version = net.IpVersion.ipv4 if dual else version
     var client = try net.Datagram.bind(net.SocketAddress.loopback(0, client_version))
     defer client.destroy()
@@ -55,61 +92,24 @@ func udp(version: net.IpVersion, dual: bool) -> !:
     let (next, next_sender) = try server.receive_from(data)
     assert(next == 4 and (str)data == "next" and next_sender.equals(remote))
 
-func deadline_contract() -> !:
-    var listener = try net.Listener.bind(net.SocketAddress.loopback(0))
-    defer listener.destroy()
-    try listener.set_nonblocking(true)
-    var expired = false
-    _ = listener.wait(deadline = try net.Deadline.after(10000000)) catch failure:
-        assert(failure.code == net.timed_out)
-        expired = true
-        recover net.Readiness()
-    assert(expired)
-    var client = try net.Connection.connect(try listener.address(), deadline = try net.Deadline.after(1000000000), nonblocking = true)
-    defer client.destroy()
-    _ = try listener.wait(deadline = try net.Deadline.after(1000000000))
-    var peer = try listener.accept(nonblocking = true)
-    defer peer.destroy()
-    assert(try peer.is_nonblocking())
-    try peer.set_keepalive(true)
-    assert(try peer.keepalive())
-    try peer.set_no_delay(true)
-    assert(try peer.no_delay())
-    try peer.set_receive_buffer(8192)
-    assert(try peer.receive_buffer() >= 8192)
-    var reader = try net.DeadlineStream.over(&peer, try net.Deadline.after(10000000))
-    var data: u8[4]
-    expired = false
-    _ = reader.read(data) catch failure:
-        assert(failure.code == net.timed_out)
-        expired = true
-        recover 0
-    assert(expired)
-    var cancellation: sync.Cancellation
-    cancellation.request()
-    var cancelled = false
-    _ = peer.wait(cancellation = &cancellation) catch failure:
-        assert(failure.code == net.cancelled)
-        cancelled = true
-        recover net.Readiness()
-    assert(cancelled)
-    try io.write_all(&client, "ping".bytes)
-    var fresh = try net.DeadlineStream.over(&peer, try net.Deadline.after(1000000000))
-    try io.read_exact(&fresh, data)
-    assert((str)data == "ping")
-    var addresses = try net.resolve_all("localhost", 12345)
-    defer addresses.destroy()
-    assert(addresses.view().length > 0)
-    for address in addresses.view(): assert(address.port == 12345)
-    assert((try net.resolve("127.0.0.1", 80)).port == 80)
-
-pub func main(arguments: str[]) -> i32!:
+## Every socket check.
+pub func check() -> !:
     try tcp(net.IpVersion.ipv4, false)
     try tcp(net.IpVersion.ipv6, false)
     try tcp(net.IpVersion.ipv6, true)
     try udp(net.IpVersion.ipv4, false)
     try udp(net.IpVersion.ipv6, false)
     try udp(net.IpVersion.ipv6, true)
-    try deadline_contract()
-    print("ok IPv4, IPv6, dual stack, TCP, UDP truncation, deadlines, cancellation, socket options, resolver")
-    return 0
+    let resolved = try net.resolve("::1", 1234, net.IpVersion.ipv6)
+    assert(resolved.equals(net.SocketAddress.loopback(1234, net.IpVersion.ipv6)))
+    let scoped = try net.resolve("scoped.invalid", 4660, net.IpVersion.ipv6)
+    assert(reference_scope_released() == 1)
+    let expected_scope = net.SocketAddress.parse("[fe80::1234%16909060]:4660") else trap("scope parse failed")
+    assert(scoped.equals(expected_scope))
+    var rejected = false
+    var unavailable = net.Listener.bind(scoped) catch failure:
+        assert(failure.code == net.invalid_options)
+        rejected = true
+        recover net.Listener()
+    unavailable.destroy()
+    assert(rejected and reference_scope_closed() == 1)

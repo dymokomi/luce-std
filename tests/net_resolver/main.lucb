@@ -1,10 +1,14 @@
 import c
 import memory
 from luce_std import net
+import platform
 
 extern func reference_released() -> i32
 
 pub func main(arguments: c.str[]) -> i32!:
+    if platform.windows:
+        print("skip: reference.c replaces the POSIX getaddrinfo")
+        return 0
     let v4 = net.SocketAddress.parse("127.0.0.42:1234") else trap("IPv4 endpoint parse")
     let v6 = net.SocketAddress.parse("[2001:db8::1%17]:1234") else trap("IPv6 endpoint parse")
     var all = try net.resolve_all("mixed.invalid", 1234)

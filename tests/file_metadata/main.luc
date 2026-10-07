@@ -1,6 +1,7 @@
 # Metadata (check.lucb) of a file, a link and a FIFO against the C library's view
 # (reference.c).
 from luce_std import files, paths, process
+import platform
 
 let failed = ErrorCode.package(1)
 
@@ -29,6 +30,9 @@ func expect(condition: bool, what: str) -> unit!:
         error(failed, what)
 
 pub func main(arguments: list[str]) -> int!:
+    if platform.windows:
+        print("skip: reference.c decodes POSIX stat and interposes it through dlsym, and the check reads a FIFO")
+        return 0
     let (work, check) = prepare("file_metadata")
     let fifo = paths.join(work, "fifo")
     _ = must("mkfifo", [fifo])
