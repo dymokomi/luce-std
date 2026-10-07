@@ -86,7 +86,7 @@ extern struct MacMetadata:
     reserved: i64[2]
 
 ## x86-64 Linux struct stat. Layout is checked against the host's C headers by
-## tests/programs/file_metadata, rather than inferred from matching field names.
+## tests/file_metadata, rather than inferred from matching field names.
 extern struct LinuxMetadata:
     device: u64
     inode: u64

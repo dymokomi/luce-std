@@ -1,0 +1,3 @@
+ok HTTP heads, framing, every fragment size, limits and EOF
+ok WebSocket handshake, masking, fragmented UTF-8, control frames and errors
+ok 10000 deterministic malformed-input cases

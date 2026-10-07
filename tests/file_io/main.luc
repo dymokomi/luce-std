@@ -1,0 +1,41 @@
+# Real files and targeted syscall failures (check.lucb, with faults.c), reading a FIFO a
+# second process writes.
+from luce_std import files, paths, process
+
+let failed = ErrorCode.package(1)
+
+# Run `program`, failing unless it exits 0; what it printed.
+func must(program: str, arguments: list[str]) -> str!:
+    let done = process.run(program, arguments)
+    if done.exit_code != 0:
+        error(failed, f"{program} {arguments}: exit status {done.exit_code}\n{done.output}{done.error_output}")
+    return done.output
+
+# A fresh scratch directory under build/tests/<name>, and check.lucb beside this program
+# built into it with LUCE_BASE; the scratch directory and the built check.
+func prepare(name: str) -> (str, str)!:
+    let here = process.variable("LUC_TEST_DIR") else f"tests/{name}"
+    let base = process.variable("LUCE_BASE") else "luce-base"
+    let work = paths.join(process.current_directory(), f"build/tests/{name}/work")
+    if files.exists(work):
+        files.remove_tree(work)
+    files.ensure_directory(work)
+    let check = paths.join(work, "check")
+    _ = must(base, ["build", paths.join(here, "check.lucb"), "-o", check])
+    return (work, check)
+
+func expect(condition: bool, what: str) -> unit!:
+    if not condition:
+        error(failed, what)
+
+pub func main(arguments: list[str]) -> int!:
+    let (work, check) = prepare("file_io")
+    let target = paths.join(work, "data")
+    let fifo = paths.join(work, "input-fifo")
+    _ = must("mkfifo", [fifo])
+    with process.Command("sh", ["-c", f"printf streamed > '{fifo}'"]) as producer:
+        _ = must(check, [target, fifo])
+        expect(producer.wait() == 0, "the FIFO producer failed")
+    expect(files.read(target) == b"abcd12xy", "the file's final contents differ")
+    files.remove_tree(work)
+    return 0

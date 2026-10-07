@@ -1,0 +1,88 @@
+# Crash on purpose (check.lucb, on the main thread, another thread and by a trap) and check
+# the report names the faulting function and its callers, in order. Windows reports give
+# module+offset, so there the program's frames are named from its symbol table (nm), as a
+# debugger would.
+from luce_std import files, paths, process
+import platform
+
+let failed = ErrorCode.package(1)
+
+# Run `program`, failing unless it exits 0; what it printed.
+func must(program: str, arguments: list[str]) -> str!:
+    let done = process.run(program, arguments)
+    if done.exit_code != 0:
+        error(failed, f"{program} {arguments}: exit status {done.exit_code}\n{done.output}{done.error_output}")
+    return done.output
+
+# A fresh scratch directory under build/tests/<name>, and check.lucb beside this program
+# built into it with LUCE_BASE; the scratch directory and the built check.
+func prepare(name: str) -> (str, str)!:
+    let here = process.variable("LUC_TEST_DIR") else f"tests/{name}"
+    let base = process.variable("LUCE_BASE") else "luce-base"
+    let work = paths.join(process.current_directory(), f"build/tests/{name}/work")
+    if files.exists(work):
+        files.remove_tree(work)
+    files.ensure_directory(work)
+    let check = paths.join(work, "check")
+    _ = must(base, ["build", paths.join(here, "check.lucb"), "-o", check])
+    return (work, check)
+
+func expect(condition: bool, what: str) -> unit!:
+    if not condition:
+        error(failed, what)
+
+pub func main(arguments: list[str]) -> int!:
+    let (work, check) = prepare("crash_report")
+    let home = paths.join(work, "home")
+    let crashes = paths.join(home, ".luce/crashes")
+    files.ensure_directory(crashes)
+    let chain = ["crash_depth_three", "crash_depth_two", "crash_depth_one"]
+    for mode in ["main", "thread", "trap"]:
+        let result = process.run(check, [mode, "0"], "", [f"HOME={home}", f"USERPROFILE={home}"])
+        expect(result.exit_code != 0, f"{mode}: the program did not crash")
+        var reports: list[str] = []
+        for name in files.list(crashes):
+            if name.starts_with("crashcheck-") or name.starts_with("check-"):
+                reports.append(name)
+        expect(reports.length == 1, f"{mode}: expected one report, found {reports}")
+        let report = paths.join(crashes, reports[0])
+        let text = files.read_text(report)
+        files.remove_file(report)
+        var stack = text.split("stack:")[1] if "stack:" in text else ""
+        if platform.windows:
+            stack = symbolicated(stack, check)
+        var places: list[int] = []
+        for name in chain:
+            places.append(stack.index_of(name) else -1)
+        expect(places[0] >= 0 and places[0] < places[1] and places[1] < places[2], f"{mode}: the stack does not name {chain} in order:\n{text}")
+        print(f"ok {mode}")
+    files.remove_tree(work)
+    return 0
+
+func hex(text: str) -> int:
+    var value = 0
+    for character in text:
+        let digit = "0123456789abcdef".index_of(character) else return value
+        value = value * 16 + digit
+    return value
+
+# The program's frames in a Windows stack (`check.exe+0x1234`) named by the nearest
+# symbol at or below each address in a 64-bit PE image (base 0x140000000), one per line.
+func symbolicated(stack: str, executable: str) -> str!:
+    var symbols: list[(int, str)] = []
+    for line in must("nm", ["-n", "--defined-only", executable]).lines():
+        let parts = line.split()
+        if parts.length == 3 and (parts[1] == "t" or parts[1] == "T"):
+            symbols.append((hex(parts[0]), parts[2]))
+    var names: list[str] = []
+    let marker = paths.base(executable) + ".exe+0x"
+    for line in stack.lines():
+        let at = line.index_of(marker) else continue
+        let address = 5368709120 + hex(line[at + marker.length..<line.length])
+        var best = "?"
+        for (start, name) in symbols:
+            if start > address:
+                break
+            best = name
+        names.append(best)
+    return names.join("\n")

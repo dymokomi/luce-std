@@ -1,0 +1,17 @@
+# The multi-threaded HTTP server of server.lucb, driven by curl from check.sh: static files,
+# 404 and 403, POST echo, keep-alive, HEAD, 40 concurrent clients, stats and a clean quit.
+from luce_std import process
+import platform
+
+let failed = ErrorCode.package(1)
+
+pub func main(arguments: list[str]) -> int!:
+    if platform.windows:
+        print("skip: the HTTP server check drives curl from sh")
+        return 0
+    let here = process.variable("LUC_TEST_DIR") else "tests/http"
+    let done = process.run("sh", [f"{here}/check.sh", process.variable("LUCE_BASE") else "luce-base"])
+    print(done.output.trim_end())
+    if done.exit_code != 0:
+        error(failed, f"check.sh: exit status {done.exit_code}\n{done.error_output}")
+    return 0

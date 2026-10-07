@@ -1,0 +1,14 @@
+# The WebSocket handshake and framing against Python's own: vectors.py builds the protocol
+# contracts (tests/net_protocols) and holds 64 accept keys to base64(SHA-1(key + GUID)) and
+# the frames of every length class, masked and not, to the RFC 6455 layout.
+from luce_std import process
+
+let failed = ErrorCode.package(1)
+
+pub func main(arguments: list[str]) -> int!:
+    let here = process.variable("LUC_TEST_DIR") else "tests/net_protocol_vectors"
+    let done = process.run("python3", [f"{here}/vectors.py", process.variable("LUCE_BASE") else "luce-base"])
+    print(done.output.trim_end())
+    if done.exit_code != 0:
+        error(failed, f"vectors.py: exit status {done.exit_code}\n{done.error_output}")
+    return 0

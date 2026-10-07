@@ -1,0 +1,11 @@
+#prisma 4.0
+def package "resolver_result_contracts" {
+    def native "inputs" {
+        str[] sources = ["reference.c"]
+    }
+
+    def dependency "luce-std" {
+        str owner = "dymokomi"
+        str path = "../.."
+    }
+}

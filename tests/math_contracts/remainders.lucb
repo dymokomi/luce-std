@@ -1,0 +1,30 @@
+## The mod and remainder rows of ../math_accuracy/reference.csv as the little-endian binary
+## rows check_remainders reads: 1 for mod or 0 for remainder, the width, and the x, y and
+## result bits (4 + 4 + 3 * 8 bytes).
+import memory
+import strings
+
+func field(text: str, radix: u32) -> u64:
+    return strings.parse_u64(text, radix) else trap("reference.csv: a malformed number")
+
+## The rows of `text` (the CSV, header first), released by the caller with free(...) in
+## memory.heap.
+pub func corpus(text: str) -> u8[]!:
+    let lines = try strings.split(text, '\n')
+    defer free(lines) in memory.heap
+    let rows = try new u8[lines.length * 32] --- in memory.heap
+    errdefer free(rows) in memory.heap
+    var size: usize = 0
+    for index in 1..<lines.length:
+        if lines[index].length == 0: continue
+        let fields = try strings.split(lines[index], ',')
+        defer free(fields) in memory.heap
+        if fields[0] != "mod" and fields[0] != "remainder": continue
+        memory.write[u32](rows.data + size, (u32)1 if fields[0] == "mod" else (u32)0)
+        memory.write[u32](rows.data + size + 4, (u32)field(fields[1], 10))
+        memory.write[u64](rows.data + size + 8, field(fields[2], 16))
+        memory.write[u64](rows.data + size + 16, field(fields[3], 16))
+        memory.write[u64](rows.data + size + 24, field(fields[5], 16))
+        size += 32
+    assert(size > 0, "reference.csv has no mod or remainder rows")
+    return rows[..<size]

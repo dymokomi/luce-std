@@ -122,12 +122,11 @@ program reaches code that needs them):
 
 ## Tests
 
-`./test.sh` runs every module's `test` blocks and the unit tests through the native and C
-backends, then the program checks under `tests/programs`. It expects the compiler beside
-this checkout at `../luce-base/build/luce-base` (or `--base PATH`). When a Luce compiler is
-at hand (`LUCE`, or `../luce/build/luce`), it also builds the Luce programs under
-`tests/luce` against this checkout: each must print its expected output and leave no object
-alive. `tests/luce/run.py --leaks` also runs them under macOS's `leaks`.
+`luc test` runs every module's `test` blocks, with the module tests under `tests/<module>/`,
+and every program under `tests/`: the file, network, process, math, Unicode and crash
+checks, the HTTP server driven by curl, the Unicode tables against their generator, and the
+Luce programs `tests/luce_*`, each of which must print its expected output and leave no
+object alive.
 
 ## License
 

@@ -1,0 +1,65 @@
+# The standard library's scaling (check.lucb): each workload at growing sizes, three
+# times, with its time, allocation count and allocator peak per line. Wall-clock ratios are
+# noisy and only printed; the checks are that every workload reports once per run, the
+# clock advances, allocation counts repeat exactly between runs, and a file copy's
+# allocations do not grow with the payload.
+from luce_std import files, paths, process
+
+let failed = ErrorCode.package(1)
+
+# Run `program`, failing unless it exits 0; what it printed.
+func must(program: str, arguments: list[str]) -> str!:
+    let done = process.run(program, arguments)
+    if done.exit_code != 0:
+        error(failed, f"{program} {arguments}: exit status {done.exit_code}\n{done.output}{done.error_output}")
+    return done.output
+
+# A fresh scratch directory under build/tests/<name>, and check.lucb beside this program
+# built into it with LUCE_BASE; the scratch directory and the built check.
+func prepare(name: str) -> (str, str)!:
+    let here = process.variable("LUC_TEST_DIR") else f"tests/{name}"
+    let base = process.variable("LUCE_BASE") else "luce-base"
+    let work = paths.join(process.current_directory(), f"build/tests/{name}/work")
+    if files.exists(work):
+        files.remove_tree(work)
+    files.ensure_directory(work)
+    let check = paths.join(work, "check")
+    _ = must(base, ["build", paths.join(here, "check.lucb"), "-o", check])
+    return (work, check)
+
+func expect(condition: bool, what: str) -> unit!:
+    if not condition:
+        error(failed, what)
+
+pub func main(arguments: list[str]) -> int!:
+    let (work, check) = prepare("stdlib_scaling")
+    # (operation, size) -> the elapsed times and the one (allocations, peak) seen
+    var times: map[str, list[int]] = {}
+    var counts: map[str, str] = {}
+    var file_counts: list[str] = []
+    for repetition in 0..<3:
+        let output = must(check, [paths.join(work, "source"), paths.join(work, "destination")])
+        var seen: list[str] = []
+        for line in output.lines():
+            let fields = line.split(",")
+            expect(fields.length == 5, f"a malformed measurement: {line}")
+            let key = f"{fields[0]} {fields[1]}"
+            expect(not (key in seen), f"duplicate measurement: {key}")
+            seen.append(key)
+            let elapsed = int(fields[2])
+            expect(elapsed > 0, "the monotonic clock did not advance")
+            let accounting = f"{fields[3]},{fields[4]}"
+            if let earlier = counts[key]:
+                expect(earlier == accounting, f"allocator accounting changed between repetitions: {key}")
+            counts[key] = accounting
+            var samples = times.get(key, [])
+            samples.append(elapsed)
+            times[key] = samples
+            if fields[0] == "file_copy" and not (accounting in file_counts):
+                file_counts.append(accounting)
+        expect(seen.length == 12, "missing workload measurements")
+    expect(file_counts.length == 1, "file-copy allocation grew with payload size")
+    for (key, samples) in times:
+        print(f"{key}: {samples} ns, allocations and peak {counts[key] else ""}")
+    files.remove_tree(work)
+    return 0

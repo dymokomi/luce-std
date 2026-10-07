@@ -1,0 +1,30 @@
+## The `paths` module against its archive: lexical splitting and joining.
+
+test "paths split into their parts and join":
+    # a rooted path is absolute on POSIX; Windows asks for a drive or a UNC share as well
+    assert(is_absolute("C:/usr/lib" if platform.windows else "/usr/lib") and not is_absolute("usr/lib"))
+    assert(directory("/usr/lib/x.a") == "/usr/lib" and directory("x.a") == ".")
+    assert(base("/usr/lib/x.a") == "x.a" and base("x.a") == "x.a")
+    assert(extension("x.tar.gz") == ".gz" and extension("x") == "")
+    assert(stem("/usr/lib/x.a") == "x" and stem("noext") == "noext")
+    let joined = try join("/usr", "lib")
+    defer joined.release()
+    assert(joined.value == "/usr/lib")
+    let absolute_wins = try join("/usr", "C:/etc" if platform.windows else "/etc")
+    defer absolute_wins.release()
+    assert(absolute_wins.value == ("C:/etc" if platform.windows else "/etc"))
+    let normal = try normalize("a/./b/../c")
+    defer normal.release()
+    assert(normal.value == "a/c")
+
+test "join_into writes a path with no allocation":
+    var buffer: u8[64] = ---
+    assert(join_into(buffer[0..], "/usr", "lib") == "/usr/lib")
+    assert(join_into(buffer[0..], "/usr/", "lib") == "/usr/lib")   # no doubled separator
+    assert(join_into(buffer[0..], "", "lib") == "lib")             # empty left is the right path
+    let rooted = "C:/etc" if platform.windows else "/etc"
+    assert(join_into(buffer[0..], "/usr", rooted) == rooted)           # an absolute right wins
+    let written = join_into(buffer[0..], "dir", "file")
+    assert(buffer[written.length] == 0)                                  # NUL-terminated, usable as c.str
+    var tiny: u8[4] = ---
+    assert(join_into(tiny[0..], "dir", "file").length == 0)        # "" when it does not fit

@@ -1,0 +1,39 @@
+# Hard links, symlinks, renames and removals (check.lucb), leaving nothing behind.
+from luce_std import files, paths, process
+
+let failed = ErrorCode.package(1)
+
+# Run `program`, failing unless it exits 0; what it printed.
+func must(program: str, arguments: list[str]) -> str!:
+    let done = process.run(program, arguments)
+    if done.exit_code != 0:
+        error(failed, f"{program} {arguments}: exit status {done.exit_code}\n{done.output}{done.error_output}")
+    return done.output
+
+# A fresh scratch directory under build/tests/<name>, and check.lucb beside this program
+# built into it with LUCE_BASE; the scratch directory and the built check.
+func prepare(name: str) -> (str, str)!:
+    let here = process.variable("LUC_TEST_DIR") else f"tests/{name}"
+    let base = process.variable("LUCE_BASE") else "luce-base"
+    let work = paths.join(process.current_directory(), f"build/tests/{name}/work")
+    if files.exists(work):
+        files.remove_tree(work)
+    files.ensure_directory(work)
+    let check = paths.join(work, "check")
+    _ = must(base, ["build", paths.join(here, "check.lucb"), "-o", check])
+    return (work, check)
+
+func expect(condition: bool, what: str) -> unit!:
+    if not condition:
+        error(failed, what)
+
+pub func main(arguments: list[str]) -> int!:
+    let (work, check) = prepare("file_mutations")
+    let directory = paths.join(work, "directory")
+    var words = [directory]
+    for name in ["data", "hard", "link", "dangling", "renamed", "link-alias"]:
+        words.append(paths.join(directory, name))
+    _ = must(check, words)
+    expect(not files.exists(directory), "the directory is still there")
+    files.remove_tree(work)
+    return 0

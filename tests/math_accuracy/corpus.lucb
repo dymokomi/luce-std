@@ -1,0 +1,50 @@
+## reference.csv, the offline arbitrary-precision references, as the little-endian binary
+## rows reference.lucb reads: per row the operation's index, the width, the x, y and z
+## bits, the result's bits and the budget in ulps (4 + 4 + 5 * 8 bytes).
+import memory
+import strings
+
+let operations: str[30] = ["floor", "ceil", "round", "trunc", "sqrt", "cbrt", "hypot", "mod", "pow", "exp",
+    "exp2", "log", "log2", "log10", "log1p", "expm1", "fma", "sin", "cos", "tan", "asin", "acos", "atan",
+    "atan2", "sinh", "cosh", "tanh", "remainder", "erf", "erfc"]
+
+## Operations whose results are exact (no budget); the others have 4 ulps.
+let exact: str[8] = ["floor", "ceil", "round", "trunc", "sqrt", "mod", "remainder", "fma"]
+
+func field(text: str, radix: u32) -> u64:
+    return strings.parse_u64(text, radix) else trap("reference.csv: a malformed number")
+
+## The rows of `text` (the CSV, header first) as binary rows, released by the caller with
+## free(...) in memory.heap. Every operation must be covered at both widths, and every
+## budget must be the one its operation is held to.
+pub func broad(text: str) -> u8[]!:
+    let lines = try strings.split(text, '\n')
+    defer free(lines) in memory.heap
+    let corpus = try new u8[lines.length * 48] --- in memory.heap
+    errdefer free(corpus) in memory.heap
+    var covered: bool[60]
+    var size: usize = 0
+    for index in 1..<lines.length:
+        if lines[index].length == 0: continue
+        let fields = try strings.split(lines[index], ',')
+        defer free(fields) in memory.heap
+        assert(fields.length == 7)
+        var operation: usize = 30
+        for at in (usize)0..<30:
+            if operations[at] == fields[0]: operation = at
+        assert(operation < 30, "reference.csv: an unknown operation")
+        let width = field(fields[1], 10)
+        assert(width == 32 or width == 64)
+        var limit: u64 = 4
+        for name in exact:
+            if name == fields[0]: limit = 0
+        assert(field(fields[6], 10) == limit, "reference.csv: a budget differs from its operation's")
+        covered[operation * 2 + ((usize)1 if width == 64 else (usize)0)] = true
+        memory.write[u32](corpus.data + size, (u32)operation)
+        memory.write[u32](corpus.data + size + 4, (u32)width)
+        for at in (usize)0..<4:
+            memory.write[u64](corpus.data + size + 8 + at * 8, field(fields[2 + at], 16))
+        memory.write[u64](corpus.data + size + 40, limit)
+        size += 48
+    for each in covered: assert(each, "reference.csv: an operation is missing at a width")
+    return corpus[..<size]

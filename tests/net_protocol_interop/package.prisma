@@ -1,0 +1,9 @@
+#prisma 4.0
+def package "net_protocol_interop" {
+    str source = "."
+
+    def dependency "luce-std" {
+        str owner = "dymokomi"
+        str path = "../.."
+    }
+}

@@ -1,0 +1,69 @@
+import c
+from luce_std import files
+import thread
+
+extern func publication_verify(data: const u8*, length: usize)
+extern func publication_start(path: c.str)
+extern func publication_finish() -> u32
+
+struct Writer:
+    var path: c.str?
+    var identity: u8
+    var succeeded: bool
+
+func fill(data: u8[], identity: u8, generation: u8) -> usize:
+    let length: usize = 4096 + ((usize)generation * 7919) % 61441
+    data[0] = identity
+    data[1] = generation
+    for index in 2..<length:
+        data[index] = (u8)(((usize)identity * 31 + (usize)generation * 17 + index * 13 + (index >> 8)) & 255)
+    return length
+
+func publish(writer: Writer*) -> !:
+    let path = writer.path else trap("missing publication path")
+    var output: u8[65536]
+    for generation in 1..<65:
+        let length = fill(output, writer.identity, (u8)generation)
+        var published = false
+        try files.write_atomic(path, output[..<length], synchronize = generation % 16 == 0, published = &published)
+        assert(published)
+        # Another writer may already have replaced this generation. The result
+        # must still be a complete publication, verified by the independent peer.
+        let observed = try files.read(path, output.length)
+        publication_verify(observed.value.data, observed.value.length)
+        observed.release()
+    writer.succeeded = true
+
+func worker(context: void*?):
+    let pointer = context else trap("missing publication context")
+    let writer = (Writer*)pointer
+    publish(writer) catch failure:
+        print(f"publication writer {writer.identity}: {failure.message}")
+
+## Four writers publish a file atomically while reference.c's independent readers check
+## every version they see; afterwards the directory holds the file alone, no temporary.
+pub func main(arguments: c.str[]) -> i32!:
+    _ = arguments
+    let tree: c.str = "build/tests/files_publication/tree"
+    if files.exists(tree): try files.remove_tree(tree)
+    try files.ensure_directory((str)tree)
+    let path: c.str = "build/tests/files_publication/tree/state"
+    var initial: u8[65536]
+    let length = fill(initial, 0, 0)
+    try files.write_atomic(path, initial[..<length])
+    publication_start(path)
+    var writers: Writer[4]
+    var handles: thread.Handle[4]
+    for index in 0..<writers.length:
+        writers[index].path = path
+        writers[index].identity = (u8)(index + 1)
+        handles[index] = try thread.spawn(worker, &writers[index], name = "publication")
+    for index in 0..<handles.length:
+        try handles[index].join()
+        assert(writers[index].succeeded)
+    assert(publication_finish() >= 3)
+    let left = try files.list(tree)
+    defer left.release()
+    assert(left.value.length == 1 and left.value[0] == "state", "a temporary file was left beside the published one")
+    print("ok concurrent atomic publication and bounded reads")
+    return 0

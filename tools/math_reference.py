@@ -160,7 +160,7 @@ for width in (32, 64):
             assert expected == checked, (operation, width, bits, expected, checked)
             rows.append([operation, width, *[f"{value:0{width//4}x}" for value in bits],
                          f"{expected:0{width//4}x}", 0 if operation in EXACT else 4])
-output = ROOT / "tests/programs/math_accuracy/reference.csv"
+output = ROOT / "tests/math_accuracy/reference.csv"
 with output.open("w", newline="") as target:
     writer = csv.writer(target, lineterminator="\n")
     writer.writerow(["operation", "width", "x_bits", "y_bits", "z_bits", "result_bits", "ulp_limit"])

@@ -219,7 +219,7 @@ pub func tanh(x: f64) -> f64:
 # anew in Base: a rational approximation in x² below 0.84375, one in |x| - 1 up to 1.25,
 # and above that erfc(x) = exp(-x² - 0.5625 + R(1/x²)/S(1/x²)) / x with two rational fits
 # split at 1/0.35. The coefficients are fdlibm's. Results are within two units in the last
-# place (tests/programs/math_accuracy holds the evidence); the only host function used is exp.
+# place (tests/math_accuracy holds the evidence); the only host function used is exp.
 
 ## erf(1) in 24 bits, which the middle interval adds to; being short, `erx + P/Q` and
 ## `1 - erx - P/Q` round once.

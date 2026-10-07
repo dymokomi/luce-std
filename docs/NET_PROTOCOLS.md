@@ -135,27 +135,20 @@ have escaped; begin a new connection after failure.
 
 ## Verification
 
-`tests/programs/net_protocols/check.sh` runs native optimization levels 0–3 and
-supplemental C comparisons. It exercises fragmented input, pipeline boundaries,
+`tests/net_protocols` (its expected output) and `tests/net_protocol_vectors` (Python's
+SHA-1/base64 and frame decoding) run under `luc test`. They exercise fragmented input, pipeline boundaries,
 fixed/chunked/EOF framing, duplicate lengths, malformed headers and trailers,
 WebSocket masking/fragmentation/control/UTF-8, extended length boundaries, short
 writes, deterministic malformed-input mutations, and handshake vectors computed
 independently with Python's SHA-1/base64 implementation. Emitted client/server
 frames are also decoded independently in Python at the 125/126 and 65535/65536
-length boundaries. The suite is included in `test.sh`.
+length boundaries.
 
 The governing references are [RFC 9112](https://www.rfc-editor.org/rfc/rfc9112.html),
 [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html), and
 [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html).
 
-An optional downstream check uses an existing Luce compiler without making Base's
-bootstrap depend on Luce:
-
-```sh
-python3 tests/programs/net_protocols/interop.py --luce ../luce/build/luce
-```
-
-It checks the handshake and frame codecs through a Base wrapper, copied string
+`tests/net_protocol_interop`, a Luce program, checks the handshake and frame codecs through a Base wrapper, copied string
 lifetimes, first-class Base function calls, propagated failures and clean ARC
 shutdown at all four native optimization levels. Its sources are test fixtures;
 this does not build the future `luce-http-server` application.

@@ -1,0 +1,11 @@
+## math against independent references: log1p and expm1 against Decimal (vectors.lucb, made
+## by generate_vectors.py), and the broad libm surface against the offline arbitrary-
+## precision rows of reference.csv (reference.lucb).
+import reference
+import vectors
+
+pub func main(arguments: str[]) -> i32!:
+    _ = arguments
+    vectors.check()
+    try reference.check()
+    return 0
