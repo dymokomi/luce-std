@@ -40,9 +40,7 @@ extern func windows_utc_seconds as "_mkgmtime64"(calendar: WindowsCalendarTime*)
 
 ## The local time zone's offset east of UTC, in seconds, at `seconds` since 1970 UTC.
 func local_offset(seconds: i64) -> i32!:
-    if platform.wasm32:
-        return 0
-    elif platform.windows:
+    if platform.windows:
         var calendar: WindowsCalendarTime
         if windows_localtime(&calendar, &seconds) != 0:
             error(invalid, "the local time zone has no offset for this time")

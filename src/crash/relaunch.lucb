@@ -88,22 +88,19 @@ var windows_environment: u16[]
 ## process started that way never does this itself, so a crash while showing a
 ## report starts nothing. Turns crash reports on when they are off.
 pub func relaunch_on_crash() -> !:
-    if platform.wasm32:
+    if relaunching or showing_report():
         return
-    else:
-        if relaunching or showing_report():
-            return
-        if not core.crash_reports_enabled():
-            try enable()
-        var setting: u8[1200]
-        let variable = try strings.format(setting, f"{(str)report_variable}={(str)report_path[..<report_length]}")
-        with memory.heap:
-            let program = try os.executable()
-            if platform.windows:
-                try ready_windows(program, variable)
-            else:
-                try ready_posix(program, variable)
-        relaunching = true
+    if not core.crash_reports_enabled():
+        try enable()
+    var setting: u8[1200]
+    let variable = try strings.format(setting, f"{(str)report_variable}={(str)report_path[..<report_length]}")
+    with memory.heap:
+        let program = try os.executable()
+        if platform.windows:
+            try ready_windows(program, variable)
+        else:
+            try ready_posix(program, variable)
+    relaunching = true
 
 func ready_posix(program: str, variable: str) -> !:
     posix_arguments = try new (c.str?)[2] ---
@@ -203,7 +200,7 @@ func start_reporter():
         return
     if platform.windows:
         _ = start_windows(windows_program.data, windows_command.data, (void*)windows_environment.data)
-    elif platform.posix and not platform.wasm32:
+    elif platform.posix:
         let program = posix_arguments[0] else return
         var pid: i32 = 0
         _ = spawn_posix(&pid, program, (void*)&spawn_actions[0], (const void*)&spawn_attributes[0], posix_arguments.data, posix_environment.data)
@@ -223,21 +220,18 @@ func start_windows(program: const u16*, command: u16*, environment: void*?) -> b
 ## this process was started to show. It does not wait for it: the caller usually
 ## quits next, as a crash window's Reopen does.
 pub func reopen() -> !:
-    if platform.wasm32:
-        return
+    try os.unset_env(report_variable)
+    let program = try os.executable()
+    defer strings.release(program)
+    if platform.windows:
+        let wide = try windows_text.wide((c.str)program, failed)
+        defer free(wide)
+        let command = try quoted_command(wide)
+        defer free(command)
+        if not start_windows(wide.data, command.data, none):
+            error(failed, "the program could not be started again")
     else:
-        try os.unset_env(report_variable)
-        let program = try os.executable()
-        defer strings.release(program)
-        if platform.windows:
-            let wide = try windows_text.wide((c.str)program, failed)
-            defer free(wide)
-            let command = try quoted_command(wide)
-            defer free(command)
-            if not start_windows(wide.data, command.data, none):
-                error(failed, "the program could not be started again")
-        else:
-            var arguments: (c.str?)[2] = [(c.str)program, none]
-            var pid: i32 = 0
-            if spawn_posix(&pid, (c.str)program, none, none, &arguments[0], current_environment()) != 0:
-                error(failed, "the program could not be started again")
+        var arguments: (c.str?)[2] = [(c.str)program, none]
+        var pid: i32 = 0
+        if spawn_posix(&pid, (c.str)program, none, none, &arguments[0], current_environment()) != 0:
+            error(failed, "the program could not be started again")

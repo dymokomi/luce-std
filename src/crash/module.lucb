@@ -53,36 +53,33 @@ pub func directory() -> interop.Owned[str]!:
 ## name and version are used (`platform.program`), or, for a program built
 ## outside a package, its executable's name.
 pub func enable(app: str = "", version: str = "") -> !:
-    if platform.wasm32:
-        return
-    else:
-        let folder = try directory()
-        defer folder.release()
-        try files.ensure_directory(folder.value)
-        var named: u8[64]
-        let program = app if app.length > 0 else default_name(named)
-        let kept = safe_name(program, app_name)
-        app_length = kept.length
-        let versioned = version if version.length > 0 else platform.program_version
-        var stamp: u8[128]
-        let started = time.unix()
-        let pid = process_id()
-        let file_name = try strings.format(stamp, f"{kept}-{started}-{pid}.crash")
-        let path = try paths.join(folder.value, file_name)
-        defer path.release()
-        report_length = path.value.length if path.value.length < report_path.length - 1 else report_path.length - 1
-        memory.copy(report_path, path.value.bytes, report_length)
-        report_path[report_length] = 0
-        var header: u8[1024]
-        let text = try strings.format(header, f"luce crash report\napp: {program}\nversion: {versioned}\nplatform: {platform.name}\npid: {pid}\nstarted: {started}\n\n")
-        core.set_crash_report(path.value, text)
-        core.set_crash_handler(follow_crash)
-        try install_fatal_handlers()
+    let folder = try directory()
+    defer folder.release()
+    try files.ensure_directory(folder.value)
+    var named: u8[64]
+    let program = app if app.length > 0 else default_name(named)
+    let kept = safe_name(program, app_name)
+    app_length = kept.length
+    let versioned = version if version.length > 0 else platform.program_version
+    var stamp: u8[128]
+    let started = time.unix()
+    let pid = process_id()
+    let file_name = try strings.format(stamp, f"{kept}-{started}-{pid}.crash")
+    let path = try paths.join(folder.value, file_name)
+    defer path.release()
+    report_length = path.value.length if path.value.length < report_path.length - 1 else report_path.length - 1
+    memory.copy(report_path, path.value.bytes, report_length)
+    report_path[report_length] = 0
+    var header: u8[1024]
+    let text = try strings.format(header, f"luce crash report\napp: {program}\nversion: {versioned}\nplatform: {platform.name}\npid: {pid}\nstarted: {started}\n\n")
+    core.set_crash_report(path.value, text)
+    core.set_crash_handler(follow_crash)
+    try install_fatal_handlers()
 
 func process_id() -> i64:
     if platform.windows:
         return (i64)GetCurrentProcessId()
-    elif platform.posix and not platform.wasm32:
+    elif platform.posix:
         return (i64)getpid()
     return 0
 
@@ -201,19 +198,13 @@ pub func read_report(path: str) -> interop.Owned[str]!:
 ## which `relaunch_on_crash` sets for the program it starts after a crash, as a
 ## copy of its own; empty text in an ordinary run.
 pub func report_to_show() -> interop.Owned[str]!:
-    if platform.wasm32:
-        return try interop.copy_text("")
-    else:
-        # os.env answers a view another environment read may overwrite (Windows)
-        return try interop.copy_text(os.env(report_variable) else "")
+    # os.env answers a view another environment read may overwrite (Windows)
+    return try interop.copy_text(os.env(report_variable) else "")
 
 ## Whether this process was started to show a report.
 func showing_report() -> bool:
-    if platform.wasm32:
-        return false
-    else:
-        let path = os.env(report_variable) else return false
-        return path.length > 0
+    let path = os.env(report_variable) else return false
+    return path.length > 0
 
 ## The environment variable that carries a report to show.
 let report_variable: c.str = "LUCE_CRASH_REPORT"

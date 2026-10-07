@@ -63,7 +63,7 @@ pub func sleep(seconds: f64) -> !:
 pub func sleep_for(span: Duration):
     if span.nanoseconds <= 0:
         return
-    if platform.windows or platform.wasm32:
+    if platform.windows:
         thread.sleep((u64)((span.nanoseconds + 999999) // 1000000))
     else:
         var request = Timespec(seconds = span.nanoseconds // nanoseconds_per_second, nanoseconds = (c.long)(span.nanoseconds % nanoseconds_per_second))

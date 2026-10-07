@@ -255,59 +255,28 @@ func read_limit(maximum: i64) -> usize:
     return ~(usize)0 if maximum < 0 else (usize)maximum
 
 func classify_error(number: i32) -> ErrorCode:
-    if platform.wasm32:
-        return classify_wasi_error(number)
-    else:
-        if number == 2:
-            return missing
-        if number == 1 or number == 13:
-            return permission_denied
-        if number == 17:
-            return already_exists
-        if number == 28:
-            return no_space
-        if number == 20:
-            return not_directory
-        if number == 21:
-            return is_directory
-        if number == 30:
-            return read_only_filesystem
-        # the UCRT numbers its errors its own way: `ENOTEMPTY` 41, `ENAMETOOLONG` 38, no `ELOOP`
-        if number == (66 if platform.macos else (41 if platform.windows else 39)):
-            return not_empty
-        if number == 18:
-            return cross_device
-        if number == (62 if platform.macos else 40) and not platform.windows:
-            return symlink_loop
-        if number == (63 if platform.macos else (38 if platform.windows else 36)):
-            return name_too_long
-        if number == would_block_errno:
-            return would_block
-        return failed
-
-## WASI numbers its errors alphabetically (§19.5).
-func classify_wasi_error(number: i32) -> ErrorCode:
-    if number == 44:
+    if number == 2:
         return missing
-    if number == 2 or number == 63 or number == 76:
+    if number == 1 or number == 13:
         return permission_denied
-    if number == 20:
+    if number == 17:
         return already_exists
-    if number == 51:
+    if number == 28:
         return no_space
-    if number == 54:
+    if number == 20:
         return not_directory
-    if number == 31:
+    if number == 21:
         return is_directory
-    if number == 69:
+    if number == 30:
         return read_only_filesystem
-    if number == 55:
+    # the UCRT numbers its errors its own way: `ENOTEMPTY` 41, `ENAMETOOLONG` 38, no `ELOOP`
+    if number == (66 if platform.macos else (41 if platform.windows else 39)):
         return not_empty
-    if number == 75:
+    if number == 18:
         return cross_device
-    if number == 32:
+    if number == (62 if platform.macos else 40) and not platform.windows:
         return symlink_loop
-    if number == 37:
+    if number == (63 if platform.macos else (38 if platform.windows else 36)):
         return name_too_long
     if number == would_block_errno:
         return would_block

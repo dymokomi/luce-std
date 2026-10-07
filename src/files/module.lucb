@@ -71,7 +71,6 @@ extern func fdopendir(descriptor: i32) -> void*?
 extern func dirfd(directory: void*) -> i32
 extern func readdir_macos as "readdir"(directory: void*) -> MacEntry*?
 extern func readdir_linux as "readdir"(directory: void*) -> LinuxEntry*?
-extern func readdir_wasi as "readdir"(directory: void*) -> WasiEntry*?
 extern func closedir(directory: void*) -> i32
 extern func access(path: c.str, mode: i32) -> i32
 extern func mkdir_macos as "mkdir"(path: c.str, permissions: u16) -> i32
@@ -103,12 +102,6 @@ extern struct LinuxEntry:
     kind: u8
     name: u8[256]
 
-## A directory entry as WASI lays it out: the kind, then the NUL-terminated name.
-extern struct WasiEntry:
-    inode: u64
-    kind: u8
-    name: u8[256]
-
 ## The next entry's name, or none at the end; `.` and `..` are entries like any other.
 func next_entry(directory: void*) -> str?!:
     if platform.windows:
@@ -119,12 +112,6 @@ func next_entry(directory: void*) -> str?!:
             if platform.macos:
                 if let entry = readdir_macos(directory):
                     return (str)entry.name[..<(usize)entry.name_length]
-            elif platform.wasm32:
-                if let entry = readdir_wasi(directory):
-                    var n: usize = 0
-                    while n < entry.name.length and entry.name[n] != 0:
-                        n += 1
-                    return (str)entry.name[..<n]
             else:
                 if let entry = readdir_linux(directory):
                     var n: usize = 0
@@ -138,24 +125,23 @@ func next_entry(directory: void*) -> str?!:
                 error(classify_error(number), "the directory could not be read")
             return none
 
-## `open` flags: macOS keeps the BSD values, Linux its own, and WASI its own again, where
-## reading is a right asked for (§19.5).
-let read_only_flag: i32 = 67108864 if platform.wasm32 else 0
-let write_only: i32 = 268435456 if platform.wasm32 else 1
-let read_write_flag: i32 = 335544320 if platform.wasm32 else 2
-let create: i32 = 4096 if platform.wasm32 else (256 if platform.windows else (512 if platform.macos else 64))
-let truncate: i32 = 32768 if platform.wasm32 else (512 if platform.windows else (1024 if platform.macos else 512))
-let close_on_exec: i32 = 0 if platform.wasm32 else (128 if platform.windows else (16777216 if platform.macos else 524288))
-let append_flag: i32 = 1 if platform.wasm32 else (8 if platform.windows or platform.macos else 1024)
-let exclusive_flag: i32 = 16384 if platform.wasm32 else (1024 if platform.windows else (2048 if platform.macos else 128))
-let nonblocking_open_flag: i32 = 4 if platform.macos or platform.wasm32 else 2048
-let would_block_errno: i32 = 6 if platform.wasm32 else (35 if platform.macos else 11)
+## `open` flags: macOS keeps the BSD values, Linux its own.
+let read_only_flag: i32 = 0
+let write_only: i32 = 1
+let read_write_flag: i32 = 2
+let create: i32 = 256 if platform.windows else (512 if platform.macos else 64)
+let truncate: i32 = 512 if platform.windows else (1024 if platform.macos else 512)
+let close_on_exec: i32 = 128 if platform.windows else (16777216 if platform.macos else 524288)
+let append_flag: i32 = 8 if platform.windows or platform.macos else 1024
+let exclusive_flag: i32 = 1024 if platform.windows else (2048 if platform.macos else 128)
+let nonblocking_open_flag: i32 = 4 if platform.macos else 2048
+let would_block_errno: i32 = 35 if platform.macos else 11
 let transfer_limit: usize = 1073741824
-let current_directory_fd: i32 = -2 if platform.macos or platform.wasm32 else -100
+let current_directory_fd: i32 = -2 if platform.macos else -100
 ## Linux takes the x86-64 `open` flag values.
-let directory_flag: i32 = 8192 if platform.wasm32 else (1048576 if platform.macos else 65536)
-let no_follow_flag: i32 = 16777216 if platform.wasm32 else (256 if platform.macos else 131072)
-let at_no_follow_flag: i32 = 1 if platform.wasm32 else (32 if platform.macos else 256)
+let directory_flag: i32 = 1048576 if platform.macos else 65536
+let no_follow_flag: i32 = 256 if platform.macos else 131072
+let at_no_follow_flag: i32 = 32 if platform.macos else 256
 # mark: Error codes ===========================================================================
 
 ## The file or directory does not exist.

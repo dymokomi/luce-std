@@ -61,7 +61,7 @@ func install_fatal_handlers() -> !:
     if handlers_installed:
         return
     handlers_installed = true
-    if platform.posix and not platform.wasm32:
+    if platform.posix:
         try install_alternate_stack()
         for number in [illegal_signal, abort_signal, arithmetic_signal, segmentation_signal, bus_signal()]:
             install_handler(number)
