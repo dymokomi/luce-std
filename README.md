@@ -17,6 +17,7 @@ Base and serves Luce and Base programs alike.
 | `from luce_std import random` | A seeded pseudo-random generator |
 | `from luce_std import math` | The mathematical functions |
 | `from luce_std import math32` | Single-precision mathematical functions |
+| `from luce_std import parallel` | A parallel `for` over independent items for Base: `for_each(count, context, work)` runs `work(context, index, worker)` on one thread per processor, `for_each_range` hands out chunks of indices |
 | `from luce_std import unicode` | Unicode 17.0.0 casing and normalization |
 | `from luce_std import utf8` | Strict UTF-8 scalar encoding and decoding |
 | `from luce_std import collections` | Growable storage for Base: `List[T]`, a byte `Buffer`, and a `TextPool` of copies that never move |

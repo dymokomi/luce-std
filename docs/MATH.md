@@ -35,6 +35,7 @@ rounding operations retain their specified direction regardless of that environm
 | `atan` | Principal inverse tangent in [-pi/2,pi/2]; signed zero is preserved. |
 | `atan2(y,x)` | Four-quadrant angle in [-pi,pi]. Both argument signs matter, including signed zeros on the axes. |
 | `sinh`, `cosh`, `tanh` | Hyperbolic functions. Sinh and tanh preserve signed zero; tanh approaches signed 1 at infinite arguments. |
+| `erf`, `erfc` | The error function, odd, from -1 to 1, and its complement `1 - erf(x)`, from 2 to 0, computed without the subtraction's cancellation; erfc underflows to zero above about 27.2. Written in Base after fdlibm's method, so only `exp` comes from the host; `math32` evaluates them in f64 and rounds once. Signed zero is preserved by erf; ±infinity gives ±1 (erf) and 0 or 2 (erfc). |
 | `fma` | Multiply x and y, then add z with one final rounding; no separately rounded product. |
 | `nextafter`, `next_up`, `next_down` | Adjacent representable values. Equal nextafter arguments return the destination, including its zero sign. NaN arguments give NaN. |
 | `frexp` | Exact `(fraction, exponent)` decomposition for finite nonzero values, with absolute fraction in [0.5,1). Zero and nonfinite values return `(x,0)`. |
@@ -69,14 +70,15 @@ The accuracy gate contains two independent reference campaigns:
 
 - 100 log1p/expm1 vectors computed during each run with Python Decimal at 160 and
   240 digits. Their rounded references must agree; the test budget is two ULPs.
-- 4,838 checked-in vectors across 28 operations and both precisions, generated
+- 7,893 checked-in vectors across 30 operations and both precisions, generated
   with mpmath 1.3.0 at 500 and 800 decimal digits. Fma and remainder calculations
   use 1100 and 1300 digits to retain cancellation across wide exponent gaps.
   Inputs and expected outputs are stored as exact hexadecimal IEEE bits.
 
 The broader corpus includes subnormal/normal boundaries, adjacent values around
 one, large trigonometric arguments, domain violations, overflow, underflow,
-negative powers and fused cancellation. Integral rounding, square root, remainders
+negative powers and fused cancellation, and for erf and erfc a sweep through each
+interval of their method, out to erfc's underflow, down to subnormals. Integral rounding, square root, remainders
 and fma must match reference bits exactly. Other finite results have a four-ULP
 budget **for these vectors**. NaN results are checked by classification, and expected
 infinities and signed zeros must match exactly. These budgets are regression gates,

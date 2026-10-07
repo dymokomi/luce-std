@@ -38,6 +38,8 @@ func evaluate64(operation: u32, x_bits: u64, y_bits: u64, z_bits: u64) -> u64:
         25: return (u64)math.cosh(x).bits()
         26: return (u64)math.tanh(x).bits()
         27: return (u64)math.remainder(x, y).bits()
+        28: return (u64)math.erf(x).bits()
+        29: return (u64)math.erfc(x).bits()
         _: trap("unknown math reference operation")
 
 func evaluate32(operation: u32, x_bits: u64, y_bits: u64, z_bits: u64) -> u64:
@@ -73,6 +75,8 @@ func evaluate32(operation: u32, x_bits: u64, y_bits: u64, z_bits: u64) -> u64:
         25: return (u64)math32.cosh(x).bits()
         26: return (u64)math32.tanh(x).bits()
         27: return (u64)math32.remainder(x, y).bits()
+        28: return (u64)math32.erf(x).bits()
+        29: return (u64)math32.erfc(x).bits()
         _: trap("unknown math reference operation")
 
 func acceptable(actual: u64, expected: u64, width: u32, limit: u64) -> bool:

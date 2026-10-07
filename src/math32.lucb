@@ -6,9 +6,11 @@
 #       Single-precision mathematics. `math32` has the floating-point operations of `math`, with
 #       f32 arguments and results and the same special-value contracts. Elementary functions
 #       call the host's single-precision libm entry points directly; they do not compute in f64
-#       and then introduce an extra rounding step.
+#       and then introduce an extra rounding step. `erf` and `erfc` are the exception: they are
+#       `math`'s, rounded once to f32.
 #
 #==============================================================================================
+import math
 extern func c_floor as "floorf"(x: f32) -> f32
 extern func c_ceil as "ceilf"(x: f32) -> f32
 extern func c_round as "roundf"(x: f32) -> f32
@@ -212,6 +214,16 @@ pub func cosh(x: f32) -> f32:
 ## The hyperbolic tangent of `x`.
 pub func tanh(x: f32) -> f32:
     return c_tanh(x)
+
+## The error function, as `math.erf`, evaluated in f64 and rounded once to f32: within a
+## unit in the last place.
+pub func erf(x: f32) -> f32:
+    return (f32)math.erf((f64)x)
+
+## The complementary error function, `1 - erf(x)` without cancellation, as `math.erfc`,
+## evaluated in f64 and rounded once to f32.
+pub func erfc(x: f32) -> f32:
+    return (f32)math.erfc((f64)x)
 
 ## True for quiet and signaling NaNs, independent of sign and payload.
 pub func is_nan(x: f32) -> bool:

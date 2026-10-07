@@ -15,7 +15,7 @@ import mpmath as mp
 
 assert mp.__version__ == "1.3.0", "use the pinned reference generator version"
 ROOT = Path(__file__).resolve().parents[1]
-OPERATIONS = "floor ceil round trunc sqrt cbrt hypot mod pow exp exp2 log log2 log10 log1p expm1 fma sin cos tan asin acos atan atan2 sinh cosh tanh remainder".split()
+OPERATIONS = "floor ceil round trunc sqrt cbrt hypot mod pow exp exp2 log log2 log10 log1p expm1 fma sin cos tan asin acos atan atan2 sinh cosh tanh remainder erf erfc".split()
 EXACT = {"floor", "ceil", "round", "trunc", "sqrt", "mod", "remainder", "fma"}
 
 
@@ -42,6 +42,9 @@ def rounded_bits(value, width, negative_zero=False):
     top = exponent + bit_count - 1
     if top > bias:
         return encoded_sign | infinity
+    if top <= -bias - precision:
+        # below half the smallest subnormal (erfc's far tail): zero, without a huge shift
+        return encoded_sign
     quantum = max(top, 1 - bias) - (precision - 1)
     shift = quantum - exponent
     if shift > 0:
@@ -79,6 +82,9 @@ def evaluate(operation, values):
     if operation == "log10": return mp.log10(x)
     if operation == "fma": return x*y + z
     if operation == "atan2": return mp.atan2(x, y)
+    # beyond |x| = 40, erfc is within 2^-2300 of 0 or 2, closer than either format holds,
+    # and mpmath's series check overflows for huge arguments
+    if operation == "erfc" and abs(x) > 40: return mp.mpf(0) if x > 0 else mp.mpf(2)
     return getattr(mp, operation)(x)
 
 
@@ -93,7 +99,7 @@ def reference(operation, bits, width, precision):
         # the operations whose sign is determined by their first argument.
         negative_zero = bool(bits[0] >> (width - 1)) and operation in {
             "floor", "ceil", "round", "trunc", "sqrt", "cbrt", "mod", "remainder",
-            "log1p", "expm1", "sin", "tan", "asin", "atan", "sinh", "tanh"}
+            "log1p", "expm1", "sin", "tan", "asin", "atan", "sinh", "tanh", "erf"}
         return rounded_bits(answer, width, negative_zero)
 
 
@@ -114,6 +120,18 @@ for width in (32, 64):
         candidates = [(bits, encode(1.5, width), encode(-0.5, width)) for bits in general]
         if operation in {"exp", "exp2", "expm1", "sinh", "cosh", "tanh"}:
             candidates = [(encode(value, width), 0, 0) for value in ordinary]
+        elif operation in {"erf", "erfc"}:
+            # each interval of the method and the tails: 25ths across [-6, 6], quarters
+            # out to erfc's underflow, powers of two down to subnormals, ±inf and NaN
+            candidates += [(encode(value, width), 0, 0) for value in ordinary]
+            candidates += [(encode(sign * step / 25, width), 0, 0)
+                           for step in range(151) for sign in (-1, 1)]
+            candidates += [(encode(sign * step / 4, width), 0, 0)
+                           for step in range(24, 113) for sign in (-1, 1)]
+            candidates += [(encode(sign * 2.0 ** -exponent, width), 0, 0)
+                           for exponent in range(1, bias + precision - 1, 7) for sign in (-1, 1)]
+            candidates += [(infinity, 0, 0), (infinity | (1 << (width - 1)), 0, 0),
+                           (infinity | (1 << (precision - 2)), 0, 0)]
         elif operation in {"asin", "acos"}:
             candidates += [(encode(value, width), 0, 0) for value in ordinary if -1 <= value <= 1]
         elif operation == "log1p":

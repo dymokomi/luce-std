@@ -29,3 +29,33 @@ test "single precision agrees":
     assert(mantissa == 0.5 and exponent == 4)
     assert(math32.scalbn(0.5, 4) == 8.0 and math32.fma(2.0, 3.0, 1.0) == 7.0)
     assert(math32.infinity > 3.0e38 and math32.nan != math32.nan)
+
+## Within `ulps` units in the last place of `expected`, both finite and of one sign.
+func near(actual: f64, expected: f64, ulps: u64) -> bool:
+    if math.signbit(actual) != math.signbit(expected):
+        return false
+    let a = math.abs(actual).bits()
+    let b = math.abs(expected).bits()
+    return (a - b if a >= b else b - a) <= ulps
+
+test "the error function against Python's math.erf and math.erfc":
+    # the values Python 3 prints for math.erf(x) and math.erfc(x)
+    assert(near(math.erf(0.5), 0.5204998778130465, 2) and near(math.erfc(0.5), 0.4795001221869535, 2))
+    assert(near(math.erf(1.0), 0.8427007929497148, 2) and near(math.erfc(1.0), 0.15729920705028516, 2))
+    assert(near(math.erf(-2.0), -0.9953222650189527, 2) and near(math.erfc(-2.0), 1.9953222650189528, 2))
+    assert(near(math.erf(3.0), 0.9999779095030015, 2) and near(math.erfc(3.0), 2.2090496998585438e-05, 2))
+    assert(near(math.erfc(10.0), 2.0884875837625446e-45, 2) and near(math.erfc(26.0), 5.663192408856143e-296, 2))
+    assert(near(math.erfc(-1.0), 1.8427007929497148, 2))
+    # the odd symmetry, signed zero, the limits and NaN
+    assert(math.erf(0.0) == 0.0 and not math.signbit(math.erf(0.0)) and math.signbit(math.erf(-0.0)))
+    assert(math.erfc(0.0) == 1.0 and math.erfc(-0.0) == 1.0)
+    assert(math.erf(math.infinity) == 1.0 and math.erf(-math.infinity) == -1.0 and math.erf(7.0) == 1.0)
+    assert(math.erfc(math.infinity) == 0.0 and math.erfc(-math.infinity) == 2.0 and math.erfc(30.0) == 0.0)
+    assert(math.is_nan(math.erf(math.nan)) and math.is_nan(math.erfc(math.nan)))
+    for step in 0..<600:
+        let x = (f64)step / 100.0
+        assert(math.erf(-x) == -math.erf(x))
+        assert(math.abs(math.erf(x) + math.erfc(x) - 1.0) <= 2.3e-16)
+    # single precision rounds the f64 result once
+    assert(math32.erf(1.0) == (f32)0.8427007929497148 and math32.erfc(3.0) == (f32)2.2090496998585438e-05)
+    assert(math32.signbit(math32.erf(-0.0)) and math32.erfc(math32.infinity) == 0.0 and math32.is_nan(math32.erf(math32.nan)))

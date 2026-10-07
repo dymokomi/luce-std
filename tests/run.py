@@ -24,7 +24,7 @@ source = ROOT / "src"
 targets = sorted(p for p in source.iterdir() if p.suffix == ".lucb" or (p / "ORDER").exists())
 # tests/unit exercise POSIX hosts (child processes through sh, rooted paths); Windows has
 # its own contracts under tests/windows, and runs only the unit tests that are portable
-portable_units = {"net_event_loop_test.lucb"}
+portable_units = {"math_test.lucb", "net_event_loop_test.lucb"}
 if (ROOT / "tests/unit").exists():
     units = sorted((ROOT / "tests/unit").glob("*.lucb"))
     targets += units if os.name != "nt" else [unit for unit in units if unit.name in portable_units]

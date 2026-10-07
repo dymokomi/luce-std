@@ -1,0 +1,188 @@
+#==============================================================================================
+#
+#   parallel - Independent work items spread over threads
+#
+#   DESCRIPTION:
+#       `for_each(count, context, work)` calls `work(context, index, worker)` once for every
+#       index below `count`, on one thread per processor or as many as asked, the caller's
+#       thread among them, and returns when every call has returned. It is a parallel `for`
+#       loop over independent items, like `pool.map` with a `ThreadPoolExecutor` in Python
+#       or `std::for_each(std::execution::par, ...)` in C++; threads start with the call and
+#       end with it, so there is no pool to keep.
+#
+#       The threads take the next index from a shared counter, so slow items do not hold up
+#       the rest. Items must write disjoint memory: nothing orders one item against another,
+#       and everything the items wrote is visible to the caller once `for_each` returns.
+#       `worker` numbers the thread running the item, below `workers(count, threads)`, so
+#       items can reuse one scratch buffer per thread.
+#
+#       Failure: the first error a `work` call returns stops the threads taking further
+#       indices, so some items may never run; the calls already running finish, and then
+#       `for_each` returns that error. A trap in any item stops the whole program, as a trap
+#       on any thread does.
+#
+#==============================================================================================
+import memory
+import os
+import thread
+
+## The state the threads of one run share.
+struct Run:
+    var context: void*
+    var work: func(void*, usize, usize) -> unit!
+    var count: usize
+    var next: @usize
+    var failed: @bool
+    var failure: Error?
+
+## What one thread is given: the run, and its worker number.
+struct Share:
+    var run: Run*?
+    var worker: usize
+
+func run_worker(raw: void*?):
+    let share = (Share*)(raw else return)
+    let run = share.run else return
+    while not run.failed.load(.acquire):
+        let index = run.next.add(1, .relaxed)
+        if index >= run.count:
+            return
+        run.work(run.context, index, share.worker) catch failure:
+            # the first thread to fail keeps its error; the others' are dropped
+            if not run.failed.swap(true, .acq_rel):
+                run.failure = failure
+            return
+
+## The number of threads `for_each` uses for `count` items when asked for `threads`, zero
+## meaning one per processor: never more than there are items, and at least one. Worker
+## numbers stay below it, so it sizes per-thread scratch.
+pub func workers(count: usize, threads: usize = 0) -> usize:
+    var n = threads if threads > 0 else (usize)os.cpus()
+    if n > count:
+        n = count
+    return n if n > 0 else 1
+
+## Call `work(context, index, worker)` for every index below `count`, on `workers(count,
+## threads)` threads, and return when all are done. The first error from `work` is
+## returned, after the calls already running finish; indices not yet taken are skipped.
+pub func for_each(count: usize, context: void*, work: func(void*, usize, usize) -> unit!, threads: usize = 0) -> !:
+    if count == 0:
+        return
+    var run = Run(context = context, work = work, count = count)
+    let n = workers(count, threads)
+    if n == 1:
+        var share = Share(run = &run, worker = 0)
+        run_worker((void*)&share)
+    else:
+        let shares = try new Share[n] in memory.heap
+        defer free(shares) in memory.heap
+        let handles = try new thread.Handle[n] in memory.heap
+        defer free(handles) in memory.heap
+        for at in 0..<n:
+            shares[at] = Share(run = &run, worker = at)
+        # A thread the system will not start leaves its share of the items to the others.
+        var started: usize = 0
+        for at in 1..<n:
+            handles[started] = thread.spawn(run_worker, (void*)&shares[at], name = "luce-parallel") catch failure:
+                break
+            started += 1
+        run_worker((void*)&shares[0])
+        for at in 0..<started:
+            try handles[at].join()
+    if let failure = run.failure:
+        error(failure.code, failure.message)
+
+## The state of a `for_each_range` run.
+struct Ranges:
+    var context: void*
+    var work: func(void*, usize, usize, usize) -> unit!
+    var count: usize
+    var chunk: usize
+
+func range_item(raw: void*, index: usize, worker: usize) -> !:
+    let ranges = (Ranges*)raw
+    let start = index * ranges.chunk
+    let end = start + ranges.chunk if ranges.count - start > ranges.chunk else ranges.count
+    try ranges.work(ranges.context, start, end, worker)
+
+## Split `0..<count` into ranges of `chunk` indices, the last one shorter, and call
+## `work(context, start, end, worker)` for each range as `for_each` calls its items: for
+## work too small to schedule one index at a time, such as the rows of an image in bands.
+## `chunk` must be above zero.
+pub func for_each_range(count: usize, chunk: usize, context: void*, work: func(void*, usize, usize, usize) -> unit!, threads: usize = 0) -> !:
+    assert(chunk > 0, "parallel.for_each_range needs a chunk above zero")
+    var ranges = Ranges(context = context, work = work, count = count, chunk = chunk)
+    let pieces = count // chunk + (1 if count % chunk != 0 else 0)
+    try for_each(pieces, (void*)&ranges, range_item, threads)
+
+# mark: Tests =================================================================================
+
+let test_failure: ErrorCode = ErrorCode.package(1)
+
+## What the tests' items record: how often each index ran, and on which worker.
+struct Tally:
+    var runs: (@u32)[4096]
+    var worker_limit: usize
+    var bad_worker: @bool
+    var fail_at: usize
+
+func tally_item(context: void*, index: usize, worker: usize) -> !:
+    let tally = (Tally*)context
+    if worker >= tally.worker_limit:
+        tally.bad_worker.store(true)
+    if index == tally.fail_at:
+        error(test_failure, "item failed on purpose")
+    _ = tally.runs[index].add(1, .relaxed)
+
+func tally_range(context: void*, start: usize, end: usize, worker: usize) -> !:
+    for index in start..<end:
+        try tally_item(context, index, worker)
+
+test "every index runs once, on a worker below workers()":
+    let tally = try new Tally in memory.heap
+    defer free(tally) in memory.heap
+    for threads in [(usize)0, 1, 3, 64]:
+        for count in [(usize)0, 1, 2, 7, 4096]:
+            for at: usize in 0..<4096:
+                tally.runs[at] = 0
+            tally.worker_limit = workers(count, threads)
+            tally.bad_worker = false
+            tally.fail_at = 4096
+            try for_each(count, (void*)tally, tally_item, threads = threads)
+            assert(not tally.bad_worker.load())
+            for at: usize in 0..<4096:
+                assert(tally.runs[at] == (1 if at < count else 0))
+    assert(workers(0) == 1 and workers(5, 3) == 3 and workers(2, 8) == 2 and workers(1000) >= 1)
+
+test "ranges cover the count exactly":
+    let tally = try new Tally in memory.heap
+    defer free(tally) in memory.heap
+    for chunk in [(usize)1, 3, 64, 5000]:
+        for count in [(usize)0, 1, 63, 64, 65, 4096]:
+            for at: usize in 0..<4096:
+                tally.runs[at] = 0
+            tally.worker_limit = workers(count // chunk + 1)
+            tally.bad_worker = false
+            tally.fail_at = 4096
+            try for_each_range(count, chunk, (void*)tally, tally_range)
+            assert(not tally.bad_worker.load())
+            for at: usize in 0..<4096:
+                assert(tally.runs[at] == (1 if at < count else 0))
+
+test "an item's error is returned and later items may be skipped":
+    let tally = try new Tally in memory.heap
+    defer free(tally) in memory.heap
+    for threads in [(usize)1, 4]:
+        for at: usize in 0..<4096:
+            tally.runs[at] = 0
+        tally.worker_limit = threads
+        tally.fail_at = 10
+        var caught = false
+        for_each(4096, (void*)tally, tally_item, threads = threads) catch failure:
+            assert(failure.code == test_failure)
+            caught = true
+        assert(caught and tally.runs[10] == 0)
+        if threads == 1:
+            # one thread takes the indices in order and stops at the failure
+            for at: usize in 0..<4096:
+                assert(tally.runs[at] == (1 if at < 10 else 0))

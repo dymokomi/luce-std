@@ -70,7 +70,7 @@ executable.unlink()
 
 # Offline arbitrary-precision references cover the broader libm surface. The
 # generator is pinned separately; ordinary test runs use only Python's stdlib.
-operations = "floor ceil round trunc sqrt cbrt hypot mod pow exp exp2 log log2 log10 log1p expm1 fma sin cos tan asin acos atan atan2 sinh cosh tanh remainder".split()
+operations = "floor ceil round trunc sqrt cbrt hypot mod pow exp exp2 log log2 log10 log1p expm1 fma sin cos tan asin acos atan atan2 sinh cosh tanh remainder erf erfc".split()
 corpus = bytearray()
 covered = set()
 with (ROOT / "tests/programs/math_accuracy/reference.csv").open() as stream:

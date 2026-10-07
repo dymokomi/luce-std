@@ -214,6 +214,86 @@ pub func cosh(x: f64) -> f64:
 pub func tanh(x: f64) -> f64:
     return c_tanh(x)
 
+# erf and erfc follow the method of Sun's fdlibm (s_erf.c, as in FreeBSD's msun), written
+# anew in Base: a rational approximation in x² below 0.84375, one in |x| - 1 up to 1.25,
+# and above that erfc(x) = exp(-x² - 0.5625 + R(1/x²)/S(1/x²)) / x with two rational fits
+# split at 1/0.35. The coefficients are fdlibm's. Results are within two units in the last
+# place (tests/programs/math_accuracy holds the evidence); the only host function used is exp.
+
+## erf(1) in 24 bits, which the middle interval adds to; being short, `erx + P/Q` and
+## `1 - erx - P/Q` round once.
+let erx: f64 = 8.45062911510467529297e-01
+## 2/sqrt(pi) - 1, the slope of erf at zero beyond x.
+let efx: f64 = 1.28379167095512586316e-01
+
+## erf(x) = x + x·P(x²)/Q(x²) on [0, 0.84375).
+func erf_small(x: f64) -> f64:
+    let z = x * x
+    let p = 1.28379167095512558561e-01 + z * (-3.25042107247001499370e-01 + z * (-2.84817495755985104766e-02 + z * (-5.77027029648944159157e-03 + z * -2.37630166566501626084e-05)))
+    let q = 1.0 + z * (3.97917223959155352819e-01 + z * (6.50222499887672944485e-02 + z * (5.08130628187576562776e-03 + z * (1.32494738004321644526e-04 + z * -3.96022827877536812320e-06))))
+    return p / q
+
+## erf(1 + s) - erx = P(s)/Q(s) on [0.84375, 1.25).
+func erf_middle(s: f64) -> f64:
+    let p = -2.36211856075265944077e-03 + s * (4.14856118683748331666e-01 + s * (-3.72207876035701323847e-01 + s * (3.18346619901161753674e-01 + s * (-1.10894694282396677476e-01 + s * (3.54783043256182359371e-02 + s * -2.16637559486879084300e-03)))))
+    let q = 1.0 + s * (1.06420880400844228286e-01 + s * (5.40397917702171048937e-01 + s * (7.18286544141962662868e-02 + s * (1.26171219808761642112e-01 + s * (1.36370839120290507362e-02 + s * 1.19844998467991074170e-02)))))
+    return p / q
+
+## erfc(a) for 1.25 <= a < 28: exp(-a² - 0.5625 + R/S) / a. The square is split at a with
+## its low 32 bits cleared, whose square is exact, so the exponent loses nothing.
+func erfc_tail(a: f64) -> f64:
+    let s = 1.0 / (a * a)
+    var r: f64
+    var q: f64
+    if a < 2.857142857142857:
+        r = -9.86494403484714822705e-03 + s * (-6.93858572707181764372e-01 + s * (-1.05586262253232909814e+01 + s * (-6.23753324503260060396e+01 + s * (-1.62396669462573470355e+02 + s * (-1.84605092906711035994e+02 + s * (-8.12874355063065934246e+01 + s * -9.81432934416914548592e+00))))))
+        q = 1.0 + s * (1.96512716674392571292e+01 + s * (1.37657754143519042600e+02 + s * (4.34565877475229228821e+02 + s * (6.45387271733267880336e+02 + s * (4.29008140027567833386e+02 + s * (1.08635005541779435134e+02 + s * (6.57024977031928170135e+00 + s * -6.04244152148580987438e-02)))))))
+    else:
+        r = -9.86494292470009928597e-03 + s * (-7.99283237680523006574e-01 + s * (-1.77579549177547519889e+01 + s * (-1.60636384855821916062e+02 + s * (-6.37566443368389627722e+02 + s * (-1.02509513161107724954e+03 + s * -4.83519191608651397019e+02)))))
+        q = 1.0 + s * (3.03380607434824582924e+01 + s * (3.25792512996573918826e+02 + s * (1.53672958608443695994e+03 + s * (3.19985821950859553908e+03 + s * (2.55305040643316442583e+03 + s * (4.74528541206955367215e+02 + s * -2.24409524465858183362e+01))))))
+    let z = f64.bits(a.bits() & 0xffffffff00000000)
+    return c_exp(-z * z - 0.5625) * c_exp((z - a) * (z + a) + r / q) / a
+
+## The error function, (2/√π)∫₀ˣ e^(-t²) dt, as Python's `math.erf`: odd, from -1 to 1.
+## Signed zero is preserved; infinities give ±1 and NaN gives NaN.
+pub func erf(x: f64) -> f64:
+    let a = abs(x)
+    if not (a < 6.0):
+        if is_nan(x):
+            return x
+        return copysign(1.0, x)
+    if a < 0.84375:
+        if a < 3.725290298461914e-09:
+            # below 2^-28 the series is x + efx·x; scaling by 8 keeps subnormals exact
+            return 0.125 * (8.0 * x + (8.0 * efx) * x)
+        return x + x * erf_small(x)
+    let magnitude = erx + erf_middle(a - 1.0) if a < 1.25 else 1.0 - erfc_tail(a)
+    return copysign(magnitude, x)
+
+## The complementary error function, `1 - erf(x)`, as Python's `math.erfc`: accurate where
+## erf(x) is near 1 and the subtraction would lose every digit. It falls from 2 to 0 and
+## underflows to zero above about 27.2; infinities give 0 and 2, NaN gives NaN.
+pub func erfc(x: f64) -> f64:
+    let a = abs(x)
+    if a < 0.84375:
+        if a < 1.3877787807814457e-17:
+            return 1.0 - x
+        let y = x * erf_small(x)
+        if x < 0.25:
+            return 1.0 - (x + y)
+        return 0.5 - (y + (x - 0.5))
+    if a < 1.25:
+        let p = erf_middle(a - 1.0)
+        return (1.0 - erx) - p if x > 0.0 else 1.0 + (erx + p)
+    if a < 28.0:
+        if x < -6.0:
+            return 2.0
+        let r = erfc_tail(a)
+        return r if x > 0.0 else 2.0 - r
+    if is_nan(x):
+        return x
+    return 0.0 if x > 0.0 else 2.0
+
 ## True for quiet and signaling NaNs, independent of sign and payload.
 pub func is_nan(x: f64) -> bool:
     return (x.bits() & magnitude_mask) > exponent_mask
