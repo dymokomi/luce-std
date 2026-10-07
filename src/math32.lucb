@@ -38,6 +38,7 @@ extern func c_tanh as "tanhf"(x: f32) -> f32
 extern func c_log1p as "log1pf"(x: f32) -> f32
 extern func c_expm1 as "expm1f"(x: f32) -> f32
 extern func c_fma as "fmaf"(x: f32, y: f32, z: f32) -> f32
+extern func c_fabs as "fabsf"(x: f32) -> f32
 extern func c_nextafter as "nextafterf"(x: f32, toward: f32) -> f32
 extern func c_frexp as "frexpf"(x: f32, out exponent: i32) -> f32
 extern func c_scalbn as "scalbnf"(x: f32, exponent: i32) -> f32
@@ -244,7 +245,7 @@ pub func signbit(x: f32) -> bool:
 
 ## Clear the sign bit: negative zero becomes positive zero. NaN payload bits survive.
 pub func abs(x: f32) -> f32:
-    return f32.bits(x.bits() & magnitude_mask)
+    return c_fabs(x)
 
 ## The magnitude and payload of `magnitude` with the sign bit of `sign_source`.
 pub func copysign(magnitude: f32, sign_source: f32) -> f32:
