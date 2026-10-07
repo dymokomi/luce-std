@@ -68,9 +68,10 @@ func hex(text: str) -> int:
 
 # The program's frames in a Windows stack (`check.exe+0x1234`) named by the nearest
 # symbol at or below each address in a 64-bit PE image (base 0x140000000), one per line.
+# `executable` is the path the build was given; the build adds the `.exe` to the file.
 func symbolicated(stack: str, executable: str) -> str!:
     var symbols: list[(int, str)] = []
-    for line in must("nm", ["-n", "--defined-only", executable]).lines():
+    for line in must("nm", ["-n", "--defined-only", executable + ".exe"]).lines():
         let parts = line.split()
         if parts.length == 3 and (parts[1] == "t" or parts[1] == "T"):
             symbols.append((hex(parts[0]), parts[2]))

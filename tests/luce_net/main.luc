@@ -23,8 +23,10 @@ pub func main(arguments: list[str]) -> int!:
     print(refused(free_port), "127.0.0.1" in net.lookup("localhost"))
     return 0
 
+# Windows retries a refused loopback connection for about two seconds before it reports
+# the refusal, so the timeout leaves room for that.
 func refused(port: int) -> bool!:
-    let connection = net.connect("127.0.0.1", port, timeout = 2.0) catch failure:
+    let connection = net.connect("127.0.0.1", port, timeout = 10.0) catch failure:
         return failure.code == net.connection_refused
     connection.close()
     return false
