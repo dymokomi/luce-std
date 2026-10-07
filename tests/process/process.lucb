@@ -1,7 +1,7 @@
 ## The `process` module against its archive: `run` spawns a child, waits for it, and
 ## answers its exit status with the captured standard output and error, owned by the
 ## result and released with it. The child programs -- `echo` and `sh` -- resolve through
-## PATH on every POSIX host these tests run on.
+## PATH on every POSIX host these tests run on, and on Windows from Git's bash.
 
 test "run captures a child's standard output and a zero exit status":
     let arguments: c.str[2] = ["-n", "hello there"]
@@ -70,6 +70,7 @@ test "the working directory is owned text that can change":
     try change_directory("/")
     let root = try current_directory()
     defer root.release()
-    assert(root.value == "/")
+    # Windows answers the root of the current drive, `C:\`
+    assert(paths.root(root.value) == root.value and paths.root(root.value).length > 0)
     try change_directory((c.str)before.value)
     assert(id() > 0)

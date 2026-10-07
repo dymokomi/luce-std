@@ -2,6 +2,7 @@
 import c
 import files
 import io
+import os
 import interop
 import process
 import strings
@@ -31,7 +32,10 @@ pub func main(arguments: str[]) -> i32!:
         if arguments[1] == "unicode":
             _ = try output.write("éλ😀".bytes)
             return 0
-    let executable = try files.canonical((c.str)arguments[0])
+    # this program's own file: on Windows its first argument may leave out the `.exe`
+    let running = try os.executable()
+    defer strings.release(running)
+    let executable = try files.canonical((c.str)running)
     defer executable.release()
     var command = try process.Command(executable.value, ["stream"])
     defer command.close()

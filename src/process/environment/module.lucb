@@ -70,11 +70,16 @@ func valid_name(name: c.str) -> bool:
 ## The working directory, as an owned text.
 pub func current_directory() -> interop.Owned[str]!:
     if platform.windows:
+        # os.cwd allocates from the heap here; the result is a copy in the current
+        # allocator, which is the one an owned result frees with
         var directory: str
         with memory.heap:
             directory = os.cwd() catch failure:
                 error(failed, failure.message)
-        return try owned.adopt_text(directory)
+        defer:
+            with memory.heap:
+                strings.release(directory)
+        return try owned.copy_text(directory)
     else:
         var buffer: u8[4096] = ---
         let found = getcwd(&buffer[0], buffer.length) else error(failed, "the working directory cannot be read")

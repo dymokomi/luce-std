@@ -1,6 +1,6 @@
 # process: running a program to completion, a background command waited for, environment
 # variables and the working directory.
-from luce_std import process
+from luce_std import paths, process
 
 pub func main(arguments: list[str]) -> int!:
     let done = process.run("sh", ["-c", "echo out; echo err 1>&2; exit 3"])
@@ -17,7 +17,9 @@ pub func main(arguments: list[str]) -> int!:
     print(listed, process.variable("LUCE_STD_SURFACE"))
     let start = process.current_directory()
     process.change_directory("/")
-    print(process.current_directory())
+    # a root: `/`, or the current drive's on Windows
+    let root = process.current_directory()
+    print(root.length > 0 and paths.root(root) == root)
     process.change_directory(start)
     print(process.current_directory() == start, process.id() > 0)
     return 0

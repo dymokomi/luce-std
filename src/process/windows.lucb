@@ -203,13 +203,8 @@ func run_windows(program: c.str, arguments: const c.str[], directory: c.str, env
     if inherit:
         if CreateProcessW(none, wide.data, none, none, 1, 1024, selected_environment.data if selected_environment.length > 0 else none,
                           selected_directory.data if selected_directory.length > 0 else none, &startup, &child) == 0:
-            error(failed, "the process could not be started")
-        let code = try wait_windows(child)
-        let none_out = try captured("")
-        let none_err = captured("") catch failure:
-            release_output(none_out)
-            error(failure.code, failure.message)
-        return (code, none_out, none_err)
+            return try uncaptured(try start_failure())
+        return try uncaptured(try wait_windows(child))
     let output = try temporary_windows()
     defer _ = fclose(output)
     let errors = try temporary_windows()
@@ -229,7 +224,7 @@ func run_windows(program: c.str, arguments: const c.str[], directory: c.str, env
     if CreateProcessW(none, wide.data, none, none, 1, 134217728 | 1024 | (4 if control != none else 0),
                       selected_environment.data if selected_environment.length > 0 else none,
                       selected_directory.data if selected_directory.length > 0 else none, &startup, &child) == 0:
-        error(failed, "the process could not be started")
+        return try uncaptured(try start_failure())
     let process = child.process else trap("CreateProcess returned no process")
     let child_thread = child.thread else trap("CreateProcess returned no thread")
     defer _ = CloseHandle(process)
@@ -244,16 +239,30 @@ func run_windows(program: c.str, arguments: const c.str[], directory: c.str, env
     if GetExitCodeProcess(process, &code) == 0:
         error(failed, "the process exit status is unavailable")
     if control != none:
-        let none_out = try captured("")
-        let none_err = captured("") catch failure:
-            release_output(none_out)
-            error(failure.code, failure.message)
-        return ((i32)code, none_out, none_err)
+        return try uncaptured((i32)code)
     let out = try capture_windows(output)
     let err = capture_windows(errors) catch failure:
         release_output(out)
         error(failure.code, failure.message)
     return ((i32)code, out, err)
+
+## The status of a program CreateProcessW could not start: one that is missing or cannot be
+## executed exits 127, as the POSIX child does when `execvp` fails (and as a shell
+## reports it); any other failure to start is an error.
+func start_failure() -> i32!:
+    let number = GetLastError()
+    # not found, path not found, access denied, not a valid executable
+    if number == 2 or number == 3 or number == 5 or number == 193:
+        return 127
+    error(failed, "the process could not be started")
+
+## A finished child's status with the empty texts of output that was not captured.
+func uncaptured(code: i32) -> (i32, str, str)!:
+    let out = try captured("")
+    let err = captured("") catch failure:
+        release_output(out)
+        error(failure.code, failure.message)
+    return (code, out, err)
 
 ## Wait for a child `call` started and answer its exit status; its handles are closed.
 func wait_windows(child: WinProcess) -> i32!:
