@@ -23,7 +23,7 @@ def add(clusters):
     cases += 1
 
 
-for line in (ROOT / "data/unicode/17.0.0/auxiliary/GraphemeBreakTest.txt").read_text().splitlines():
+for line in (ROOT / "data/unicode/17.0.0/auxiliary/GraphemeBreakTest.txt").read_text(encoding="utf-8").splitlines():
     body = line.split("#", 1)[0].strip()
     if not body:
         continue

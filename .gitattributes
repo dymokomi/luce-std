@@ -1,0 +1,3 @@
+# Check out every file byte for byte: test data, expected outputs and the Unicode tables are
+# compared exactly, so a checkout with core.autocrlf (Windows) must not add carriage returns.
+* -text

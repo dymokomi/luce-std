@@ -161,7 +161,7 @@ for width in (32, 64):
             rows.append([operation, width, *[f"{value:0{width//4}x}" for value in bits],
                          f"{expected:0{width//4}x}", 0 if operation in EXACT else 4])
 output = ROOT / "tests/math_accuracy/reference.csv"
-with output.open("w", newline="") as target:
+with output.open("w", encoding="utf-8", newline="") as target:
     writer = csv.writer(target, lineterminator="\n")
     writer.writerow(["operation", "width", "x_bits", "y_bits", "z_bits", "result_bits", "ulp_limit"])
     writer.writerows(rows)

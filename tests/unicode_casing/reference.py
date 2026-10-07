@@ -12,7 +12,7 @@ OUTPUT = Path(sys.argv[1])
 
 
 def records(name):
-    for line in (DATA / name).read_text().splitlines():
+    for line in (DATA / name).read_text(encoding="utf-8").splitlines():
         body = line.split("#", 1)[0].strip()
         if body:
             yield [field.strip() for field in body.split(";")]

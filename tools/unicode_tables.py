@@ -17,7 +17,7 @@ OUTPUT = ROOT / "src/unicode/tables.lucb"
 
 
 def records(name):
-    for line in (DATA / name).read_text().splitlines():
+    for line in (DATA / name).read_text(encoding="utf-8").splitlines():
         body = line.split("#", 1)[0].strip()
         if body:
             yield [field.strip() for field in body.split(";")]
@@ -47,7 +47,7 @@ def merged_ranges(ranges):
 
 
 def generate():
-    manifest = json.loads((DATA / "manifest.json").read_text())
+    manifest = json.loads((DATA / "manifest.json").read_text(encoding="utf-8"))
     for name, metadata in manifest.items():
         assert hashlib.sha256((DATA / name).read_bytes()).hexdigest() == metadata["sha256"], name
     decompositions, combining, upper, lower = {}, {}, {}, {}
@@ -169,11 +169,11 @@ def main():
     args = parser.parse_args()
     generated = generate()
     if args.check:
-        if not OUTPUT.exists() or OUTPUT.read_text() != generated:
+        if not OUTPUT.exists() or OUTPUT.read_text(encoding="utf-8") != generated:
             raise SystemExit("Unicode tables differ; run python3 tools/unicode_tables.py")
     else:
         OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-        OUTPUT.write_text(generated)
+        OUTPUT.write_text(generated, encoding="utf-8", newline="\n")
         print(f"wrote {OUTPUT.relative_to(ROOT)} ({len(generated)} bytes)")
 
 

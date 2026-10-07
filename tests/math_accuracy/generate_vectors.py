@@ -51,4 +51,4 @@ for width in (32, 64):
             source.append(f'    assert(within_ulps((u64){call}, {expected}), "{module}.{operation} input bits {bits}")')
             count += 1
 source += [f'    print("ok math accuracy: {count} independent vectors")', ""]
-(Path(__file__).resolve().parent / "vectors.lucb").write_text("\n".join(source))
+(Path(__file__).resolve().parent / "vectors.lucb").write_text("\n".join(source), encoding="utf-8", newline="\n")
