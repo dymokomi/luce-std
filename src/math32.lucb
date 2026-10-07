@@ -90,9 +90,12 @@ pub func cbrt(x: f32) -> f32:
 pub func hypot(x: f32, y: f32) -> f32:
     return c_hypot(x, y)
 
-## The remainder of `x / y` with the sign of `x`, as C's `fmod`.
+## The remainder of `x / y` with the sign of `x`, as C's `fmod`; a zero has the sign of `x`.
 pub func mod(x: f32, y: f32) -> f32:
-    return c_fmod(x, y)
+    let result = c_fmod(x, y)
+    # MinGW's fmod loses the dividend's zero sign under directed rounding, as some
+    # hosts' remainder does: restore it by bits, leaving a nonzero or NaN result.
+    return copysign(result, x) if (result.bits() & magnitude_mask) == 0 else result
 
 ## `x` raised to the power `y`.
 pub func pow(x: f32, y: f32) -> f32:
