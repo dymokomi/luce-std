@@ -1,0 +1,29 @@
+# Mapped files (check.lucb): a small file against files.read, an empty file, a missing
+# file, 64 MiB, and a mapping beside another open handle.
+from luce_std import files, paths, process
+
+let failed = ErrorCode.package(1)
+
+# Run `program`, failing unless it exits 0; what it printed.
+func must(program: str, arguments: list[str]) -> str!:
+    let done = process.run(program, arguments)
+    if done.exit_code != 0:
+        error(failed, f"{program} {arguments}: exit status {done.exit_code}\n{done.output}{done.error_output}")
+    return done.output
+
+pub func main(arguments: list[str]) -> int!:
+    let here = process.variable("LUC_TEST_DIR") else "tests/file_map"
+    let base = process.variable("LUCE_BASE") else "luce-base"
+    let work = paths.join(process.current_directory(), "build/tests/file_map/work")
+    if files.exists(work):
+        files.remove_tree(work)
+    files.ensure_directory(work)
+    let check = paths.join(work, "check")
+    _ = must(base, ["build", paths.join(here, "check.lucb"), "-o", check])
+    _ = must(check, [work])
+    # Luce sees the mapping as bytes.
+    files.write(paths.join(work, "luce"), b"from Luce")
+    if files.map(paths.join(work, "luce")) != b"from Luce":
+        error(failed, "the Luce view of a mapping differs")
+    files.remove_tree(work)
+    return 0

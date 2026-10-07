@@ -1,0 +1,106 @@
+#==============================================================================================
+#
+#   mapping - Read-only memory-mapped files
+#
+#   DESCRIPTION:
+#       `map` answers a whole file's bytes as a shared read-only mapping: pages come in from
+#       the file as they are read, stay clean (the system may drop and refetch them) and are
+#       shared with every process mapping the same file. The result is an interop.Owned
+#       whose release unmaps. POSIX uses mmap(PROT_READ, MAP_SHARED); Windows uses
+#       CreateFileMappingW(PAGE_READONLY) and MapViewOfFile(FILE_MAP_READ).
+#
+#==============================================================================================
+
+import ownership
+
+extern func posix_mmap as "mmap"(address: void*?, length: usize, protection: i32, flags: i32, descriptor: i32, offset: i64) -> void*?
+extern func posix_munmap as "munmap"(address: void*, length: usize) -> i32
+extern func GetFileSizeEx(handle: void*, size: i64*) -> i32
+extern func CreateFileMappingW(file: void*, security: void*?, protection: u32, size_high: u32, size_low: u32, name: u16*?) -> void*?
+extern func MapViewOfFile(mapping: void*, access: u32, offset_high: u32, offset_low: u32, size: usize) -> void*?
+extern func UnmapViewOfFile(address: const void*) -> i32
+
+## PROT_READ and MAP_SHARED, the same on macOS and Linux.
+let protection_read: i32 = 1
+let map_shared: i32 = 1
+
+## The owner of one mapping; dropping it unmaps the view.
+struct MappedView:
+    var header: ownership.Object
+    var data: const u8[]
+
+func drop_view(object: ownership.Object*):
+    let view = (MappedView*)object
+    if view.data.length == 0:
+        return
+    if platform.windows:
+        _ = UnmapViewOfFile((const void*)view.data.data)
+    else:
+        _ = posix_munmap((void*)view.data.data, view.data.length)
+
+func trace_view(object: ownership.Object*, visit: func(ownership.Object*, void*) -> unit, context: void*):
+    _ = object
+
+var view_info: ownership.Info = ownership.Info(name = "mapped file", size = memory.size_of(MappedView),
+                                               finish = none, drop = drop_view,
+                                               trace = trace_view, acyclic = true)
+
+## The whole file at `path` as a read-only shared mapping. The bytes are valid until
+## `release()`, which unmaps them; the file itself may be closed, renamed or opened
+## elsewhere meanwhile. An empty file answers an empty view without mapping. Changing or
+## truncating the file while it is mapped changes or invalidates the view, as with Python's
+## mmap. Errors are the `files` codes of opening the file, plus `failed` when the system
+## refuses the mapping and `too_large` when the file does not fit the address space.
+pub func map(path: c.str) -> interop.Owned[const u8[]]!:
+    let owner = (MappedView*)(try ownership.reserve(&view_info, memory.size_of(MappedView)))
+    errdefer ownership.release(&owner.header)
+    if platform.windows:
+        owner.data = try windows_map(path)
+    else:
+        owner.data = try posix_map(path)
+    return interop.Owned[const u8[]](owner.data, &owner.header)
+
+func posix_map(path: c.str) -> const u8[]!:
+    var file = try File.open(path)
+    # The mapping outlives the descriptor.
+    defer file.destroy()
+    let descriptor = file.descriptor() else error(io.closed, "the file is closed")
+    let info = try metadata_descriptor(descriptor)
+    if info.kind == FileKind.directory:
+        error(is_directory, "a directory cannot be mapped")
+    if (u64)info.size > (u64)~(usize)0:
+        error(too_large, "the file does not fit the address space")
+    let size = (usize)info.size
+    var empty: const u8[]
+    # mmap rejects a zero length: an empty file maps to no bytes.
+    if size == 0:
+        return empty
+    let mapped = posix_mmap(none, size, protection_read, map_shared, descriptor, 0) else error(failed, "the file could not be mapped")
+    if (usize)mapped == ~(usize)0:
+        error(classify_error(c.errno()), "the file could not be mapped")
+    return u8[]((u8*)mapped, size)
+
+func windows_map(path: c.str) -> const u8[]!:
+    let text = try wide_path(path)
+    defer free(text)
+    # GENERIC_READ, sharing read, write and delete, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL.
+    let file = CreateFileW(text.data, 2147483648, 7, none, 3, 128, none)
+    if (usize)file == ~(usize)0:
+        error(windows_error(GetLastError()), "the file could not be opened")
+    # The view outlives both handles.
+    defer _ = CloseHandle(file)
+    var size: i64 = 0
+    if GetFileSizeEx(file, &size) == 0:
+        error(windows_error(GetLastError()), "the file size could not be read")
+    if (u64)size > (u64)~(usize)0:
+        error(too_large, "the file does not fit the address space")
+    var empty: const u8[]
+    # CreateFileMappingW rejects an empty file.
+    if size == 0:
+        return empty
+    # PAGE_READONLY, the whole file.
+    let mapping = CreateFileMappingW(file, none, 2, 0, 0, none) else error(windows_error(GetLastError()), "the file could not be mapped")
+    defer _ = CloseHandle(mapping)
+    # FILE_MAP_READ, from the start, through the end.
+    let view = MapViewOfFile(mapping, 4, 0, 0, 0) else error(windows_error(GetLastError()), "the file could not be mapped")
+    return u8[]((u8*)view, (usize)size)

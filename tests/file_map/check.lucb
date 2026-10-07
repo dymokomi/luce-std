@@ -1,0 +1,73 @@
+import c
+import interop
+import files
+import memory
+import paths
+import ownership
+
+## Map `path` and check it against files.read.
+func same_as_read(path: c.str) -> usize!:
+    let mapped = try files.map(path)
+    defer mapped.release()
+    let read = try files.read(path)
+    defer read.release()
+    assert(mapped.value.length == read.value.length)
+    assert((str)mapped.value == (str)read.value)
+    return mapped.value.length
+
+pub func main(arguments: str[]) -> i32!:
+    assert(arguments.length == 2)
+    let work = arguments[1]
+
+    # A small file: the mapping holds what a read answers.
+    let small = try paths.join(work, "small")
+    defer small.release()
+    try files.write((c.str)small.value, "mapped bytes\n".bytes)
+    let before = ownership.live_count()
+    assert((try same_as_read((c.str)small.value)) == 13)
+    # Release gave the mapping's owner back.
+    assert(ownership.live_count() == before)
+
+    # An empty file: an empty view, nothing mapped.
+    let empty = try paths.join(work, "empty")
+    defer empty.release()
+    try files.write((c.str)empty.value, "".bytes)
+    let nothing = try files.map((c.str)empty.value)
+    assert(nothing.value.length == 0)
+    nothing.release()
+
+    # A missing file fails with files.missing.
+    let absent = try paths.join(work, "absent")
+    defer absent.release()
+    var refused = false
+    let missing = files.map((c.str)absent.value) catch failure:
+        assert(failure.code == files.missing)
+        refused = true
+        recover interop.Owned[const u8[]]("".bytes)
+    assert(refused and missing.value.length == 0)
+
+    # 64 MiB with a pattern that differs on every page.
+    let large = try paths.join(work, "large")
+    defer large.release()
+    let size: usize = 64 * 1024 * 1024
+    var pattern = try new u8[size] ---
+    defer free(pattern)
+    for index in 0..<size:
+        pattern[index] = (u8)((index * 7 + index // 4096) % 251)
+    try files.write((c.str)large.value, pattern)
+    assert((try same_as_read((c.str)large.value)) == size)
+    let whole = try files.map((c.str)large.value)
+    assert((str)whole.value == (str)pattern)
+    whole.release()
+
+    # Open elsewhere for reading and writing: the mapping works beside it and outlives it.
+    var other = try files.File.open((c.str)small.value, files.OpenMode.read_write)
+    defer other.destroy()
+    let shared = try files.map((c.str)small.value)
+    assert((str)shared.value == "mapped bytes\n")
+    try other.close()
+    assert((str)shared.value == "mapped bytes\n")
+
+    shared.release()
+    print("ok mapped files")
+    return 0

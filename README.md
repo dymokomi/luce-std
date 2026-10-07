@@ -9,7 +9,7 @@ Base and serves Luce and Base programs alike.
 
 | import | what it holds |
 | --- | --- |
-| `from luce_std import files` | Files and directories: whole-file text and bytes, `File` objects, listings, walks, metadata, copying, renaming, temporary directories |
+| `from luce_std import files` | Files and directories: whole-file text and bytes, `File` objects, listings, walks, metadata, copying, renaming, temporary directories, read-only memory-mapped files (`map`) |
 | `from luce_std import paths` | Lexical filesystem paths: join, normalize, split |
 | `from luce_std import process` | Running programs (`run`, background `Command`), environment variables, the working directory |
 | `from luce_std import net` | TCP connections and listeners by host name, name lookup, UDP; HTTP and WebSocket wire formats for Base; for event loops, connects that do not wait (`Connection.start_connect`, `finish_connect`) and name lookups on a thread of their own (`Lookup`) |
@@ -68,6 +68,27 @@ for name in names.value:
 The storage comes from the allocator current at the call; texts are NUL-terminated, so they
 may be passed on as `c.str`. Objects Luce holds (`files.File`, `files.TemporaryDirectory`,
 `net.Connection`, `net.Listener`, `process.Command`) remain ordinary values in Base.
+
+### Mapped files
+
+`files.map(path)` answers a whole file's bytes as a read-only mapping, much as Python's
+`mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)` does, but without a file to keep open:
+the result is an `interop.Owned[const u8[]]` whose `release()` unmaps it.
+
+```lucb
+let font = try files.map("/System/Library/Fonts/Helvetica.ttc")
+defer font.release()
+let tag = font.value[..<4]          # pages are read from the file as they are touched
+```
+
+The mapping is shared, so its pages belong to the file: they cost nothing until read, the
+system may drop them under memory pressure and read them again, and every process mapping
+the same file shares them. That suits large files read in parts, such as fonts. An empty
+file answers an empty view. The view stays valid after the file is closed, renamed or opened
+elsewhere, but not after it is truncated (reading past the new end faults, as it does in
+Python); write a replacement through `write_atomic` instead of changing a mapped file in
+place. A Luce program calling `files.map` receives a copy as `bytes`, so from Luce it reads
+like `files.read`.
 
 ### Growable storage
 
