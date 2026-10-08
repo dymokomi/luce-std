@@ -24,6 +24,7 @@
 #==============================================================================================
 import memory
 import os
+import strings
 import thread
 
 ## The state the threads of one run share.
@@ -33,7 +34,11 @@ struct Run:
     var count: usize
     var next: @usize
     var failed: @bool
-    var failure: Error?
+    ## The first failure: its code, and its message copied into `room`, since the handler
+    ## that caught it gives the original back when it finishes (base.md §11.3).
+    var code: ErrorCode?
+    var room: u8[512]
+    var message: str
 
 ## What one thread is given: the run, and its worker number.
 struct Share:
@@ -50,7 +55,8 @@ func run_worker(raw: void*?):
         run.work(run.context, index, share.worker) catch failure:
             # the first thread to fail keeps its error; the others' are dropped
             if not run.failed.swap(true, .acq_rel):
-                run.failure = failure
+                run.code = failure.code
+                run.message = strings.copy_into(run.room, failure.message)
             return
 
 ## The number of threads `for_each` uses for `count` items when asked for `threads`, zero
@@ -89,8 +95,8 @@ pub func for_each(count: usize, context: void*, work: func(void*, usize, usize) 
         run_worker((void*)&shares[0])
         for at in 0..<started:
             try handles[at].join()
-    if let failure = run.failure:
-        error(failure.code, failure.message)
+    if let code = run.code:
+        error(code, run.message)
 
 ## The state of a `for_each_range` run.
 struct Ranges:
