@@ -1,7 +1,7 @@
 #prisma 4.0
 def package "luce-std" {
     str owner = "dymokomi"
-    str version = "0.7.1"
+    str version = "0.7.2"
     str kind = "package"
     str language = "luce-base"
     str description = "Luce's standard library: files, paths, processes and the environment, networking, time and dates, random numbers, math, sorting, UTF-8, Unicode and crash reports; everything a program imports beyond the language runtime."
