@@ -129,33 +129,8 @@ pub func list(path: c.str) -> interop.Owned[const str[]]!:
     while let name = try directory.next():
         try names.add(name)
     try directory.close()
-    sort_names(names.view())
+    # Heapsort-backed introsort: O(n log n) without a second allocation or a
+    # recursion depth that depends on the filesystem's enumeration order.
+    sort.sort(names.view())
     return try names.finish()
 
-## In-place heapsort gives large directories O(n log n) comparisons without a
-## second allocation or a recursion depth dependent on filesystem enumeration order.
-func sort_names(names: str[]):
-    var root = names.length // 2
-    while root > 0:
-        root -= 1
-        sift_names(names, root, names.length)
-    var end = names.length
-    while end > 1:
-        end -= 1
-        let largest = names[0]
-        names[0] = names[end]
-        names[end] = largest
-        sift_names(names, 0, end)
-
-func sift_names(names: str[], start: usize, end: usize):
-    var parent = start
-    while parent < end // 2:
-        var child = parent * 2 + 1
-        if child + 1 < end and names[child] < names[child + 1]:
-            child += 1
-        if not (names[parent] < names[child]):
-            return
-        let saved = names[parent]
-        names[parent] = names[child]
-        names[child] = saved
-        parent = child

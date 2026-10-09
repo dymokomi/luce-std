@@ -1,0 +1,382 @@
+## Sorting arrays in place, without allocating.
+##
+## `sort` orders values by their own comparison and `by` by a function, as C's
+## qsort or Rust's sort_unstable_by: introsort (quicksort that falls back to
+## heapsort past a depth limit, insertion sort for short runs), O(n log n) in
+## the worst case and not stable. `using` is `by` with a context the function
+## reads, for orders a plain function can't see: indices ordered by the names
+## they point at. `stable` and `stable_using` keep equal values in their order,
+## as Python's sort does, with in-place merging: O(n log n) comparisons and
+## O(n log² n) moves. `order` and `order_by` write the indices that would sort
+## `values` (numpy's argsort), stably, and leave `values` alone.
+##
+## Floats sort in IEEE order; `sort` traps on a NaN, as comparing one does.
+from luce import Comparable
+
+## `order` was given an `out` of another length than its values.
+pub let mismatched: ErrorCode = ErrorCode.package(86)
+
+## Below this many values, insertion sort beats partitioning.
+let short_run: usize = 16
+## The run length the stable sort orders by insertion before merging.
+let stable_block: usize = 20
+
+## Sort `values` ascending by their own `compare`.
+pub func sort[T: Comparable](values: T[]):
+    let natural = Function[T](natural_less[T])
+    introsort(values, &natural)
+
+## Sort `values` so that `less(a, b)` holds for no `b` after an `a`; not stable.
+pub func by[T](values: T[], less: func(T, T) -> bool):
+    let function = Function[T](less)
+    introsort(values, &function)
+
+## `by`, with `context` passed to every call of `less`.
+pub func using[T, C](values: T[], context: const C*, less: func(const C*, T, T) -> bool):
+    let contextual = Contextual[T, C](context, less)
+    introsort(values, &contextual)
+
+## Sort `values` by `less`, keeping equal values in the order they were in.
+pub func stable[T](values: T[], less: func(T, T) -> bool):
+    let function = Function[T](less)
+    merge_sort(values, &function)
+
+## `stable`, with `context` passed to every call of `less`.
+pub func stable_using[T, C](values: T[], context: const C*, less: func(const C*, T, T) -> bool):
+    let contextual = Contextual[T, C](context, less)
+    merge_sort(values, &contextual)
+
+## Write into `out` the indices of `values` in ascending order, equal values by
+## index. `out` has one place per value.
+pub func order[T: Comparable](values: const T[], out: i64[]) -> !:
+    let natural = Function[T](natural_less[T])
+    try order_with(values, out, &natural)
+
+## `order` by `less`.
+pub func order_by[T](values: const T[], out: i64[], less: func(T, T) -> bool) -> !:
+    let function = Function[T](less)
+    try order_with(values, out, &function)
+
+## How two values compare: `less(a, b)` when `a` goes before `b`.
+interface Less[T]:
+    func less(a: T, b: T) -> bool
+
+func natural_less[T: Comparable](a: T, b: T) -> bool:
+    return a.compare(b) < 0
+
+struct Function[T]: Less[T]:
+    let function: func(T, T) -> bool
+    func less(a: T, b: T) -> bool:
+        return self.function(a, b)
+
+struct Contextual[T, C]: Less[T]:
+    let context: const C*
+    let function: func(const C*, T, T) -> bool
+    func less(a: T, b: T) -> bool:
+        return self.function(self.context, a, b)
+
+## Indices ordered by the values they name, ties by index: a strict total order,
+## so an unstable sort of indices comes out stable.
+struct Indexed[T, L: Less[T]]: Less[i64]:
+    let values: const T[]
+    let ordering: const L*
+    func less(a: i64, b: i64) -> bool:
+        let left = self.values[(usize)a]
+        let right = self.values[(usize)b]
+        if self.ordering.less(left, right):
+            return true
+        if self.ordering.less(right, left):
+            return false
+        return a < b
+
+func order_with[T, L: Less[T]](values: const T[], out: i64[], ordering: const L*) -> !:
+    if out.length != values.length:
+        error(mismatched, "an order needs one index per value")
+    for index in 0..<out.length:
+        out[index] = (i64)index
+    let indexed = Indexed[T, L](values, ordering)
+    introsort(out, &indexed)
+
+func introsort[T, L: Less[T]](values: T[], ordering: const L*):
+    if values.length < 2:
+        return
+    # Twice the depth of a balanced partition tree before heapsort takes over.
+    var depth: usize = 0
+    var remaining = values.length
+    while remaining > 1:
+        depth += 2
+        remaining //= 2
+    quick(values, ordering, depth)
+
+## Partition the longer side in the loop and recurse into the shorter, so the
+## stack stays O(log n) whatever the input.
+func quick[T, L: Less[T]](whole: T[], ordering: const L*, limit: usize):
+    var values = whole
+    var depth = limit
+    while values.length > short_run:
+        if depth == 0:
+            heap_sort(values, ordering)
+            return
+        depth -= 1
+        let pivot = partition(values, ordering)
+        let left = values[..<pivot]
+        let right = values[pivot + 1..]
+        if left.length < right.length:
+            quick(left, ordering, depth)
+            values = right
+        else:
+            quick(right, ordering, depth)
+            values = left
+    insertion(values, ordering)
+
+## Hoare partition around the median of the first, middle and last values; the
+## pivot ends at the returned index, nothing after it less and nothing before it
+## greater. Equal values stop both scans, so runs of them split evenly.
+func partition[T, L: Less[T]](values: T[], ordering: const L*) -> usize:
+    let last = values.length - 1
+    let middle = values.length // 2
+    if ordering.less(values[middle], values[0]):
+        swap(values, middle, 0)
+    if ordering.less(values[last], values[middle]):
+        swap(values, last, middle)
+        if ordering.less(values[middle], values[0]):
+            swap(values, middle, 0)
+    # The median goes first; the last value, not below it, stops the forward scan.
+    swap(values, 0, middle)
+    let pivot = values[0]
+    var forward: usize = 1
+    var backward = last
+    while true:
+        while ordering.less(values[forward], pivot):
+            forward += 1
+        while ordering.less(pivot, values[backward]):
+            backward -= 1
+        if forward >= backward:
+            break
+        swap(values, forward, backward)
+        forward += 1
+        backward -= 1
+    swap(values, 0, backward)
+    return backward
+
+func heap_sort[T, L: Less[T]](values: T[], ordering: const L*):
+    var root = values.length // 2
+    while root > 0:
+        root -= 1
+        sift(values, ordering, root, values.length)
+    var end = values.length
+    while end > 1:
+        end -= 1
+        swap(values, 0, end)
+        sift(values, ordering, 0, end)
+
+func sift[T, L: Less[T]](values: T[], ordering: const L*, start: usize, end: usize):
+    var parent = start
+    while parent < end // 2:
+        var child = parent * 2 + 1
+        if child + 1 < end and ordering.less(values[child], values[child + 1]):
+            child += 1
+        if not ordering.less(values[parent], values[child]):
+            return
+        swap(values, parent, child)
+        parent = child
+
+## Stable: a value moves left only past greater ones.
+func insertion[T, L: Less[T]](values: T[], ordering: const L*):
+    for index in 1..<values.length:
+        let moving = values[index]
+        var place = index
+        while place > 0 and ordering.less(moving, values[place - 1]):
+            values[place] = values[place - 1]
+            place -= 1
+        values[place] = moving
+
+## Bottom-up merge sort that merges in place by rotation (Kim and Kutzner's
+## SymMerge), so it needs no buffer.
+func merge_sort[T, L: Less[T]](values: T[], ordering: const L*):
+    let count = values.length
+    var start: usize = 0
+    while start + stable_block <= count:
+        insertion(values[start..<start + stable_block], ordering)
+        start += stable_block
+    insertion(values[start..], ordering)
+    var block = stable_block
+    while block < count:
+        start = 0
+        while start + 2 * block <= count:
+            merge(values, ordering, start, start + block, start + 2 * block)
+            start += 2 * block
+        if start + block < count:
+            merge(values, ordering, start, start + block, count)
+        block *= 2
+
+## Merge the sorted runs `values[low..<middle]` and `values[middle..<high]`.
+func merge[T, L: Less[T]](values: T[], ordering: const L*, low: usize, middle: usize, high: usize):
+    if middle - low == 1:
+        # One value on the left: it goes before the first right value not less than it.
+        var first = middle
+        var past = high
+        while first < past:
+            let probe = (first + past) // 2
+            if ordering.less(values[probe], values[low]):
+                first = probe + 1
+            else:
+                past = probe
+        rotate(values, low, middle, first)
+        return
+    if high - middle == 1:
+        # One value on the right: it goes after every left value not greater than it.
+        var first = low
+        var past = middle
+        while first < past:
+            let probe = (first + past) // 2
+            if not ordering.less(values[middle], values[probe]):
+                first = probe + 1
+            else:
+                past = probe
+        rotate(values, first, middle, high)
+        return
+    # Split both runs where the halves cross, rotate the inner parts into place,
+    # then merge each side.
+    let half = (low + high) // 2
+    let total = half + middle
+    var first = low
+    var past = middle
+    if middle > half:
+        first = total - high
+        past = half
+    let mirror = total - 1
+    while first < past:
+        let probe = (first + past) // 2
+        if not ordering.less(values[mirror - probe], values[probe]):
+            first = probe + 1
+        else:
+            past = probe
+    let end = total - first
+    if first < middle and middle < end:
+        rotate(values, first, middle, end)
+    if low < first and first < half:
+        merge(values, ordering, low, first, half)
+    if half < end and end < high:
+        merge(values, ordering, half, end, high)
+
+## Move `values[middle..<high]` before `values[low..<middle]`, each keeping its order.
+func rotate[T](values: T[], low: usize, middle: usize, high: usize):
+    reverse(values, low, middle)
+    reverse(values, middle, high)
+    reverse(values, low, high)
+
+func reverse[T](values: T[], low: usize, high: usize):
+    var left = low
+    var right = high
+    while left + 1 < right:
+        right -= 1
+        swap(values, left, right)
+        left += 1
+
+func swap[T](values: T[], left: usize, right: usize):
+    let saved = values[left]
+    values[left] = values[right]
+    values[right] = saved
+
+# Tests: random, sorted, reversed and equal-heavy inputs of every length up to
+# well past the insertion and merge block sizes.
+
+struct Keyed:
+    let key: i64
+    let place: i64
+
+func keyed_less(a: Keyed, b: Keyed) -> bool:
+    return a.key < b.key
+
+func descending(a: i64, b: i64) -> bool:
+    return a > b
+
+struct Table:
+    let keys: const i64[]
+
+func by_table(table: const Table*, a: i64, b: i64) -> bool:
+    return table.keys[(usize)a] < table.keys[(usize)b]
+
+func ascending(a: i64, b: i64) -> bool:
+    return a < b
+
+## A small linear congruential generator, so the tests need nothing else.
+func next(state: u64*) -> u64:
+    *state = *state *% 6364136223846793005 +% 1442695040888963407
+    return *state >> 33
+
+func fill(values: i64[], pattern: i64, state: u64*):
+    let count = values.length
+    for index in 0..<count:
+        if pattern == 0:
+            values[index] = (i64)(next(state) % 1000)
+        elif pattern == 1:
+            values[index] = (i64)index
+        elif pattern == 2:
+            values[index] = (i64)(count - index)
+        else:
+            values[index] = (i64)(next(state) % 3)
+
+test "sort, by, using and heapsort's fallback order every input":
+    var state: u64 = 7
+    var values: i64[300]
+    var table: i64[300]
+    let counts: usize[10] = [0, 1, 2, 3, 15, 16, 17, 40, 299, 300]
+    for count in counts:
+        for pattern in 0..<4:
+            let span = values[..<count]
+            fill(span, pattern, &state)
+            sort(span)
+            for index in 1..<count:
+                assert(span[index - 1] <= span[index])
+            fill(span, pattern, &state)
+            by(span, descending)
+            for index in 1..<count:
+                assert(span[index - 1] >= span[index])
+            fill(table[..<count], pattern, &state)
+            for index in 0..<count:
+                span[index] = (i64)index
+            let keys = Table(keys = table[..<count])
+            using(span, &keys, by_table)
+            for index in 1..<count:
+                assert(table[(usize)span[index - 1]] <= table[(usize)span[index]])
+            fill(span, pattern, &state)
+            let natural = Function[i64](ascending)
+            heap_sort(span, &natural)
+            for index in 1..<count:
+                assert(span[index - 1] <= span[index])
+    var floats = [2.5, -1.0, 0.0, 9.0, -7.25]
+    sort(floats[0..])
+    assert(floats[0] == -7.25 and floats[4] == 9.0)
+
+test "stable keeps equal keys in order, and order is a stable argsort":
+    var state: u64 = 11
+    var items: Keyed[300]
+    var keys: i64[300]
+    var out: i64[300]
+    let counts: usize[9] = [0, 1, 2, 19, 20, 21, 41, 299, 300]
+    for count in counts:
+        for pattern in 0..<4:
+            fill(keys[..<count], pattern, &state)
+            for index in 0..<count:
+                items[index] = Keyed(key = keys[index], place = (i64)index)
+            stable(items[..<count], keyed_less)
+            for index in 1..<count:
+                let before = items[index - 1]
+                let after = items[index]
+                assert(before.key < after.key or (before.key == after.key and before.place < after.place))
+            try order(keys[..<count], out[..<count])
+            for index in 1..<count:
+                let before = out[index - 1]
+                let after = out[index]
+                assert(keys[(usize)before] < keys[(usize)after] or (keys[(usize)before] == keys[(usize)after] and before < after))
+            try order_by(keys[..<count], out[..<count], descending)
+            for index in 1..<count:
+                assert(keys[(usize)out[index - 1]] >= keys[(usize)out[index]])
+    var rejected = false
+    order(keys[..<3], out[..<2]) catch failure:
+        assert(failure.code == mismatched)
+        rejected = true
+        recover ()
+    assert(rejected)

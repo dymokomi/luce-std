@@ -20,6 +20,7 @@ import strings
 import os
 import owned
 import readahead
+import sort
 extern func posix_open as "open"(path: c.str, flags: i32, ...) -> i32
 extern func openat(directory: i32, path: c.str, flags: i32, ...) -> i32
 extern func close(descriptor: i32) -> i32

@@ -76,7 +76,7 @@ pub func walk(root: c.str, max_depth: usize = 64) -> interop.Owned[const str[]]!
     var collected = Collected(skipped = skipped)
     errdefer collected.names.release()
     try walk_with(root, &collected, max_depth)
-    sort_names(collected.names.view())
+    sort.sort(collected.names.view())
     return try collected.names.finish()
 
 ## The paths walk collects, relative to the root.
