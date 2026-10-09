@@ -1,0 +1,99 @@
+## A quiet pool costs no processor time: after calls and jobs of every size, the pool's
+## threads use next to none of it while the program sleeps. Their time is the process's
+## minus this thread's, read from the CPU-time clocks; the time of calls made a
+## millisecond apart, as a program drawing frames makes them, is printed for a person to
+## read.
+import c
+import parallel
+import platform
+import thread
+import time
+
+extern struct Stamp:
+    seconds: i64
+    nanoseconds: c.long
+
+extern func clock_gettime(clock: i32, out_time: Stamp*) -> i32
+
+## `CLOCK_PROCESS_CPUTIME_ID` and `CLOCK_THREAD_CPUTIME_ID`: 12 and 16 on macOS, 2 and 3 on
+## Linux and in Windows' C runtime, which reads them with a 15.6 ms tick.
+let process_clock: i32 = 12 if platform.macos else 2
+let thread_clock: i32 = 16 if platform.macos else 3
+let windows_tick: u64 = 15625000
+
+func read(clock: i32) -> u64:
+    var stamp = Stamp(seconds = 0, nanoseconds = 0)
+    assert(clock_gettime(clock, &stamp) == 0)
+    return (u64)stamp.seconds * 1000000000 + (u64)stamp.nanoseconds
+
+## Nanoseconds of processor time the other threads used since `process` and `own`.
+func pool_time(process: u64, own: u64) -> u64:
+    let all = read(process_clock) - process
+    let mine = read(thread_clock) - own
+    return all - mine if all > mine else 0
+
+struct Tally:
+    var hits: @usize
+
+func touch(context: void*, index: usize, worker: usize) -> !:
+    _ = index
+    _ = worker
+    _ = ((Tally*)context).hits.add(1, .relaxed)
+
+## A little work, so items overlap.
+func busy(context: void*, index: usize, worker: usize) -> !:
+    _ = worker
+    var x: u64 = (u64)index + 1
+    for _ in 0..<2000:
+        x = (x * 31 + 7) % 1000003
+    _ = ((Tally*)context).hits.add(1 if x < 1000003 else 0, .relaxed)
+
+## Every kind of use: calls of a few items and of many, back to back, and jobs waited at
+## once and polled.
+func exercise(tally: Tally*) -> !:
+    for round: usize in 0..<300:
+        try parallel.for_each(round % 7, (void*)tally, touch)
+        try parallel.for_each(1024, (void*)tally, touch)
+        try parallel.for_each(64, (void*)tally, busy)
+    for _ in 0..<20:
+        var job = try parallel.start(4096, (void*)tally, busy)
+        while not job.completed():
+            thread.yield()
+        try job.wait()
+        var quick = try parallel.start(3, (void*)tally, touch)
+        try quick.wait()
+
+## Milliseconds of the pool's time per call, for `calls` calls over `count` items made a
+## millisecond apart.
+func spaced(tally: Tally*, count: usize, calls: usize) -> f64!:
+    let process = read(process_clock)
+    let own = read(thread_clock)
+    for _ in 0..<calls:
+        thread.sleep(1)
+        try parallel.for_each(count, (void*)tally, busy)
+    return (f64)pool_time(process, own) / (f64)calls / 1000000.0
+
+pub func main(arguments: str[]) -> i32!:
+    _ = arguments
+    parallel.warm()
+    var tally = Tally()
+    try exercise(&tally)
+    # idle: the threads should all be asleep within microseconds. Wait a moment first, as
+    # macOS counts a running thread's time only now and then, so time a thread spent on the
+    # last items can show up after it went to sleep.
+    thread.sleep(50)
+    let process = read(process_clock)
+    let own = read(thread_clock)
+    let start = time.now()
+    thread.sleep(500)
+    let used = pool_time(process, own)
+    let wall = time.since(start)
+    print(f"pool threads over {(f64)wall / 1000000.0} ms idle after calls: {(f64)used / 1000000.0} ms of processor time")
+    # a thread that never sleeps would use the whole wall time; allow a twentieth of it,
+    # and one clock tick on Windows
+    let allowed = wall // 20 + (windows_tick if platform.windows else 0)
+    assert(used <= allowed, "the pool's threads kept running while the program was idle")
+    for count in [(usize)2, 256]:
+        let per_call = try spaced(&tally, count, 100)
+        print(f"pool threads per call over {count} items, calls 1 ms apart: {per_call} ms of processor time")
+    return 0

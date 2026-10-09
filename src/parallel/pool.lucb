@@ -1,0 +1,286 @@
+#==============================================================================================
+#
+#   pool - The process-wide threads that run calls' and jobs' items
+#
+#   DESCRIPTION:
+#       Batches of items wait in two queues, `for_each` calls first and started jobs after,
+#       and the pool's threads join whichever has items left and room for one more thread.
+#       A thread out of work watches for a new batch for a few microseconds, when no more
+#       than one other thread does, pausing the processor and reading the clock only every
+#       few pauses, and then sleeps on a condition; a new batch wakes the sleepers it needs
+#       beyond the threads already watching, one directly and the rest through each other.
+#
+#==============================================================================================
+
+## How long an idle pool thread watches for new work before it sleeps, and a caller for
+## its call's last items before it sleeps, in nanoseconds. Both spins pause the processor
+## `pauses` times between readings of the clock: a pause takes from a cycle on some
+## processors to over a hundred on others, so counting them alone gives no fixed time.
+let watch_time: u64 = 4000
+let finish_time: u64 = 8000
+let pauses: usize = 16
+## The most idle threads watching at once; the others sleep as soon as they run out of
+## work, so a quiet moment costs a couple of short spins however many processors there are.
+let most_watching: usize = 2
+
+## One call's items, or one started job's: a `for_each` call's on its caller's stack, a
+## job's on the heap. It is in a queue while it has items to hand out, and kept until no
+## pool thread is on it.
+struct Batch:
+    var context: void*
+    var work: func(void*, usize, usize) -> unit!
+    var count: usize
+    var next: @usize
+    var failed: @bool
+    ## A job's: it waits in the job queue, and counts the items that have returned.
+    var background: bool
+    var finished: @usize
+    ## The first failure: its code, and its message copied into `room`, since the handler
+    ## that caught it gives the original back when it finishes (base.md §11.3).
+    var code: ErrorCode?
+    var room: u8[512]
+    var message: str
+    ## Under `lock`: the worker numbers it hands out, below `slots`, and how many it has
+    ## (the next thread to join takes number `taken`); whether its owner sleeps until the
+    ## pool threads leave; its place in a queue. `working` counts the pool threads on it
+    ## now; it changes under `lock`, and the owner watches it.
+    var slots: usize
+    var taken: usize
+    var waiting: bool
+    var working: @usize
+    var queued: bool
+    var after: Batch*?
+
+## The pool's lock, the condition idle threads sleep on, and the one owners sleep on until
+## the pool threads leave their batch, each 64 bytes from the others and from whatever lies
+## around them. LUCE-BUG: on Windows, waking an address with WakeByAddressSingle, as a
+## contended `sync.Mutex` does on unlock, also wakes threads waiting in WaitOnAddress on an
+## address 8 or 16 bytes away (32 and more are left alone), and `sync.Condition.wait`
+## returns on such a wake; side by side, every contended unlock woke the sleeping pool
+## threads, which then fought for the lock, and a call over two items took 10 us instead
+## of 0.5. Drop the gaps once luce-base's Mutex and Condition keep such wakes from callers.
+struct Waits:
+    var before: u8[64]
+    var lock: sync.Mutex
+    var after_lock: u8[60]
+    var work_ready: sync.Condition
+    var after_work: u8[60]
+    var job_done: sync.Condition
+    var after_done: u8[60]
+
+## Batches with items to hand out, oldest first.
+struct Queue:
+    var first: Batch*?
+    var last: Batch*?
+
+## The pool, guarded by `lock`: the queues and the threads. `places` counts the worker
+## numbers the queued batches still hand out, for idle threads watching for work without
+## the lock; it changes under the lock. `spinning` counts the threads watching it, and
+## `relay` the sleeping threads the batches still want woken, each woken thread waking up
+## to two more, so a caller pays for one wake however many threads it wants.
+var waits: Waits
+var call_queue: Queue
+var job_queue: Queue
+var started: bool = false
+var pool_threads: usize = 0
+var sleeping: usize = 0
+var spinning: usize = 0
+var relay: usize = 0
+var places: @usize
+var running: @usize
+## Set on pool threads, where a started job runs at once on the starting thread.
+local var on_pool: bool = false
+
+## Take `batch`'s indices until none are left or one has failed, as worker `worker`.
+func work_on(batch: Batch*, worker: usize):
+    while not batch.failed.load(.acquire):
+        let index = batch.next.add(1, .relaxed)
+        if index >= batch.count:
+            return
+        batch.work(batch.context, index, worker) catch failure:
+            # the first thread to fail keeps its error; the others' are dropped
+            if not batch.failed.swap(true, .acq_rel):
+                batch.code = failure.code
+                batch.message = strings.copy_into(batch.room, failure.message)
+            if batch.background:
+                _ = batch.finished.add(1, .release)
+            return
+        if batch.background:
+            _ = batch.finished.add(1, .release)
+
+## Queue `batch` for pool threads to take its numbers from `taken` up to `slots`, no more
+## of them than the pool has: whether it was queued, which it is not when the pool has no
+## thread to give. Threads watching for work see it at once; of those asleep, wake as many
+## as the queued places need beyond the watchers: one now, after letting go of the lock it
+## will want, and that one wakes the rest, since waking many at once costs the waker tens
+## of microseconds on macOS.
+func post(batch: Batch*) -> bool:
+    waits.lock.lock()
+    start_pool()
+    if batch.slots - batch.taken > pool_threads:
+        batch.slots = batch.taken + pool_threads
+    let open = batch.slots - batch.taken
+    var wake = false
+    if open > 0:
+        batch.queued = true
+        let queue = &job_queue if batch.background else &call_queue
+        if let last = queue.last:
+            last.after = batch
+        else:
+            queue.first = batch
+        queue.last = batch
+        let total = places.add(open, .release) + open
+        let uncovered = total - spinning if total > spinning else 0
+        var wanted = open if open < uncovered else uncovered
+        if wanted > sleeping:
+            wanted = sleeping
+        if wanted > 0:
+            relay += wanted - 1
+            wake = true
+    waits.lock.unlock()
+    if wake:
+        waits.work_ready.signal()
+    return open > 0
+
+## Wait until no pool thread is on `batch` and take it off its queue; after this its owner
+## may let it go. The owner has taken every index it could, so the threads still on it are
+## finishing their last items: watch them for a moment, then sleep.
+func finish(batch: Batch*):
+    let begun = time.now()
+    while batch.working.load(.acquire) > 0 and time.since(begun) < finish_time:
+        for _ in 0..<pauses:
+            thread.pause()
+    waits.lock.lock()
+    unlink(batch)
+    while batch.working.load(.acquire) > 0:
+        batch.waiting = true
+        waits.job_done.wait(&waits.lock)
+    waits.lock.unlock()
+
+## Drop `batch` from its queue if it is there; under `lock`.
+func unlink(batch: Batch*):
+    if not batch.queued:
+        return
+    batch.queued = false
+    _ = places.sub(batch.slots - batch.taken, .relaxed)
+    let queue = &job_queue if batch.background else &call_queue
+    var previous: Batch*? = none
+    var cursor = queue.first
+    while let current = cursor:
+        if current == batch:
+            if let before = previous:
+                before.after = current.after
+            else:
+                queue.first = current.after
+            if queue.last == batch:
+                queue.last = previous
+            return
+        previous = cursor
+        cursor = current.after
+
+## A queued batch with items left and room for one more pool thread, calls before jobs;
+## batches with nothing left to hand out leave their queue. Under `lock`.
+func next_batch() -> Batch*?:
+    if let batch = open_in(&call_queue):
+        return batch
+    return open_in(&job_queue)
+
+func open_in(queue: Queue*) -> Batch*?:
+    var cursor = queue.first
+    while let batch = cursor:
+        cursor = batch.after
+        if batch.next.load(.relaxed) >= batch.count or batch.failed.load(.relaxed):
+            unlink(batch)
+            continue
+        if batch.taken < batch.slots:
+            return batch
+    return none
+
+## Start the pool's threads the first time it is used; under `lock`.
+func start_pool():
+    if started:
+        return
+    started = true
+    if not platform.windows:
+        _ = pthread_atfork(none, none, forget_pool)
+    let threads = workers(most_threads) - 1
+    for _ in 0..<threads:
+        let handle = thread.spawn(pool_thread, none, name = "luce-parallel") catch failure:
+            # fewer threads only means less help: callers do the rest
+            break
+        handle.detach()
+        pool_threads += 1
+
+## In a child made by `fork`, which has the parent's memory but none of its threads: no
+## pool, and a lock some other thread of the parent may have held.
+func forget_pool():
+    waits = Waits()
+    call_queue = Queue()
+    job_queue = Queue()
+    started = false
+    pool_threads = 0
+    sleeping = 0
+    spinning = 0
+    relay = 0
+    places.store(0, .relaxed)
+    running.store(0, .relaxed)
+
+## A pool thread: join batches with items left, and when there are none, watch briefly for
+## the next one if fewer than `most_watching` threads already do, and then sleep until one
+## is posted.
+func pool_thread(raw: void*?):
+    _ = raw
+    on_pool = true
+    _ = running.add(1, .release)
+    waits.lock.lock()
+    while true:
+        if let batch = next_batch():
+            let worker = batch.taken
+            batch.taken += 1
+            _ = places.sub(1, .relaxed)
+            _ = batch.working.add(1, .relaxed)
+            waits.lock.unlock()
+            ownership.enter()
+            work_on(batch, worker)
+            ownership.finish_task()
+            waits.lock.lock()
+            if batch.working.sub(1, .release) == 1 and batch.waiting:
+                waits.job_done.broadcast()
+            continue
+        if spinning < most_watching:
+            spinning += 1
+            waits.lock.unlock()
+            let found = watch()
+            if not found:
+                waits.lock.lock()
+            spinning -= 1
+            if found or places.load(.acquire) > 0:
+                continue
+        sleeping += 1
+        waits.work_ready.wait(&waits.lock)
+        sleeping -= 1
+        # wake up to two more sleepers while a batch still has room; once none has, stop
+        var wake: usize = 0
+        if relay > 0 and sleeping > 0 and next_batch() != none:
+            wake = 2 if relay >= 2 and sleeping >= 2 else 1
+            relay -= wake
+        else:
+            relay = 0
+        if wake > 0:
+            waits.lock.unlock()
+            for _ in 0..<wake:
+                waits.work_ready.signal()
+            waits.lock.lock()
+
+## Watch `places` for `watch_time`, and when a batch has room take the lock if it is free:
+## whether it was taken. Only threads that see room try, so a call wanting one thread does
+## not have every idle one queue on the lock.
+func watch() -> bool:
+    let begun = time.now()
+    while true:
+        for _ in 0..<pauses:
+            if places.load(.acquire) > 0 and waits.lock.try_lock():
+                return true
+            thread.pause()
+        if time.since(begun) >= watch_time:
+            return false

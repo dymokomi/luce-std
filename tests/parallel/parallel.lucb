@@ -1,7 +1,6 @@
 ## The `parallel` module: every index runs once on a worker number below `workers()`, call
 ## after call; per-worker scratch needs no lock; the first error comes back; calls nest and
 ## run from several threads at once.
-import memory
 
 let test_failure: ErrorCode = ErrorCode.package(1)
 
@@ -20,8 +19,8 @@ func tally_item(context: void*, index: usize, worker: usize) -> !:
         error(test_failure, "item failed on purpose")
     _ = tally.runs[index].add(1, .relaxed)
 
-func tally_range(context: void*, start: usize, end: usize, worker: usize) -> !:
-    for index in start..<end:
+func tally_range(context: void*, first: usize, end: usize, worker: usize) -> !:
+    for index in first..<end:
         try tally_item(context, index, worker)
 
 func reset(tally: Tally*, worker_limit: usize):
@@ -179,3 +178,131 @@ test "several threads call at once":
     for at: usize in 0..<6:
         try handles[at].join()
         assert(not callers[at].failed.load())
+
+## Jobs: `start` returns at once, `wait` collects every index once and the first error,
+## and jobs run beside calls, nest them, and start jobs of their own.
+
+test "a started job runs every index once, under worker numbers below workers()":
+    let tally = try new Tally in memory.heap
+    defer free(tally) in memory.heap
+    for threads in [(usize)0, 1, 3]:
+        for count in [(usize)0, 1, 2, 7, 4096]:
+            reset(tally, workers(count, threads))
+            var job = try start(count, (void*)tally, tally_item, threads = threads)
+            try job.wait()
+            check_once(tally, count)
+            assert(job.completed() and job.progress() == count)
+            # a second wait does nothing
+            try job.wait()
+
+test "a polled job completes, and its progress reaches its count":
+    let tally = try new Tally in memory.heap
+    defer free(tally) in memory.heap
+    for _ in 0..<50:
+        reset(tally, workers(4096))
+        var job = try start(4096, (void*)tally, tally_item)
+        var seen: usize = 0
+        while not job.completed():
+            let now = job.progress()
+            assert(now >= seen and now <= 4096)
+            seen = now
+            thread.yield()
+        assert(job.progress() == 4096)
+        try job.wait()
+        check_once(tally, 4096)
+
+test "a job's first error comes back from wait":
+    let tally = try new Tally in memory.heap
+    defer free(tally) in memory.heap
+    for threads in [(usize)1, 4, 0]:
+        for fail_at in [(usize)0, 10, 4095]:
+            for poll in [false, true]:
+                reset(tally, workers(4096, threads))
+                tally.fail_at = fail_at
+                var job = try start(4096, (void*)tally, tally_item, threads = threads)
+                if poll:
+                    while not job.completed():
+                        thread.yield()
+                var caught = false
+                job.wait() catch failure:
+                    assert(failure.code == test_failure and failure.message == "item failed on purpose")
+                    caught = true
+                assert(caught and tally.runs[fail_at] == 0 and not tally.bad_worker.load())
+
+test "many jobs run at once and are waited in any order":
+    let tallies = try new Tally[24] --- in memory.heap
+    defer free(tallies) in memory.heap
+    var jobs: Job[24]
+    for round: usize in 0..<10:
+        for at: usize in 0..<24:
+            let count = 1 + (at * 977 + round * 31) % 4096
+            reset(&tallies[at], workers(count))
+            jobs[at] = try start(count, (void*)&tallies[at], tally_item)
+        for back: usize in 0..<24:
+            let at = 23 - back if round % 2 == 0 else back
+            try jobs[at].wait()
+            check_once(&tallies[at], 1 + (at * 977 + round * 31) % 4096)
+
+## Items slow enough that a job is still running while the caller makes calls of its own.
+struct Slow:
+    var tally: Tally
+    var sums: (@u64)[256]
+
+func slow_item(context: void*, index: usize, worker: usize) -> !:
+    let slow = (Slow*)context
+    var x: u64 = (u64)index + 1
+    for _ in 0..<20000:
+        x = (x * 31 + 7) % 1000003
+    _ = slow.sums[worker].add(x, .relaxed)
+    try tally_item((void*)&slow.tally, index, worker)
+
+test "a job runs beside calls made while it runs":
+    let slow = try new Slow in memory.heap
+    defer free(slow) in memory.heap
+    let tally = try new Tally in memory.heap
+    defer free(tally) in memory.heap
+    for _ in 0..<3:
+        reset(&slow.tally, workers(2048))
+        var job = try start(2048, (void*)slow, slow_item)
+        var calls: usize = 0
+        while not job.completed() or calls < 20:
+            let count = 1 + calls * 131 % 4096
+            reset(tally, workers(count))
+            try for_each(count, (void*)tally, tally_item)
+            check_once(tally, count)
+            calls += 1
+        try job.wait()
+        check_once(&slow.tally, 2048)
+
+test "calls made inside a job's items finish":
+    for _ in 0..<10:
+        var nest = Nest(depth = 2)
+        var job = try start(24, (void*)&nest, nested_item)
+        try job.wait()
+        assert(nest.hits.load(.acquire) == 24 * 24 * 24 and not nest.bad_worker.load())
+
+## A job whose items start jobs of their own: half wait for theirs at once, half poll it
+## first, which must not hang even when every pool thread is on the outer job.
+struct Starter:
+    var hits: @usize
+
+func inner_item(context: void*, index: usize, worker: usize) -> !:
+    _ = index
+    _ = worker
+    _ = ((Starter*)context).hits.add(1, .relaxed)
+
+func starting_item(context: void*, index: usize, worker: usize) -> !:
+    _ = worker
+    var inner = try start(64, context, inner_item)
+    if index % 2 == 1:
+        while not inner.completed():
+            thread.yield()
+    try inner.wait()
+
+test "a job's items start and wait for jobs of their own":
+    for threads in [(usize)0, 2]:
+        for _ in 0..<20:
+            var starter = Starter()
+            var job = try start(48, (void*)&starter, starting_item, threads = threads)
+            try job.wait()
+            assert(starter.hits.load(.acquire) == 48 * 64)

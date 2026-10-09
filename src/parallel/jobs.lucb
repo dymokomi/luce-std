@@ -1,0 +1,77 @@
+#==============================================================================================
+#
+#   jobs - Items started in the background, to poll or wait on later
+#
+#   DESCRIPTION:
+#       `start(count, context, work)` hands `count` items to the pool and returns at once
+#       with a `Job`; the starting thread goes on with its own work, asks `completed()` or
+#       `progress()` now and then, and calls `wait()` once, which helps with any items
+#       still waiting for a thread, returns the first error, and frees the job.
+#
+#==============================================================================================
+
+## Items running in the background, from `start`. The starting thread owns it and uses it
+## from one thread at a time: `completed` and `progress` poll, and `wait` must be called
+## exactly once, whatever happens, since it is what frees the job; a copy of a `Job` names
+## the same job, so only one copy is waited on. A job dropped without `wait` keeps running
+## to its end; its few hundred bytes are never freed and its error is never seen. Either
+## way the context and everything the items touch must stay valid until `wait` returns.
+pub struct Job:
+    var batch: Batch*?
+    var count: usize
+
+    ## Whether every item has returned, or a failure has stopped the job and its running
+    ## items have returned: `wait` then returns at once. It does not block.
+    pub func completed() -> bool:
+        let batch = self.batch else return true
+        waits.lock.lock()
+        let stopped = batch.failed.load(.relaxed) or batch.next.load(.relaxed) >= batch.count
+        let done = stopped and batch.working.load(.relaxed) == 0
+        waits.lock.unlock()
+        return done
+
+    ## How many items have returned so far, failed ones included, out of `count`: for
+    ## reporting progress.
+    pub func progress() -> usize:
+        let batch = self.batch else return self.count
+        return batch.finished.load(.acquire)
+
+    ## Wait for the job's items and free the job: the first error an item returned, if
+    ## any. Items no pool thread has taken yet run here, so a job finishes even when every
+    ## pool thread is busy. Waiting again does nothing.
+    pub func wait() -> !:
+        let batch = self.batch else return
+        self.batch = none
+        defer free(batch) in memory.heap
+        # help with what is left, under the next worker number if there is one
+        waits.lock.lock()
+        var helping = false
+        let worker = batch.taken
+        if batch.queued and batch.taken < batch.slots:
+            batch.taken += 1
+            _ = places.sub(1, .relaxed)
+            helping = true
+        waits.lock.unlock()
+        if helping:
+            work_on(batch, worker)
+        finish(batch)
+        if let code = batch.code:
+            error(code, batch.message)
+
+## Start calling `work(context, index, worker)` for every index below `count` on the pool's
+## threads, at most `workers(count, threads)` of them, and return at once with the `Job`
+## that tracks them; `wait` collects them. Items run as `for_each`'s do on pool threads,
+## each thread's in a runtime context of its own, under worker numbers below
+## `workers(count, threads)`, and the first error stops the rest. Pool threads take
+## `for_each` calls' items before a job's, so a job uses the threads the calls leave idle;
+## a job of long items still holds the threads it has until they return, so leave room
+## with `threads`. On a pool thread, inside another call's or job's item, and when the pool
+## has no thread to give, the items run here before `start` returns: a job never waits on
+## a pool that is busy with its own starter. The only error is running out of memory.
+pub func start(count: usize, context: void*, work: func(void*, usize, usize) -> unit!, threads: usize = 0) -> Job!:
+    if count == 0:
+        return Job(batch = none, count = 0)
+    let batch = try new Batch(context = context, work = work, count = count, background = true, slots = workers(count, threads)) in memory.heap
+    if on_pool or not post(batch):
+        work_on(batch, 0)
+    return Job(batch = batch, count = count)

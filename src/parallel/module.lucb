@@ -1,0 +1,133 @@
+#==============================================================================================
+#
+#   parallel - Independent work items spread over a pool of threads
+#
+#   DESCRIPTION:
+#       `for_each(count, context, work)` calls `work(context, index, worker)` once for every
+#       index below `count`, on the calling thread and the threads of one process-wide pool,
+#       and returns when every call has returned. It is a parallel `for` loop over
+#       independent items, like `pool.map` with a `ThreadPoolExecutor` in Python or
+#       `std::for_each(std::execution::par, ...)` in C++. `start` runs the same kind of
+#       items in the background and hands back a `Job` to poll or wait on, like
+#       `executor.submit` and its future.
+#
+#       The pool starts on the first call that can use it, one thread per processor besides
+#       the caller's, and its threads stay for the life of the process. Two threads out of
+#       work watch for more for a few microseconds, so calls made back to back find them
+#       awake; the rest, and these two after their watch, sleep until a call wakes them: a
+#       program that makes no calls costs no processor time. A call wakes only as many
+#       sleeping threads as it has room for and no watching thread is there to take.
+#       `warm()` starts the pool early. Threads take the next index from a shared counter,
+#       so slow items do not hold up the rest. Items must write disjoint memory: nothing
+#       orders one item against another, and everything the items wrote is visible to the
+#       caller once `for_each` returns.
+#
+#       Workers: `worker` numbers the thread running the item within this one call, below
+#       `workers(count, threads)`. The caller is worker 0, and each pool thread that joins
+#       the call takes the next number for the rest of the call, so no two threads of a call
+#       share one, and items can keep one scratch buffer per worker without locks. The
+#       numbers say nothing about which pool thread runs them, nor stay the same between
+#       calls.
+#
+#       Failure: the first error a `work` call returns stops the threads taking further
+#       indices, so some items may never run; the calls already running finish, and then
+#       `for_each` returns that error. A trap in any item stops the whole program, as a trap
+#       on any thread does.
+#
+#       Nesting and sharing: several threads may call `for_each` at once, and an item may
+#       call it too. Each call's caller works through its own items, so a call finishes even
+#       when every pool thread is busy elsewhere, and the pool's idle threads help whichever
+#       calls have items left, `for_each` calls before started jobs. A call nested in an
+#       item waits only for its own items, which are running, so nesting cannot deadlock.
+#
+#       Managed objects: items the caller runs share its runtime context. On a pool thread
+#       the items of one call run in a runtime context of their own, entered when the thread
+#       joins the call and finished when it leaves, so they may make Luce objects but must
+#       release every one they make, and never touch the caller's: only plain data crosses.
+#
+#       Lifetime: the pool threads never end before the process does; exit simply stops
+#       them. A child made by `fork` has none of them and starts a pool of its own if it
+#       calls `for_each`.
+#
+#==============================================================================================
+import memory
+import os
+import ownership
+import platform
+import strings
+import sync
+import thread
+import time
+
+extern func pthread_atfork(prepare: (func() -> unit)?, parent: (func() -> unit)?, child: (func() -> unit)?) -> i32
+
+## The most threads a call runs on, the caller's included.
+let most_threads: usize = 256
+
+## One per processor, capped at `most_threads`: the widest a call can be.
+var width: @usize
+
+## The number of threads `for_each` uses for `count` items when asked for `threads`, zero
+## meaning one per processor: never more than there are items or processors, and at least
+## one. Worker numbers stay below it, so it sizes per-worker scratch.
+pub func workers(count: usize, threads: usize = 0) -> usize:
+    var n = width.load(.relaxed)
+    if n == 0:
+        let processors = (usize)os.cpus()
+        n = processors if processors < most_threads else most_threads
+        width.store(n, .relaxed)
+    if threads > 0 and threads < n:
+        n = threads
+    if n > count:
+        n = count
+    return n if n > 0 else 1
+
+## Call `work(context, index, worker)` for every index below `count`, on `workers(count,
+## threads)` threads at most, this one included, and return when all are done. The first
+## error from `work` is returned, after the calls already running finish; indices not yet
+## taken are skipped.
+pub func for_each(count: usize, context: void*, work: func(void*, usize, usize) -> unit!, threads: usize = 0) -> !:
+    if count == 0:
+        return
+    # the caller holds worker number 0
+    var batch = Batch(context = context, work = work, count = count, slots = workers(count, threads), taken = 1)
+    let posted = batch.slots > 1 and post(&batch)
+    work_on(&batch, 0)
+    if posted:
+        finish(&batch)
+    if let code = batch.code:
+        error(code, batch.message)
+
+## Start the pool's threads now, and return once every one is running: a program that
+## measures its allocations installs its allocator after this, since a starting thread
+## frees its start block in whatever `memory.heap` is current then.
+pub func warm():
+    waits.lock.lock()
+    start_pool()
+    let threads = pool_threads
+    waits.lock.unlock()
+    while running.load(.acquire) < threads:
+        thread.yield()
+
+## Split `0..<count` into ranges of `chunk` indices, the last one shorter, and call
+## `work(context, start, end, worker)` for each range as `for_each` calls its items: for
+## work too small to schedule one index at a time, such as the rows of an image in bands.
+## `chunk` must be above zero.
+pub func for_each_range(count: usize, chunk: usize, context: void*, work: func(void*, usize, usize, usize) -> unit!, threads: usize = 0) -> !:
+    assert(chunk > 0, "parallel.for_each_range needs a chunk above zero")
+    var ranges = Ranges(context = context, work = work, count = count, chunk = chunk)
+    let pieces = count // chunk + (1 if count % chunk != 0 else 0)
+    try for_each(pieces, (void*)&ranges, range_item, threads)
+
+## The state of a `for_each_range` call.
+struct Ranges:
+    var context: void*
+    var work: func(void*, usize, usize, usize) -> unit!
+    var count: usize
+    var chunk: usize
+
+func range_item(raw: void*, index: usize, worker: usize) -> !:
+    let ranges = (Ranges*)raw
+    let first = index * ranges.chunk
+    let end = first + ranges.chunk if ranges.count - first > ranges.chunk else ranges.count
+    try ranges.work(ranges.context, first, end, worker)
