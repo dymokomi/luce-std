@@ -75,7 +75,8 @@ pub func current_directory() -> interop.Owned[str]!:
         var directory: str
         with memory.heap:
             directory = os.cwd() catch failure:
-                error(failed, failure.message)
+                # Running out of memory stays itself, as on the other systems.
+                error(failure.code if failure.code == memory.exhausted else failed, failure.message)
         defer:
             with memory.heap:
                 strings.release(directory)
