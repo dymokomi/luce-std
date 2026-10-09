@@ -1,34 +1,71 @@
 #==============================================================================================
 #
-#   parallel - Independent work items spread over threads
+#   parallel - Independent work items spread over a pool of threads
 #
 #   DESCRIPTION:
 #       `for_each(count, context, work)` calls `work(context, index, worker)` once for every
-#       index below `count`, on one thread per processor or as many as asked, the caller's
-#       thread among them, and returns when every call has returned. It is a parallel `for`
-#       loop over independent items, like `pool.map` with a `ThreadPoolExecutor` in Python
-#       or `std::for_each(std::execution::par, ...)` in C++; threads start with the call and
-#       end with it, so there is no pool to keep.
+#       index below `count`, on the calling thread and the threads of one process-wide pool,
+#       and returns when every call has returned. It is a parallel `for` loop over
+#       independent items, like `pool.map` with a `ThreadPoolExecutor` in Python or
+#       `std::for_each(std::execution::par, ...)` in C++.
 #
-#       The threads take the next index from a shared counter, so slow items do not hold up
-#       the rest. Items must write disjoint memory: nothing orders one item against another,
-#       and everything the items wrote is visible to the caller once `for_each` returns.
-#       `worker` numbers the thread running the item, below `workers(count, threads)`, so
-#       items can reuse one scratch buffer per thread.
+#       The pool starts on the first call that can use it, one thread per processor besides
+#       the caller's, and its threads stay for the life of the process, asleep when there is
+#       nothing to do, so a call costs a wake and not a thread start. `warm()` starts it
+#       early. Threads take the next index from a shared counter, so slow items do not hold
+#       up the rest. Items must write disjoint memory: nothing orders one item against
+#       another, and everything the items wrote is visible to the caller once `for_each`
+#       returns.
+#
+#       Workers: `worker` numbers the thread running the item within this one call, below
+#       `workers(count, threads)`. The caller is worker 0, and each pool thread that joins
+#       the call takes the next number for the rest of the call, so no two threads of a call
+#       share one, and items can keep one scratch buffer per worker without locks. The
+#       numbers say nothing about which pool thread runs them, nor stay the same between
+#       calls.
 #
 #       Failure: the first error a `work` call returns stops the threads taking further
 #       indices, so some items may never run; the calls already running finish, and then
 #       `for_each` returns that error. A trap in any item stops the whole program, as a trap
 #       on any thread does.
 #
+#       Nesting and sharing: several threads may call `for_each` at once, and an item may
+#       call it too. Each call's caller works through its own items, so a call finishes even
+#       when every pool thread is busy elsewhere, and the pool's idle threads help whichever
+#       calls have items left. A call nested in an item waits only for its own items, which
+#       are running, so nesting cannot deadlock.
+#
+#       Managed objects: items the caller runs share its runtime context. On a pool thread
+#       the items of one call run in a runtime context of their own, entered when the thread
+#       joins the call and finished when it leaves, so they may make Luce objects but must
+#       release every one they make, and never touch the caller's: only plain data crosses.
+#
+#       Lifetime: the pool threads never end before the process does; exit simply stops
+#       them. A child made by `fork` has none of them and starts a pool of its own if it
+#       calls `for_each`.
+#
 #==============================================================================================
-import memory
 import os
+import ownership
+import platform
 import strings
+import sync
 import thread
+import time
 
-## The state the threads of one run share.
-struct Run:
+extern func pthread_atfork(prepare: (func() -> unit)?, parent: (func() -> unit)?, child: (func() -> unit)?) -> i32
+
+## The most threads a call runs on, the caller's included.
+let most_threads: usize = 256
+## How long an idle pool thread watches for new work before it sleeps, and a caller for
+## its call's last items before it sleeps, in nanoseconds: a call made soon after another
+## then finds the threads awake.
+let worker_spin: u64 = 50000
+let caller_spin: u64 = 20000
+
+## One call's items: on the caller's stack, in the pool's queue while it has items to hand
+## out, and kept until no pool thread is on it.
+struct Job:
     var context: void*
     var work: func(void*, usize, usize) -> unit!
     var count: usize
@@ -39,77 +76,245 @@ struct Run:
     var code: ErrorCode?
     var room: u8[512]
     var message: str
+    ## Under `lock`: how many pool threads may join, how many have (the last one joined is
+    ## worker `joined`), whether its caller sleeps until they leave, and its place in the
+    ## queue. `working` counts the pool threads on it now; it changes under `lock`, and the
+    ## caller watches it.
+    var helpers: usize
+    var joined: usize
+    var waiting: bool
+    var working: @usize
+    var queued: bool
+    var after: Job*?
 
-## What one thread is given: the run, and its worker number.
-struct Share:
-    var run: Run*?
-    var worker: usize
-
-func run_worker(raw: void*?):
-    let share = (Share*)(raw else return)
-    let run = share.run else return
-    while not run.failed.load(.acquire):
-        let index = run.next.add(1, .relaxed)
-        if index >= run.count:
-            return
-        run.work(run.context, index, share.worker) catch failure:
-            # the first thread to fail keeps its error; the others' are dropped
-            if not run.failed.swap(true, .acq_rel):
-                run.code = failure.code
-                run.message = strings.copy_into(run.room, failure.message)
-            return
+## The pool, guarded by `lock`: the calls with items to hand out, oldest first, and the
+## threads. `places` counts the pool threads the queued calls still take, for idle threads
+## watching for work without the lock; it changes under the lock. `relay` counts the sleeping
+## threads the calls still want woken, each woken thread waking up to two more, so a caller
+## pays for one wake however many threads it wants.
+var lock: sync.Mutex
+var work_ready: sync.Condition
+var job_done: sync.Condition
+var first_job: Job*? = none
+var last_job: Job*? = none
+var started: bool = false
+var pool_threads: usize = 0
+var sleeping: usize = 0
+var relay: usize = 0
+var places: @usize
+var running: @usize
+## One per processor, capped at `most_threads`: the widest a call can be.
+var width: @usize
 
 ## The number of threads `for_each` uses for `count` items when asked for `threads`, zero
-## meaning one per processor: never more than there are items, and at least one. Worker
-## numbers stay below it, so it sizes per-thread scratch.
+## meaning one per processor: never more than there are items or processors, and at least
+## one. Worker numbers stay below it, so it sizes per-worker scratch.
 pub func workers(count: usize, threads: usize = 0) -> usize:
-    var n = threads if threads > 0 else (usize)os.cpus()
+    var n = width.load(.relaxed)
+    if n == 0:
+        let processors = (usize)os.cpus()
+        n = processors if processors < most_threads else most_threads
+        width.store(n, .relaxed)
+    if threads > 0 and threads < n:
+        n = threads
     if n > count:
         n = count
     return n if n > 0 else 1
 
 ## Call `work(context, index, worker)` for every index below `count`, on `workers(count,
-## threads)` threads, and return when all are done. The first error from `work` is
-## returned, after the calls already running finish; indices not yet taken are skipped.
+## threads)` threads at most, this one included, and return when all are done. The first
+## error from `work` is returned, after the calls already running finish; indices not yet
+## taken are skipped.
 pub func for_each(count: usize, context: void*, work: func(void*, usize, usize) -> unit!, threads: usize = 0) -> !:
     if count == 0:
         return
-    var run = Run(context = context, work = work, count = count)
+    var job = Job(context = context, work = work, count = count)
     let n = workers(count, threads)
-    if n == 1:
-        var share = Share(run = &run, worker = 0)
-        run_worker((void*)&share)
-    else:
-        let shares = try new Share[n] in memory.heap
-        defer free(shares) in memory.heap
-        let handles = try new thread.Handle[n] in memory.heap
-        defer free(handles) in memory.heap
-        for at in 0..<n:
-            shares[at] = Share(run = &run, worker = at)
-        # A thread the system will not start leaves its share of the items to the others.
-        var started: usize = 0
-        for at in 1..<n:
-            handles[started] = thread.spawn(run_worker, (void*)&shares[at], name = "luce-parallel") catch failure:
-                break
-            started += 1
-        run_worker((void*)&shares[0])
-        for at in 0..<started:
-            try handles[at].join()
-    if let code = run.code:
-        error(code, run.message)
+    if n > 1:
+        post(&job, n - 1)
+    work_on(&job, 0)
+    if n > 1:
+        finish(&job)
+    if let code = job.code:
+        error(code, job.message)
 
-## The state of a `for_each_range` run.
-struct Ranges:
-    var context: void*
-    var work: func(void*, usize, usize, usize) -> unit!
-    var count: usize
-    var chunk: usize
+## Start the pool's threads now, and return once every one is running: a program that
+## measures its allocations installs its allocator after this, since a starting thread
+## frees its start block in whatever `memory.heap` is current then.
+pub func warm():
+    lock.lock()
+    start_pool()
+    let threads = pool_threads
+    lock.unlock()
+    while running.load(.acquire) < threads:
+        thread.yield()
 
-func range_item(raw: void*, index: usize, worker: usize) -> !:
-    let ranges = (Ranges*)raw
-    let start = index * ranges.chunk
-    let end = start + ranges.chunk if ranges.count - start > ranges.chunk else ranges.count
-    try ranges.work(ranges.context, start, end, worker)
+## Take `job`'s indices until none are left or one has failed, as worker `worker`.
+func work_on(job: Job*, worker: usize):
+    while not job.failed.load(.acquire):
+        let index = job.next.add(1, .relaxed)
+        if index >= job.count:
+            return
+        job.work(job.context, index, worker) catch failure:
+            # the first thread to fail keeps its error; the others' are dropped
+            if not job.failed.swap(true, .acq_rel):
+                job.code = failure.code
+                job.message = strings.copy_into(job.room, failure.message)
+            return
+
+## Queue `job` for up to `helpers` pool threads. Threads watching for work see it at once;
+## of those asleep, wake one, after letting go of the lock it will want, and leave it to wake
+## the rest: waking many at once costs the waker tens of microseconds on macOS.
+func post(job: Job*, helpers: usize):
+    lock.lock()
+    start_pool()
+    job.helpers = helpers if helpers < pool_threads else pool_threads
+    var wake = false
+    if job.helpers > 0:
+        job.queued = true
+        if let last = last_job:
+            last.after = job
+        else:
+            first_job = job
+        last_job = job
+        _ = places.add(job.helpers, .release)
+        let wanted = job.helpers if job.helpers < sleeping else sleeping
+        if wanted > 0:
+            relay += wanted - 1
+            wake = true
+    lock.unlock()
+    if wake:
+        work_ready.signal()
+
+## Wait until no pool thread is on `job` and take it off the queue; after this its caller
+## may let it go. The caller has taken every index it could, so the threads still on it are
+## finishing their last items: watch them for a moment, then sleep.
+func finish(job: Job*):
+    let start = time.now()
+    while job.working.load(.acquire) > 0 and time.since(start) < caller_spin:
+        thread.pause()
+    lock.lock()
+    unlink(job)
+    while job.working.load(.acquire) > 0:
+        job.waiting = true
+        job_done.wait(&lock)
+    lock.unlock()
+
+## Drop `job` from the queue if it is there; under `lock`.
+func unlink(job: Job*):
+    if not job.queued:
+        return
+    job.queued = false
+    _ = places.sub(job.helpers - job.joined, .relaxed)
+    var previous: Job*? = none
+    var cursor = first_job
+    while let current = cursor:
+        if current == job:
+            if let before = previous:
+                before.after = current.after
+            else:
+                first_job = current.after
+            if last_job == job:
+                last_job = previous
+            return
+        previous = cursor
+        cursor = current.after
+
+## A queued call with items left and room for one more pool thread; calls with nothing
+## left to hand out leave the queue. Under `lock`.
+func next_job() -> Job*?:
+    var cursor = first_job
+    while let job = cursor:
+        cursor = job.after
+        if job.next.load(.relaxed) >= job.count or job.failed.load(.relaxed):
+            unlink(job)
+            continue
+        if job.joined < job.helpers:
+            return job
+    return none
+
+## Start the pool's threads the first time it is used; under `lock`.
+func start_pool():
+    if started:
+        return
+    started = true
+    if not platform.windows:
+        _ = pthread_atfork(none, none, forget_pool)
+    let threads = workers(most_threads) - 1
+    for _ in 0..<threads:
+        let handle = thread.spawn(pool_thread, none, name = "luce-parallel") catch failure:
+            # fewer threads only means less help: callers do the rest
+            break
+        handle.detach()
+        pool_threads += 1
+
+## In a child made by `fork`, which has the parent's memory but none of its threads: no
+## pool, and a lock some other thread of the parent may have held.
+func forget_pool():
+    lock = sync.Mutex()
+    work_ready = sync.Condition()
+    job_done = sync.Condition()
+    first_job = none
+    last_job = none
+    started = false
+    pool_threads = 0
+    sleeping = 0
+    relay = 0
+    places.store(0, .relaxed)
+    running.store(0, .relaxed)
+
+## A pool thread: join calls with items left, and when there are none, watch for a while
+## for the next one and then sleep until one is posted.
+func pool_thread(raw: void*?):
+    _ = raw
+    _ = running.add(1, .release)
+    lock.lock()
+    while true:
+        if let job = next_job():
+            job.joined += 1
+            _ = places.sub(1, .relaxed)
+            let worker = job.joined
+            _ = job.working.add(1, .relaxed)
+            lock.unlock()
+            ownership.enter()
+            work_on(job, worker)
+            ownership.finish_task()
+            lock.lock()
+            if job.working.sub(1, .release) == 1 and job.waiting:
+                job_done.broadcast()
+            continue
+        lock.unlock()
+        if watch():
+            continue
+        lock.lock()
+        if places.load(.acquire) > 0:
+            continue
+        sleeping += 1
+        work_ready.wait(&lock)
+        sleeping -= 1
+        # wake up to two more sleepers while a call still has room; once none has, stop
+        var wake: usize = 0
+        if relay > 0 and sleeping > 0 and next_job() != none:
+            wake = 2 if relay >= 2 and sleeping >= 2 else 1
+            relay -= wake
+        else:
+            relay = 0
+        if wake > 0:
+            lock.unlock()
+            for _ in 0..<wake:
+                work_ready.signal()
+            lock.lock()
+
+## Watch `places` for a while, and when a call has room take the lock if it is free:
+## whether it was taken. Only threads that see room try, so a call wanting one thread does
+## not have every idle one queue on the lock.
+func watch() -> bool:
+    let start = time.now()
+    while time.since(start) < worker_spin:
+        if places.load(.acquire) > 0 and lock.try_lock():
+            return true
+        thread.pause()
+    return false
 
 ## Split `0..<count` into ranges of `chunk` indices, the last one shorter, and call
 ## `work(context, start, end, worker)` for each range as `for_each` calls its items: for
@@ -121,74 +326,15 @@ pub func for_each_range(count: usize, chunk: usize, context: void*, work: func(v
     let pieces = count // chunk + (1 if count % chunk != 0 else 0)
     try for_each(pieces, (void*)&ranges, range_item, threads)
 
-# mark: Tests =================================================================================
+## The state of a `for_each_range` call.
+struct Ranges:
+    var context: void*
+    var work: func(void*, usize, usize, usize) -> unit!
+    var count: usize
+    var chunk: usize
 
-let test_failure: ErrorCode = ErrorCode.package(1)
-
-## What the tests' items record: how often each index ran, and on which worker.
-struct Tally:
-    var runs: (@u32)[4096]
-    var worker_limit: usize
-    var bad_worker: @bool
-    var fail_at: usize
-
-func tally_item(context: void*, index: usize, worker: usize) -> !:
-    let tally = (Tally*)context
-    if worker >= tally.worker_limit:
-        tally.bad_worker.store(true)
-    if index == tally.fail_at:
-        error(test_failure, "item failed on purpose")
-    _ = tally.runs[index].add(1, .relaxed)
-
-func tally_range(context: void*, start: usize, end: usize, worker: usize) -> !:
-    for index in start..<end:
-        try tally_item(context, index, worker)
-
-test "every index runs once, on a worker below workers()":
-    let tally = try new Tally in memory.heap
-    defer free(tally) in memory.heap
-    for threads in [(usize)0, 1, 3, 64]:
-        for count in [(usize)0, 1, 2, 7, 4096]:
-            for at: usize in 0..<4096:
-                tally.runs[at] = 0
-            tally.worker_limit = workers(count, threads)
-            tally.bad_worker = false
-            tally.fail_at = 4096
-            try for_each(count, (void*)tally, tally_item, threads = threads)
-            assert(not tally.bad_worker.load())
-            for at: usize in 0..<4096:
-                assert(tally.runs[at] == (1 if at < count else 0))
-    assert(workers(0) == 1 and workers(5, 3) == 3 and workers(2, 8) == 2 and workers(1000) >= 1)
-
-test "ranges cover the count exactly":
-    let tally = try new Tally in memory.heap
-    defer free(tally) in memory.heap
-    for chunk in [(usize)1, 3, 64, 5000]:
-        for count in [(usize)0, 1, 63, 64, 65, 4096]:
-            for at: usize in 0..<4096:
-                tally.runs[at] = 0
-            tally.worker_limit = workers(count // chunk + 1)
-            tally.bad_worker = false
-            tally.fail_at = 4096
-            try for_each_range(count, chunk, (void*)tally, tally_range)
-            assert(not tally.bad_worker.load())
-            for at: usize in 0..<4096:
-                assert(tally.runs[at] == (1 if at < count else 0))
-
-test "an item's error is returned and later items may be skipped":
-    let tally = try new Tally in memory.heap
-    defer free(tally) in memory.heap
-    for threads in [(usize)1, 4]:
-        for at: usize in 0..<4096:
-            tally.runs[at] = 0
-        tally.worker_limit = threads
-        tally.fail_at = 10
-        var caught = false
-        for_each(4096, (void*)tally, tally_item, threads = threads) catch failure:
-            assert(failure.code == test_failure)
-            caught = true
-        assert(caught and tally.runs[10] == 0)
-        if threads == 1:
-            # one thread takes the indices in order and stops at the failure
-            for at: usize in 0..<4096:
-                assert(tally.runs[at] == (1 if at < 10 else 0))
+func range_item(raw: void*, index: usize, worker: usize) -> !:
+    let ranges = (Ranges*)raw
+    let start = index * ranges.chunk
+    let end = start + ranges.chunk if ranges.count - start > ranges.chunk else ranges.count
+    try ranges.work(ranges.context, start, end, worker)

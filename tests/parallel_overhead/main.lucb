@@ -1,0 +1,82 @@
+## What one `parallel.for_each` call costs when its items do nearly nothing: the time of
+## a call over a few tiny items, averaged over many calls, printed for a person to read.
+## Timings vary with the machine and its load, so only that every item ran is checked.
+import os
+import parallel
+import sort
+import thread
+import time
+
+struct Tally:
+    var hits: @usize
+
+func touch(context: void*, index: usize, worker: usize) -> !:
+    _ = index
+    _ = worker
+    _ = ((Tally*)context).hits.add(1, .relaxed)
+
+## Microseconds per call, best of five rounds of `calls` calls over `count` items.
+func per_call(count: usize, calls: usize) -> f64!:
+    var tally = Tally()
+    var best: u64 = 0
+    for round in 0..<5:
+        let start = time.now()
+        for _ in 0..<calls:
+            try parallel.for_each(count, (void*)&tally, touch)
+        let elapsed = time.since(start)
+        if round == 0 or elapsed < best:
+            best = elapsed
+    assert(tally.hits.load(.acquire) == count * calls * 5)
+    return (f64)best / (f64)calls / 1000.0
+
+## An item that takes some microseconds: a sum the optimizer cannot drop.
+func busy(context: void*, index: usize, worker: usize) -> !:
+    _ = worker
+    var x: u64 = (u64)index + 1
+    for _ in 0..<20000:
+        x = (x * 31 + 7) % 1000003
+    _ = ((Tally*)context).hits.add(1 if x < 1000003 else 0, .relaxed)
+
+## Milliseconds for `count` busy items on `threads` threads, best of three.
+func busy_time(count: usize, threads: usize) -> f64!:
+    var best: u64 = 0
+    for round in 0..<3:
+        var tally = Tally()
+        let start = time.now()
+        try parallel.for_each(count, (void*)&tally, busy, threads = threads)
+        let elapsed = time.since(start)
+        assert(tally.hits.load(.acquire) >= count)
+        if round == 0 or elapsed < best:
+            best = elapsed
+    return (f64)best / 1000000.0
+
+## Microseconds per call when the calls come a millisecond apart, so the pool's threads
+## have gone to sleep: the median of `calls` calls.
+func per_idle_call(count: usize, calls: usize) -> f64!:
+    var tally = Tally()
+    var times: u64[64]
+    let taken = calls if calls < 64 else 64
+    for at in 0..<taken:
+        thread.sleep(1)
+        let start = time.now()
+        try parallel.for_each(count, (void*)&tally, touch)
+        times[at] = time.since(start)
+    assert(tally.hits.load(.acquire) == count * taken)
+    sort.sort(times[..<taken])
+    return (f64)times[taken // 2] / 1000.0
+
+pub func main(arguments: str[]) -> i32!:
+    _ = arguments
+    let processors = (usize)os.cpus()
+    # the first call may start threads; it is not measured
+    _ = try per_call(processors, 1)
+    for count in [(usize)1, 2, processors, 64 * processors]:
+        let micros = try per_call(count, 2000)
+        print(f"parallel.for_each over {count} tiny items: {micros} us per call")
+    for count in [(usize)2, processors]:
+        let micros = try per_idle_call(count, 64)
+        print(f"parallel.for_each over {count} tiny items, 1 ms after the last call: {micros} us per call")
+    let alone = try busy_time(1024, 1)
+    let spread = try busy_time(1024, 0)
+    print(f"1024 busy items: {alone} ms on one thread, {spread} ms on {parallel.workers(1024)}")
+    return 0

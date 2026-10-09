@@ -18,7 +18,7 @@ Base and serves Luce and Base programs alike.
 | `from luce_std import math` | The mathematical functions |
 | `from luce_std import math32` | Single-precision mathematical functions |
 | `from luce_std import sort` | Sorting Base arrays in place without allocating: `sort(values)`, `by(values, less)`, `using(values, context, less)` (introsort, O(n log n), not stable); `stable` and `stable_using` keep equal values in order; `order` and `order_by` write the indices that would sort an array (argsort). Luce lists have `sort` and `sorted` of their own |
-| `from luce_std import parallel` | A parallel `for` over independent items for Base: `for_each(count, context, work)` runs `work(context, index, worker)` on one thread per processor, `for_each_range` hands out chunks of indices |
+| `from luce_std import parallel` | A parallel `for` over independent items for Base: `for_each(count, context, work)` runs `work(context, index, worker)` on the caller and a process-wide pool of one thread per processor, started once and kept, so a call costs microseconds; `worker` is below `workers(count)` and unique to one thread for the call, for per-worker scratch; the first error is returned; calls nest and may come from many threads; `for_each_range` hands out chunks of indices; `warm` starts the pool early |
 | `from luce_std import unicode` | Unicode 17.0.0 casing and normalization |
 | `from luce_std import utf8` | Strict UTF-8 scalar encoding and decoding |
 | `from luce_std import collections` | Growable storage for Base: `List[T]`, a byte `Buffer`, and a `TextPool` of copies that never move |

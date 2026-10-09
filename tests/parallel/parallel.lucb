@@ -1,0 +1,181 @@
+## The `parallel` module: every index runs once on a worker number below `workers()`, call
+## after call; per-worker scratch needs no lock; the first error comes back; calls nest and
+## run from several threads at once.
+import memory
+
+let test_failure: ErrorCode = ErrorCode.package(1)
+
+## What the tests' items record: how often each index ran, and on which worker.
+struct Tally:
+    var runs: (@u32)[4096]
+    var worker_limit: usize
+    var bad_worker: @bool
+    var fail_at: usize
+
+func tally_item(context: void*, index: usize, worker: usize) -> !:
+    let tally = (Tally*)context
+    if worker >= tally.worker_limit:
+        tally.bad_worker.store(true)
+    if index == tally.fail_at:
+        error(test_failure, "item failed on purpose")
+    _ = tally.runs[index].add(1, .relaxed)
+
+func tally_range(context: void*, start: usize, end: usize, worker: usize) -> !:
+    for index in start..<end:
+        try tally_item(context, index, worker)
+
+func reset(tally: Tally*, worker_limit: usize):
+    for at: usize in 0..<4096:
+        tally.runs[at] = 0
+    tally.worker_limit = worker_limit
+    tally.bad_worker = false
+    tally.fail_at = 4096
+
+func check_once(tally: Tally*, count: usize):
+    assert(not tally.bad_worker.load())
+    for at: usize in 0..<4096:
+        assert(tally.runs[at] == (1 if at < count else 0))
+
+test "every index runs once, on a worker below workers()":
+    let tally = try new Tally in memory.heap
+    defer free(tally) in memory.heap
+    for threads in [(usize)0, 1, 3, 64]:
+        for count in [(usize)0, 1, 2, 7, 4096]:
+            reset(tally, workers(count, threads))
+            try for_each(count, (void*)tally, tally_item, threads = threads)
+            check_once(tally, count)
+    let processors = (usize)os.cpus()
+    let most = processors if processors < most_threads else most_threads
+    assert(workers(0) == 1 and workers(1000) == (most if most < 1000 else 1000))
+    assert(workers(5, 3) == (3 if most > 3 else most) and workers(2, 8) == (2 if most > 2 else most))
+    assert(workers(1, 0) == 1 and workers(1000, 1) == 1)
+
+test "many calls in a row all run every index once":
+    warm()
+    let tally = try new Tally in memory.heap
+    defer free(tally) in memory.heap
+    for call: usize in 0..<2000:
+        let count = call % 67
+        reset(tally, workers(count))
+        try for_each(count, (void*)tally, tally_item)
+        check_once(tally, count)
+
+test "ranges cover the count exactly":
+    let tally = try new Tally in memory.heap
+    defer free(tally) in memory.heap
+    for chunk in [(usize)1, 3, 64, 5000]:
+        for count in [(usize)0, 1, 63, 64, 65, 4096]:
+            reset(tally, workers(count // chunk + 1))
+            try for_each_range(count, chunk, (void*)tally, tally_range)
+            check_once(tally, count)
+
+test "an item's error is returned and later items may be skipped":
+    let tally = try new Tally in memory.heap
+    defer free(tally) in memory.heap
+    for threads in [(usize)1, 4, 0]:
+        for fail_at in [(usize)0, 10, 4095]:
+            for _ in 0..<20:
+                reset(tally, workers(4096, threads))
+                tally.fail_at = fail_at
+                var caught = false
+                for_each(4096, (void*)tally, tally_item, threads = threads) catch failure:
+                    assert(failure.code == test_failure and failure.message == "item failed on purpose")
+                    caught = true
+                assert(caught and tally.runs[fail_at] == 0 and not tally.bad_worker.load())
+                if threads == 1:
+                    # one thread takes the indices in order and stops at the failure
+                    for at: usize in 0..<4096:
+                        assert(tally.runs[at] == (1 if at < fail_at else 0))
+
+## Per-worker scratch: plain sums no other thread touches, and a flag that catches two
+## threads holding one worker number at once.
+struct Scratch:
+    var sums: u64[256]
+    var busy: (@bool)[256]
+    var shared: @bool
+
+func scratch_item(context: void*, index: usize, worker: usize) -> !:
+    let scratch = (Scratch*)context
+    if scratch.busy[worker].swap(true, .acquire):
+        scratch.shared.store(true)
+    scratch.sums[worker] += (u64)index
+    # long enough for other threads to be inside items too
+    var spin: u64 = 0
+    for step: u64 in 0..<(u64)(index % 200):
+        spin += step
+    scratch.sums[worker] += spin - spin
+    scratch.busy[worker].store(false, .release)
+
+test "each worker number belongs to one thread for the whole call":
+    let scratch = try new Scratch in memory.heap
+    defer free(scratch) in memory.heap
+    for round: usize in 0..<200:
+        let count = 1 + round * 37 % 5000
+        for at: usize in 0..<256:
+            scratch.sums[at] = 0
+        try for_each(count, (void*)scratch, scratch_item)
+        assert(not scratch.shared.load())
+        var total: u64 = 0
+        for at: usize in 0..<256:
+            assert(at < workers(count) or scratch.sums[at] == 0)
+            total += scratch.sums[at]
+        assert(total == (u64)count * (u64)(count - 1) // 2)
+
+## A call inside each item: every inner index of every outer item runs once.
+struct Nest:
+    var depth: usize
+    var hits: @usize
+    var bad_worker: @bool
+
+func nested_item(context: void*, index: usize, worker: usize) -> !:
+    _ = index
+    let nest = (Nest*)context
+    if worker >= workers(24):
+        nest.bad_worker.store(true)
+    if nest.depth == 0:
+        _ = nest.hits.add(1, .relaxed)
+        return
+    var inner = Nest(depth = nest.depth - 1)
+    try for_each(24, (void*)&inner, nested_item)
+    _ = nest.hits.add(inner.hits.load(.acquire), .relaxed)
+    if inner.bad_worker.load():
+        nest.bad_worker.store(true)
+
+test "calls made inside items finish":
+    for _ in 0..<20:
+        var nest = Nest(depth = 2)
+        try for_each(24, (void*)&nest, nested_item)
+        assert(nest.hits.load(.acquire) == 24 * 24 * 24 and not nest.bad_worker.load())
+
+## A thread making calls of its own while others do the same.
+struct Caller:
+    var calls: usize
+    var failed: @bool
+
+func calling_thread(raw: void*?):
+    let caller = (Caller*)(raw else return)
+    let tally = new Tally in memory.heap catch failure:
+        caller.failed.store(true)
+        return
+    defer free(tally) in memory.heap
+    for call: usize in 0..<caller.calls:
+        let count = (call * 131) % 4097
+        reset(tally, workers(count))
+        for_each(count, (void*)tally, tally_item) catch failure:
+            caller.failed.store(true)
+            return
+        if tally.bad_worker.load():
+            caller.failed.store(true)
+        for at: usize in 0..<4096:
+            if tally.runs[at] != (1 if at < count else 0):
+                caller.failed.store(true)
+
+test "several threads call at once":
+    var callers: Caller[6]
+    var handles: thread.Handle[6]
+    for at: usize in 0..<6:
+        callers[at] = Caller(calls = 300)
+        handles[at] = try thread.spawn(calling_thread, (void*)&callers[at])
+    for at: usize in 0..<6:
+        try handles[at].join()
+        assert(not callers[at].failed.load())
