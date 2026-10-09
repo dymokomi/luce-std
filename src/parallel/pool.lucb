@@ -53,12 +53,11 @@ struct Batch:
 
 ## The pool's lock, the condition idle threads sleep on, and the one owners sleep on until
 ## the pool threads leave their batch, each 64 bytes from the others and from whatever lies
-## around them. LUCE-BUG: on Windows, waking an address with WakeByAddressSingle, as a
-## contended `sync.Mutex` does on unlock, also wakes threads waiting in WaitOnAddress on an
-## address 8 or 16 bytes away (32 and more are left alone), and `sync.Condition.wait`
-## returns on such a wake; side by side, every contended unlock woke the sleeping pool
-## threads, which then fought for the lock, and a call over two items took 10 us instead
-## of 0.5. Drop the gaps once luce-base's Mutex and Condition keep such wakes from callers.
+## around them. On Windows a thread in WaitOnAddress often returns when a thread waiting on
+## an address less than 32 bytes from its own is woken; `sync` sleeps again then, so no
+## wait returns early, but each such return is a context switch. Side by side, contended
+## unlocks of the lock cost the sleeping pool threads those: a call over 20 tiny items took
+## 10.5 us instead of 6.2 there (on Linux and macOS the gaps make no difference).
 struct Waits:
     var before: u8[64]
     var lock: sync.Mutex
