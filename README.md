@@ -14,6 +14,7 @@ Base and serves Luce and Base programs alike.
 | `from luce_std import process` | Running programs (`run`, background `Command`), environment variables, the working directory |
 | `from luce_std import net` | TCP connections and listeners by host name, name lookup, UDP; HTTP and WebSocket wire formats for Base; for event loops, connects that do not wait (`Connection.start_connect`, `finish_connect`) and name lookups on a thread of their own (`Lookup`) |
 | `from luce_std import clock` | The monotonic clock, durations, sleeping, calendar dates and ISO 8601 |
+| `from luce_std import ramp` | Houdini's ramp parameter (VEX `chramp`): a value or a color along 0..1 from points, each with a position, a value or color and an interpolation (`constant`, `linear`, `smooth` Catmull-Rom, `monotone` cubic, `bspline`), kept as a flat `f64` list; `lookup(data, t)`, `lookup_color` and `lookup_into` read it without allocating, `check(data)` validates it. See [Ramps](#ramps) |
 | `from luce_std import random` | A seeded pseudo-random generator |
 | `from luce_std import math` | The mathematical functions |
 | `from luce_std import math32` | Single-precision mathematical functions |
@@ -128,6 +129,49 @@ let name = try pool.keep_text(column_bytes)
   `truncate`, `view`, `text`, `terminated`, `length`, `reserve`, `clear`, `destroy`.
 - `TextPool`: `keep(bytes)`, `keep_text(bytes)` (cut where the bytes stop being valid UTF-8),
   `destroy`. Copies go into 64 KiB chunks; a larger one gets a chunk of its own.
+
+### Ramps
+
+A ramp is a list of numbers a host keeps as it is (a node's values, a document's settings)
+and `ramp.lookup` evaluates; luce-ui's `ParameterPanel` edits one and draws its preview
+through the same function, so an editor and a cook never disagree. Version 1:
+
+| index | holds |
+| --- | --- |
+| 0 | `1`, the version |
+| 1 | channels: `1` a float ramp, `3` an RGB color ramp (`2` and `4` are read as well; the fourth is alpha) |
+| 2 | the number of points, at least 1 |
+| then, per point | `channels + 2` numbers: the position (0..1), the channels, the interpolation code |
+
+A float ramp of `n` points is `3 + 3n` numbers, an RGB ramp `3 + 5n`; `ramp.size(channels,
+count)` says so. Points are sorted by position; two at one position make a step. The code
+of point `i` decides the segment from it to point `i + 1` (the last point's is kept, unused):
+
+| code | `Interpolation` | between points `i` and `i + 1`, `u` along the segment |
+| --- | --- | --- |
+| 0 | `constant` | point `i`'s value |
+| 1 | `linear` | the straight line |
+| 2 | `smooth` | Catmull-Rom: a cubic Hermite whose slope at a point is the line from the point before to the point after, zero at the first and last point and beside a step (two points ease in and out) |
+| 3 | `monotone` | Fritsch–Carlson's monotone cubic with PCHIP's slopes: zero where the values turn, a weighted harmonic mean of the two secants elsewhere, PCHIP's limited three-point rule at the ends; never goes past its points |
+| 4 | `bspline` | the uniform cubic B-spline with the points as control points, passing near the inner points; a control point missing beyond an end or a step is the end reflected through its neighbour, so the curve still starts and ends on the end points |
+
+Before the first point and after the last the ramp holds their values; a NaN `t` gives the
+first. Each channel is interpolated alone, and every rule reads only the points around the
+segment, so a lookup is a bisection and a few multiplications.
+
+```lucb
+from luce_std import ramp
+
+try ramp.check(data)                     # once, when the data arrives
+let falloff = ramp.lookup(data, distance)        # channel 0
+let tint = ramp.lookup_color(data, t)            # ramp.Color: red, green, blue, alpha
+var lanes: f64[4]
+let channels = ramp.lookup_into(data, t, lanes[0..])
+```
+
+`lookup` never fails: data `check` would refuse answers 0 (or black), and an unknown code
+reads as linear. `ramp.copy(data)` answers a copy as an owned list, for a host handing the
+ramp it keeps to Luce, which sees it as a `list[float]`.
 
 ## Depends on
 

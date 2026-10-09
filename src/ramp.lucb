@@ -1,0 +1,301 @@
+#==============================================================================================
+#
+#   ramp - A value or a color along 0..1, from a few points
+#
+#   DESCRIPTION:
+#       Houdini's ramp parameter, the data VEX's `chramp` reads: points at positions in 0..1,
+#       each with a value (a float ramp) or a color (a color ramp), and the interpolation of
+#       the segment that starts at it. A ramp is a flat list of numbers a host stores as it
+#       is; `lookup` reads it without allocating, so an editor's preview and a cook's lanes
+#       evaluate the same curve.
+#
+#       The list, version 1:
+#
+#           [0]  1, the version
+#           [1]  channels: 1 for a float ramp, 3 for an RGB color ramp (2 and 4 also read)
+#           [2]  the number of points, at least 1
+#           then each point, channels + 2 numbers: its position, its channels, its
+#           interpolation code (`Interpolation`)
+#
+#       Points are sorted by position; two at one position make a step. Before the first
+#       point and after the last the ramp holds their values. Between points `i` and
+#       `i + 1`, with `u` how far along the segment `t` is, point `i`'s code decides:
+#
+#           constant   point i's value
+#           linear     the straight line between the two
+#           smooth     Catmull-Rom: a cubic Hermite through both, whose slope at a point is
+#                      the line from the point before to the point after; zero at the
+#                      first and last point and beside a step, so two points ease in and out
+#           monotone   Fritsch and Carlson's monotone cubic, with Fritsch and Butland's
+#                      slopes as PCHIP takes them (zero where the curve turns, a weighted
+#                      harmonic mean of the two secants elsewhere, the three-point end rule
+#                      limited to three times the secant): never past its points
+#           bspline    the uniform cubic B-spline with the points as control points, which
+#                      passes near rather than through the inner points; a missing control
+#                      point beyond the first or last (or a step) is the end reflected
+#                      through its neighbour, so the curve starts and ends on the end points
+#
+#       Each channel is interpolated alone. The last point's code is kept but unused.
+#
+#==============================================================================================
+
+import interop
+import math
+import owned
+
+## Ramp data that `check` refuses.
+pub let invalid: ErrorCode = ErrorCode.package(87)
+
+## The version `check` reads, the first number of a ramp.
+pub let version: i64 = 1
+
+## How the segment starting at a point runs to the next; the codes are stored as numbers.
+pub enum Interpolation as u8:
+    constant = 0
+    linear = 1
+    smooth = 2
+    monotone = 3
+    bspline = 4
+
+## A color ramp's value at a position; `alpha` is 1 for an RGB ramp.
+pub struct Color:
+    pub var red: f64 = 0.0
+    pub var green: f64 = 0.0
+    pub var blue: f64 = 0.0
+    pub var alpha: f64 = 1.0
+
+## The numbers before the first point.
+let header: usize = 3
+
+## How many numbers a ramp of `points` points with `width` channels takes.
+pub func size(width: i64, points: i64) -> i64:
+    return (i64)header + points * (width + 2)
+
+## Whether `data` is a ramp `lookup` reads: the version, 1 to 4 channels, at least one point,
+## exactly as many numbers as its points take, finite positions in 0..1 in order, finite
+## channels and whole interpolation codes.
+pub func check(data: const f64[]) -> !:
+    if data.length < header or data[0] != (f64)version:
+        error(invalid, "a ramp starts with its version, 1")
+    let width = data[1]
+    if width != 1.0 and width != 2.0 and width != 3.0 and width != 4.0:
+        error(invalid, "a ramp has 1 to 4 channels")
+    let points = data[2]
+    if not math.is_finite(points) or points < 1.0 or points != math.floor(points) or points > 1.0e6:
+        error(invalid, "a ramp has a whole number of points, at least one")
+    if (f64)data.length != (f64)header + points * (width + 2.0):
+        error(invalid, "a ramp's length does not match its points")
+    let stride = (usize)width + 2
+    var previous = 0.0
+    for point in 0..<(usize)points:
+        let at = header + point * stride
+        let position = data[at]
+        if not math.is_finite(position) or position < 0.0 or position > 1.0:
+            error(invalid, "a ramp point's position is in 0..1")
+        if position < previous:
+            error(invalid, "a ramp's points are sorted by position")
+        previous = position
+        for channel in 1..<stride - 1:
+            if not math.is_finite(data[at + channel]):
+                error(invalid, "a ramp point's values are finite")
+        let code = data[at + stride - 1]
+        if code != 0.0 and code != 1.0 and code != 2.0 and code != 3.0 and code != 4.0:
+            error(invalid, "a ramp point's interpolation is 0 to 4")
+
+## How many channels `data` has: 1 for a float ramp, 3 for an RGB one; 0 when its header is bad.
+pub func channels(data: const f64[]) -> i64:
+    let (width, _) = shape(data) else return 0
+    return (i64)width
+
+## How many points `data` has; 0 when its header is bad.
+pub func count(data: const f64[]) -> i64:
+    let (_, points) = shape(data) else return 0
+    return (i64)points
+
+## Channel 0 of `data` at `t`: a float ramp's value. Data `check` refuses answers 0.
+pub func lookup(data: const f64[], t: f64) -> f64:
+    return lookup_channel(data, t, 0)
+
+## Channel `channel` of `data` at `t`; 0 for a channel the ramp lacks or bad data.
+pub func lookup_channel(data: const f64[], t: f64, channel: i64) -> f64:
+    let (width, points) = shape(data) else return 0.0
+    if channel < 0 or channel >= (i64)width:
+        return 0.0
+    let ramp = Ramp(data = data, stride = width + 2, count = points)
+    let (segment, u) = ramp.locate(t)
+    return ramp.evaluate(segment, u, (usize)channel)
+
+## A color ramp at `t`: its first three channels, and the fourth as alpha (1 without one).
+## A float ramp answers its value as grey.
+pub func lookup_color(data: const f64[], t: f64) -> Color:
+    let (width, points) = shape(data) else return Color()
+    let ramp = Ramp(data = data, stride = width + 2, count = points)
+    let (segment, u) = ramp.locate(t)
+    if width < 3:
+        let grey = ramp.evaluate(segment, u, 0)
+        return Color(red = grey, green = grey, blue = grey)
+    return Color(red = ramp.evaluate(segment, u, 0), green = ramp.evaluate(segment, u, 1), blue = ramp.evaluate(segment, u, 2),
+                 alpha = ramp.evaluate(segment, u, 3) if width > 3 else 1.0)
+
+## Every channel of `data` at `t` into `out`, as many as fit; answers how many channels the
+## ramp has. For Base callers filling lanes.
+pub func lookup_into(data: const f64[], t: f64, out: f64[]) -> usize:
+    let (width, points) = shape(data) else return 0
+    let ramp = Ramp(data = data, stride = width + 2, count = points)
+    let (segment, u) = ramp.locate(t)
+    for channel in 0..<width:
+        if channel < out.length:
+            out[channel] = ramp.evaluate(segment, u, channel)
+    return width
+
+## A copy of `data` as an owned result: a host handing a ramp it keeps to Luce.
+pub func copy(data: const f64[]) -> interop.Owned[const f64[]]!:
+    let values = try new f64[data.length] ---
+    for at in 0..<data.length:
+        values[at] = data[at]
+    return try owned.adopt_numbers(values)
+
+# -- Inside.
+
+## The channels and points `data`'s header gives, when its length holds them.
+func shape(data: const f64[]) -> (usize, usize)?:
+    if data.length < header or data[0] != (f64)version:
+        return none
+    let width = data[1]
+    let points = data[2]
+    if not (width >= 1.0 and width <= 4.0 and points >= 1.0 and points <= 1.0e6):
+        return none
+    let shaped = ((usize)width, (usize)points)
+    if data.length < header + shaped.1 * (shaped.0 + 2):
+        return none
+    return shaped
+
+## A ramp's points, read in place.
+struct Ramp:
+    let data: const f64[]
+    let stride: usize
+    let count: usize
+
+    func position(point: usize) -> f64:
+        return self.data[header + point * self.stride]
+
+    func value(point: usize, channel: usize) -> f64:
+        return self.data[header + point * self.stride + 1 + channel]
+
+    func code(point: usize) -> f64:
+        return self.data[header + point * self.stride + self.stride - 1]
+
+    ## The segment `t` falls in and how far along it, by bisection. Up to the first point
+    ## it is point 0 at -1, from the last point on the last point (`count - 1`): both hold
+    ## their point's value.
+    func locate(t: f64) -> (usize, f64):
+        let last = self.count - 1
+        if not (t > self.position(0)):
+            return (0, -1.0)
+        if t >= self.position(last):
+            return (last, 0.0)
+        # position(low) <= t < position(high), so the segment has length.
+        var low: usize = 0
+        var high = last
+        while high - low > 1:
+            let middle = low + (high - low) // 2
+            if self.position(middle) <= t:
+                low = middle
+            else:
+                high = middle
+        let start = self.position(low)
+        return (low, (t - start) / (self.position(low + 1) - start))
+
+    ## Whether point `point` has a point before it at a smaller position, and after it at a
+    ## larger one: a step or an end leaves the side out.
+    func before(point: usize) -> bool:
+        return point > 0 and self.position(point - 1) < self.position(point)
+
+    func after(point: usize) -> bool:
+        return point + 1 < self.count and self.position(point + 1) > self.position(point)
+
+    ## Channel `channel` at `u` along segment `segment` (the last point at the end).
+    func evaluate(segment: usize, u: f64, channel: usize) -> f64:
+        let start = self.value(segment, channel)
+        if segment + 1 >= self.count or u < 0.0:
+            return start
+        let end = self.value(segment + 1, channel)
+        let code = self.code(segment)
+        if code == 0.0:
+            return start
+        if code == 2.0 or code == 3.0:
+            let span = self.position(segment + 1) - self.position(segment)
+            let monotone = code == 3.0
+            let leaving = self.monotone_slope(segment, channel) if monotone else self.smooth_slope(segment, channel)
+            let arriving = self.monotone_slope(segment + 1, channel) if monotone else self.smooth_slope(segment + 1, channel)
+            return hermite(start, end, leaving * span, arriving * span, u)
+        if code == 4.0:
+            let first = self.value(segment - 1, channel) if self.before(segment) else 2.0 * start - end
+            let fourth = self.value(segment + 2, channel) if self.after(segment + 1) else 2.0 * end - start
+            return bspline(first, start, end, fourth, u)
+        return start + (end - start) * u
+
+    ## The rise per unit of position from `point` to the next.
+    func secant(point: usize, channel: usize) -> f64:
+        return (self.value(point + 1, channel) - self.value(point, channel)) / (self.position(point + 1) - self.position(point))
+
+    ## Catmull-Rom's slope at `point`: from the point before to the point after; 0 at an end.
+    func smooth_slope(point: usize, channel: usize) -> f64:
+        if not self.before(point) or not self.after(point):
+            return 0.0
+        return (self.value(point + 1, channel) - self.value(point - 1, channel)) / (self.position(point + 1) - self.position(point - 1))
+
+    ## PCHIP's slope at `point`.
+    func monotone_slope(point: usize, channel: usize) -> f64:
+        let before = self.before(point)
+        let after = self.after(point)
+        if before and after:
+            let left = self.secant(point - 1, channel)
+            let right = self.secant(point, channel)
+            if left * right <= 0.0:
+                return 0.0
+            let left_span = self.position(point) - self.position(point - 1)
+            let right_span = self.position(point + 1) - self.position(point)
+            let leading = 2.0 * right_span + left_span
+            let trailing = right_span + 2.0 * left_span
+            return (leading + trailing) / (leading / left + trailing / right)
+        if after:
+            # The first point of a run: its own segment and, if there is one, the next.
+            let near = self.secant(point, channel)
+            if not self.after(point + 1):
+                return near
+            let near_span = self.position(point + 1) - self.position(point)
+            let far_span = self.position(point + 2) - self.position(point + 1)
+            return end_slope(near, self.secant(point + 1, channel), near_span, far_span)
+        if before:
+            let near = self.secant(point - 1, channel)
+            if not self.before(point - 1):
+                return near
+            let near_span = self.position(point) - self.position(point - 1)
+            let far_span = self.position(point - 1) - self.position(point - 2)
+            return end_slope(near, self.secant(point - 2, channel), near_span, far_span)
+        return 0.0
+
+## PCHIP's three-point slope at an end, from the secant of the end segment and the one beside
+## it: kept to the end secant's sign, and to three times it where the curve turns.
+func end_slope(near: f64, far: f64, near_span: f64, far_span: f64) -> f64:
+    let slope = ((2.0 * near_span + far_span) * near - near_span * far) / (near_span + far_span)
+    if math.sign(slope) != math.sign(near):
+        return 0.0
+    if math.sign(near) != math.sign(far) and math.abs(slope) > 3.0 * math.abs(near):
+        return 3.0 * near
+    return slope
+
+## The cubic Hermite from `start` to `end` at `u`, leaving and arriving with the slopes
+## given per segment.
+func hermite(start: f64, end: f64, leaving: f64, arriving: f64, u: f64) -> f64:
+    let u2 = u * u
+    let u3 = u2 * u
+    return (2.0 * u3 - 3.0 * u2 + 1.0) * start + (u3 - 2.0 * u2 + u) * leaving + (3.0 * u2 - 2.0 * u3) * end + (u3 - u2) * arriving
+
+## The uniform cubic B-spline's segment between control points `b` and `c` at `u`.
+func bspline(a: f64, b: f64, c: f64, d: f64, u: f64) -> f64:
+    let u2 = u * u
+    let u3 = u2 * u
+    let v = 1.0 - u
+    return (v * v * v * a + (3.0 * u3 - 6.0 * u2 + 4.0) * b + (-3.0 * u3 + 3.0 * u2 + 3.0 * u + 1.0) * c + u3 * d) / 6.0

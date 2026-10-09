@@ -1,0 +1,151 @@
+## The `ramp` module: every interpolation against values worked out by hand, the ends held,
+## steps, the monotone cubic staying inside its points, colors, and `check` refusing bad data.
+
+func agrees(a: f64, b: f64) -> bool:
+    return math.abs(a - b) < 1.0e-12
+
+## Within what a point a hair from another moves the curve.
+func roughly(a: f64, b: f64) -> bool:
+    return math.abs(a - b) < 1.0e-8
+
+## A float ramp of three points, every segment `code`: (0, 0), (0.5, 0.5), (1, 2).
+func rising(code: f64) -> f64[12]:
+    return [1.0, 1.0, 3.0, 0.0, 0.0, code, 0.5, 0.5, code, 1.0, 2.0, code]
+
+## Two points, (0, 0) and (1, 1), the first segment `code`.
+func pair(code: f64) -> f64[9]:
+    return [1.0, 1.0, 2.0, 0.0, 0.0, code, 1.0, 1.0, code]
+
+test "constant holds each point's value up to the next":
+    let steps: f64[12] = [1.0, 1.0, 3.0, 0.0, 0.2, 0.0, 0.5, 0.8, 0.0, 1.0, 0.4, 0.0]
+    try check(steps[0..])
+    assert(lookup(steps[0..], 0.25) == 0.2 and lookup(steps[0..], 0.4999) == 0.2)
+    assert(lookup(steps[0..], 0.5) == 0.8 and lookup(steps[0..], 0.99) == 0.8 and lookup(steps[0..], 1.0) == 0.4)
+
+test "linear runs straight between points":
+    let data = rising(1.0)
+    assert(agrees(lookup(data[0..], 0.25), 0.25) and agrees(lookup(data[0..], 0.75), 1.25) and agrees(lookup(data[0..], 0.5), 0.5))
+
+test "smooth is Catmull-Rom, easing at the ends":
+    # Two points: zero slopes at both, so smoothstep: 3u² - 2u³ at u = 0.25 is 0.15625.
+    let two = pair(2.0)
+    assert(agrees(lookup(two[0..], 0.25), 0.15625) and agrees(lookup(two[0..], 0.5), 0.5))
+    # Three: the middle slope is (2 - 0) / (1 - 0) = 2; at t = 0.25 (u = 0.5, span 0.5)
+    # 0.5·0.5 - 0.125·(0.5·2) = 0.125.
+    let three = rising(2.0)
+    assert(agrees(lookup(three[0..], 0.25), 0.125))
+    # At t = 0.75: 0.5·0.5 + 0.125·(0.5·2) + 0.5·2 + 0 = 1.375.
+    assert(agrees(lookup(three[0..], 0.75), 1.375))
+
+test "monotone is PCHIP: harmonic slopes, limited ends":
+    # Secants 1 and 3; the middle slope (1.5 + 1.5) / (1.5/1 + 1.5/3) = 1.5; the first
+    # point's end slope (1.5·1 - 0.5·3) / 1 = 0. At t = 0.25: 0.25 - 0.125·0.5·1.5 = 0.15625.
+    let data = rising(3.0)
+    assert(agrees(lookup(data[0..], 0.25), 0.15625))
+    # The last point's end slope (1.5·3 - 0.5·1) / 1 = 4. At t = 0.75:
+    # 0.5·0.5 + 0.125·0.5·1.5 + 0.5·2 - 0.125·0.5·4 = 1.09375.
+    assert(agrees(lookup(data[0..], 0.75), 1.09375))
+    # Two points: the end slopes are the secant, a straight line.
+    let two = pair(3.0)
+    assert(agrees(lookup(two[0..], 0.3), 0.3))
+
+test "monotone never passes its points where smooth does":
+    # A step from 0 to 1 between 0.4 and 0.6, flat either side.
+    let monotone: f64[15] = [1.0, 1.0, 4.0, 0.0, 0.0, 3.0, 0.4, 0.0, 3.0, 0.6, 1.0, 3.0, 1.0, 1.0, 3.0]
+    var smooth = monotone
+    for point in 0..<(usize)4:
+        smooth[5 + point * 3] = 2.0
+    var previous = -1.0
+    var dipped = false
+    for sample in 0..<(usize)1001:
+        let t = (f64)sample / 1000.0
+        let value = lookup(monotone[0..], t)
+        assert(value >= 0.0 and value <= 1.0 and value >= previous)
+        previous = value
+        let wavy = lookup(smooth[0..], t)
+        if wavy < -1.0e-6 or wavy > 1.0 + 1.0e-6:
+            dipped = true
+    assert(dipped)
+
+test "bspline uses the points as control points, the ends reflected":
+    # Two points: the reflected ends make the control points evenly spaced, a straight line.
+    let two = pair(4.0)
+    assert(agrees(lookup(two[0..], 0.25), 0.25))
+    # (0, 0), (0.5, 1), (1, 0): at t = 0.25 the controls are -1 (0 reflected), 0, 1, 0 and
+    # the weights 1/48, 23/48, 23/48, 1/48, so -1/48 + 23/48 = 11/24.
+    let peak: f64[12] = [1.0, 1.0, 3.0, 0.0, 0.0, 4.0, 0.5, 1.0, 4.0, 1.0, 0.0, 4.0]
+    assert(agrees(lookup(peak[0..], 0.25), 11.0 / 24.0))
+    # The inner point is passed near, not through: (0 + 4 + 0) / 6 from either side.
+    assert(agrees(lookup(peak[0..], 0.5), 4.0 / 6.0) and roughly(lookup(peak[0..], 0.4999999999), 4.0 / 6.0))
+    # And the ends are met.
+    assert(agrees(lookup(peak[0..], 0.0), 0.0) and roughly(lookup(peak[0..], 0.9999999999), 0.0))
+
+test "the ends hold, a step jumps, one point is constant":
+    let inner: f64[9] = [1.0, 1.0, 2.0, 0.2, 3.0, 1.0, 0.8, 5.0, 1.0]
+    assert(lookup(inner[0..], 0.0) == 3.0 and lookup(inner[0..], -4.0) == 3.0 and lookup(inner[0..], math.nan) == 3.0)
+    assert(lookup(inner[0..], 1.0) == 5.0 and lookup(inner[0..], 9.0) == 5.0 and lookup(inner[0..], math.infinity) == 5.0)
+    assert(agrees(lookup(inner[0..], 0.5), 4.0))
+    let step: f64[15] = [1.0, 1.0, 4.0, 0.0, 0.0, 2.0, 0.5, 0.0, 2.0, 0.5, 1.0, 2.0, 1.0, 1.0, 2.0]
+    try check(step[0..])
+    assert(lookup(step[0..], 0.49) == 0.0 and lookup(step[0..], 0.5) == 1.0 and lookup(step[0..], 0.75) == 1.0)
+    let single: f64[6] = [1.0, 1.0, 1.0, 0.3, 7.0, 1.0]
+    assert(lookup(single[0..], 0.0) == 7.0 and lookup(single[0..], 0.9) == 7.0)
+
+test "a color ramp interpolates each channel":
+    let gradient: f64[13] = [1.0, 3.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.5, 0.25, 1.0]
+    try check(gradient[0..])
+    assert(channels(gradient[0..]) == 3 and count(gradient[0..]) == 2 and size(3, 2) == 13)
+    let middle = lookup_color(gradient[0..], 0.5)
+    assert(agrees(middle.red, 0.5) and agrees(middle.green, 0.25) and agrees(middle.blue, 0.125) and middle.alpha == 1.0)
+    var lanes: f64[4]
+    assert(lookup_into(gradient[0..], 0.5, lanes[0..]) == 3 and agrees(lanes[1], 0.25))
+    assert(agrees(lookup_channel(gradient[0..], 1.0, 2), 0.25) and lookup_channel(gradient[0..], 0.5, 3) == 0.0)
+    let line = pair(1.0)
+    let grey = lookup_color(line[0..], 0.25)
+    assert(agrees(grey.red, 0.25) and agrees(grey.blue, 0.25))
+
+test "check refuses what lookup cannot read":
+    let good = rising(1.0)
+    try check(good[0..])
+    var bad = good
+    bad[0] = 2.0
+    assert(refused(bad[0..]))
+    bad = good
+    bad[1] = 0.0
+    assert(refused(bad[0..]))
+    bad = good
+    bad[2] = 2.0
+    assert(refused(bad[0..]))
+    bad = good
+    bad[6] = -0.1
+    assert(refused(bad[0..]))
+    bad = good
+    bad[9] = 0.4
+    assert(refused(bad[0..]))
+    bad = good
+    bad[9] = 1.5
+    assert(refused(bad[0..]))
+    bad = good
+    bad[7] = math.nan
+    assert(refused(bad[0..]))
+    bad = good
+    bad[8] = 5.0
+    assert(refused(bad[0..]))
+    bad = good
+    bad[8] = 1.5
+    assert(refused(bad[0..]))
+    assert(refused(good[..<11]))
+    let empty: f64[3] = [1.0, 1.0, 0.0]
+    assert(refused(empty[0..]) and lookup(empty[0..], 0.5) == 0.0)
+    assert(lookup(good[..<5], 0.5) == 0.0)
+
+test "copy answers an owned list":
+    let data = rising(1.0)
+    let kept = try copy(data[0..])
+    assert(kept.value.length == 12 and kept.value[10] == 2.0)
+    kept.release()
+
+func refused(data: const f64[]) -> bool:
+    check(data) catch failure:
+        return failure.code == invalid
+    return false

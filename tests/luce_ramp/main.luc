@@ -1,0 +1,15 @@
+# ramp: a Luce program builds a ramp as a list, looks it up and copies it back.
+from luce_std import ramp
+
+pub func main(arguments: list[str]) -> int!:
+    let falloff = [1.0, 1.0, 2.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0]
+    ramp.check(falloff)
+    print(ramp.lookup(falloff, 0.25), ramp.lookup(falloff, -1.0), ramp.count(falloff), ramp.channels(falloff))
+    let gradient = [1.0, 3.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.5, 0.25, 1.0]
+    let middle = ramp.lookup_color(gradient, 0.5)
+    print(middle.red, middle.green, middle.blue, middle.alpha)
+    let kept = ramp.copy(gradient)
+    print(kept.length, kept[10])
+    ramp.check([1.0, 1.0, 1.0, 2.0, 0.0, 1.0]) catch failure:
+        print("refused:", failure.message)
+    return 0

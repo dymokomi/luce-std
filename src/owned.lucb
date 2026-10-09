@@ -17,6 +17,7 @@ import strings
 ## What a result's storage holds.
 enum Held:
     bytes
+    numbers
     text
     texts
 
@@ -26,6 +27,7 @@ struct Storage:
     var allocator: memory.Allocator
     var held: Held
     var data: u8[]
+    var numbers: f64[]
     var text: str
     var texts: str[]
 
@@ -36,6 +38,9 @@ func drop_storage(object: ownership.Object*):
             .bytes:
                 if storage.data.length > 0:
                     free(storage.data)
+            .numbers:
+                if storage.numbers.length > 0:
+                    free(storage.numbers)
             .text:
                 strings.release(storage.text)
             .texts:
@@ -67,6 +72,16 @@ pub func adopt_bytes(data: u8[]) -> interop.Owned[const u8[]]!:
         error(failure.code, failure.message)
     owner.data = data
     return interop.Owned[const u8[]](data, &owner.header)
+
+## Own `values`, an allocation of the current allocator (or empty), as a list of numbers.
+## The span belongs to the result from the call on, also when making the owner fails.
+pub func adopt_numbers(values: f64[]) -> interop.Owned[const f64[]]!:
+    let owner = new_storage(Held.numbers) catch failure:
+        if values.length > 0:
+            free(values)
+        error(failure.code, failure.message)
+    owner.numbers = values
+    return interop.Owned[const f64[]](values, &owner.header)
 
 ## Own `value`, a NUL-terminated text of the current allocator such as `strings.copy`
 ## answers, as a text result a Base caller may also pass on as a `c.str`. It belongs to
@@ -153,9 +168,12 @@ test "an owned result frees its storage when released":
     let data = try adopt_bytes(try new u8[3] ---)
     let path = try copy_text("/tmp")
     assert(path.value == "/tmp" and path.value.bytes.data[4] == 0)
-    assert(ownership.live_count() == before + 3)
+    let numbers = try adopt_numbers(try new f64[2] ---)
+    assert(numbers.value.length == 2)
+    assert(ownership.live_count() == before + 4)
     list.release()
     data.release()
+    numbers.release()
     path.release()
     assert(ownership.live_count() == before)
 
