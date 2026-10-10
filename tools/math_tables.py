@@ -105,6 +105,14 @@ with mp.workdps(50):
 sections.append("## (asin w - w)/w³ in z = w², 0 <= z <= 1/4: the coefficients of z^0 to z^13.\n"
                 f"let asin_coefficients: f64[{len(asin_fit)}] = [" + ", ".join(repr(c) for c in asin_fit) + "]")
 
+# sin and cos: sin(k·pi/128) for k in [0, 256), high and low parts interleaved, so one line
+# of memory holds an entry; cos(k·pi/128) is entry k + 64.
+sine = []
+for k in range(256):
+    high, low = split(mp.sin(k * mp.pi / 128))
+    sine += [bits(high), bits(low)]
+sections.append(words("sine_table", sine, "sin(k·pi/128) for k in [0, 256): high, low."))
+
 # The bits of 2/pi after the binary point, 32 to a word, most significant first: enough for
 # the largest double's exponent and 200 bits beyond it.
 WORDS = 44
@@ -127,6 +135,10 @@ pio2_1 = quantized(pio2, -32)
 pio2_2 = quantized(pio2 - pio2_1, -65)
 pio2_3 = quantized(pio2 - pio2_1 - pio2_2, -98)
 pio2_4 = double(pio2 - pio2_1 - pio2_2 - pio2_3)
+step = mp.pi / 128
+step_1 = quantized(step, -32)
+step_2 = quantized(step - step_1, -59)
+assert step_1 * 2 ** 32 < 2 ** 27 and abs(step_2) * 2 ** 59 < 2 ** 27  # times n below 2^26, exact
 constants = [
     ("ln2_high", ln2_high, "ln(2) as a multiple of 2^-42: times any exponent k, exact."),
     ("ln2_low", ln2 - ln2_high, "ln(2) less ln2_high."),
@@ -148,6 +160,10 @@ constants = [
     ("pi_high", split(mp.pi)[0], "pi rounded to a double."),
     ("pi_low", split(mp.pi)[1], "pi less its double."),
     ("two_over_pi_double", 2 / mp.pi, "2/pi rounded to a double."),
+    ("step_1", step_1, "pi/128 as a multiple of 2^-32 (27 bits): times n below 2^26, exact."),
+    ("step_2", step_2, "The next 27 bits of pi/128."),
+    ("step_3", step - step_1 - step_2, "pi/128 less the two parts above, rounded."),
+    ("inverse_step", 128 / mp.pi, "128/pi rounded to a double."),
 ]
 for name, value, comment in constants:
     sections.append(constant(name, value, comment))

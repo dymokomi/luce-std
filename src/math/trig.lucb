@@ -1,9 +1,11 @@
 #==============================================================================================
 #
-#   trig - sin, cos and tan, and the reduction of an argument by pi/2
+#   trig - sin, cos, sincos and tan, and the reduction of an argument by pi/2
 #
 #   DESCRIPTION:
-#       The method is fdlibm's (Sun's, as in FreeBSD and musl): x = n·pi/2 + r with r as a
+#       sin and cos below 2^20 first try the table method at the end of this file, which
+#       returns only results it proves correctly rounded. Everything else takes the
+#       accurate method. That method is fdlibm's (Sun's, as in FreeBSD and musl): x = n·pi/2 + r with r as a
 #       pair, |r| <= pi/4, then sin or cos of r by its series, picked and signed by n mod 4.
 #       Below 2^20·pi/2 the reduction is Cody and Waite's, with pi/2 in three 33-bit parts
 #       and a fourth, so n times each of the first three is exact and the error stays near
@@ -131,7 +133,7 @@ inline func cos_pair(rh: f64, rl: f64) -> (f64, f64):
     return fast_two_sum(w, (we - 0.5 * (zl + 2.0 * rh * rl)) + zh * zh * series)
 
 ## sin x, picked from sin r and cos r by n mod 4.
-func sin_value(x: f64) -> f64:
+func sin_accurate(x: f64) -> f64:
     let magnitude = x.bits() & 0x7fffffffffffffff
     if magnitude < 0x3e50000000000000:
         # below 2^-26, x³/6 is under half an ulp of x: x itself, signed zero kept
@@ -144,7 +146,7 @@ func sin_value(x: f64) -> f64:
     return -(h + l) if quadrant >= 2 else h + l
 
 ## cos x, picked from cos r and sin r by n mod 4.
-func cos_value(x: f64) -> f64:
+func cos_accurate(x: f64) -> f64:
     let magnitude = x.bits() & 0x7fffffffffffffff
     if magnitude < 0x3e40000000000000:
         # below 2^-27, x²/2 is under half an ulp of 1
@@ -172,3 +174,101 @@ func tan_value(x: f64) -> f64:
         return -(h + l)
     let (h, l) = divide_pairs(sh, sl, ch, cl)
     return h + l
+
+# mark: The table method ======================================================================
+
+# For 2^-27 <= |x| < 2^20, sin and cos first try a shorter road: x = n·pi/128 + r with
+# |r| <= pi/256, and sin x = A·cos r + B·sin r for A = sin(n·pi/128) and B = cos(n·pi/128)
+# from a table of double-double values (as IBM's libultim and CORE-MATH do). B·r is exact
+# (Dekker's product) and so is A + B·r; the rest, A·(cos r - 1) + B·(sin r - r) and the low
+# parts, is under 2^-13 of A and is summed in doubles.
+#
+# The error budget, u = 2^-53. The reduction: n·step_1 and n·step_2 are exact and so is x
+# less the first (Sterbenz); what step_3 and its product leave is below 2^-86 absolute for
+# n < 2^26. The rest is relative to |A|: A·(cos r - 1) is at most 2^-13.7·|A| and carries
+# at most 7u of it from z, the series, the product and three sums, 2^-63.9·|A|; the series'
+# truncation adds 2^-66.1·|A|, the table's 2^-106, and the terms in rl, B's low part and t
+# below 2^-70 of the result. With n·pi/128 not a multiple of pi, |A| >= sin(pi/128) is at
+# least twice |B·r|, so |A| <= 2·|sin x|; otherwise A is 0 and so are those terms. The
+# total stays under 2^-62.3·|result| + 2^-86, and the test below allows 2^-61·|h| + 2^-85,
+# h being within 2^-12 of the result. Rounding is monotonic, so when h + (l - bound) and
+# h + (l + bound) round to the same double, the exact value rounds to it too: a value
+# returned here is the correctly rounded one. The others, about one in two hundred, go to
+# the method above.
+
+## The bits of 2^-27, and the span of bits from it to 2^20: one unsigned comparison tells
+## whether |x| is in the table method's range, where n stays below 2^26.
+let fast_trig_low: u64 = 0x3e40000000000000
+let fast_trig_span: u64 = 0x4130000000000000 - 0x3e40000000000000
+
+## x = n·pi/128 + rh + rl, with pi/128 in three parts whose first two times n are exact.
+inline func reduce_step(x: f64) -> (i64, f64, f64):
+    let kd = (x * f64.bits(inverse_step) + round_shift) - round_shift
+    let a = x - kd * f64.bits(step_1)
+    let (r0, e0) = two_sum(a, -(kd * f64.bits(step_2)))
+    let (rh, rl) = fast_two_sum(r0, e0 - kd * f64.bits(step_3))
+    return ((i64)kd, rh, rl)
+
+## cos r - 1 and sin r - r from z = r², their Taylor series to r^6 and r^7, below 2^-75.
+inline func cos_less_one(z: f64) -> f64:
+    return z * (-0.5 + z * (0.041666666666666664 + z * -0.001388888888888889))
+
+inline func sin_less_r(rh: f64, z: f64) -> f64:
+    return rh * z * (-0.16666666666666666 + z * (0.008333333333333333 + z * -0.0001984126984126984))
+
+## The table's entry k (mod 256), sin(k·pi/128), as its two parts.
+inline func sine_entry(k: i64) -> (f64, f64):
+    let i = (usize)(k & 255) * 2
+    return (f64.bits(sine_table[i]), f64.bits(sine_table[i + 1]))
+
+## A·cos r + B·sin r as h + l, for A and B entries of the table: A + B·rh exactly, the rest
+## in a double. l is below 2^-12 of h.
+inline func rotate(ah: f64, al: f64, bh: f64, bl: f64, rh: f64, rl: f64, c: f64, t: f64) -> (f64, f64):
+    let (ph, pl) = two_product(bh, rh)
+    let (h, he) = fast_two_sum(ah, ph)
+    return (h, (he + pl) + (al + bl * rh) + rl * (bh - ah * rh) + (ah * c + bh * t))
+
+## Whether h + l rounds the same at both ends of its error bound: 2^-61 of h, and 2^-85
+## for what the reduction leaves out.
+inline func rounds_alike(h: f64, l: f64) -> bool:
+    let bound = abs(h) * 4.336808689942018e-19 + 2.5849394142282115e-26
+    return h + (l - bound) == h + (l + bound)
+
+## sin x: the table method when it vouches for its rounding, else sin_accurate.
+func sin_value(x: f64) -> f64:
+    if (x.bits() & 0x7fffffffffffffff) -% fast_trig_low < fast_trig_span:
+        let (n, rh, rl) = reduce_step(x)
+        let z = rh * rh
+        let (ah, al) = sine_entry(n)
+        let (bh, bl) = sine_entry(n + 64)
+        let (h, l) = rotate(ah, al, bh, bl, rh, rl, cos_less_one(z), sin_less_r(rh, z))
+        if rounds_alike(h, l):
+            return h + l
+    return sin_accurate(x)
+
+## cos x, as sin x but from the entries a quarter turn on: cos(a + r) = B·cos r - A·sin r.
+func cos_value(x: f64) -> f64:
+    if (x.bits() & 0x7fffffffffffffff) -% fast_trig_low < fast_trig_span:
+        let (n, rh, rl) = reduce_step(x)
+        let z = rh * rh
+        let (ah, al) = sine_entry(n + 64)
+        let (bh, bl) = sine_entry(n + 128)
+        let (h, l) = rotate(ah, al, bh, bl, rh, rl, cos_less_one(z), sin_less_r(rh, z))
+        if rounds_alike(h, l):
+            return h + l
+    return cos_accurate(x)
+
+## sin x and cos x from one reduction and one pair of entries.
+func sincos_value(x: f64) -> (f64, f64):
+    if (x.bits() & 0x7fffffffffffffff) -% fast_trig_low < fast_trig_span:
+        let (n, rh, rl) = reduce_step(x)
+        let z = rh * rh
+        let c = cos_less_one(z)
+        let t = sin_less_r(rh, z)
+        let (ah, al) = sine_entry(n)
+        let (bh, bl) = sine_entry(n + 64)
+        let (sh, sl) = rotate(ah, al, bh, bl, rh, rl, c, t)
+        let (ch, cl) = rotate(bh, bl, -ah, -al, rh, rl, c, t)
+        if rounds_alike(sh, sl) and rounds_alike(ch, cl):
+            return (sh + sl, ch + cl)
+    return (sin_value(x), cos_value(x))

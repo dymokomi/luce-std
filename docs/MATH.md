@@ -1,7 +1,7 @@
 # Numerical contracts and reference coverage
 
 `math` operates on f64 and `math32` on f32. The elementary functions (exp, exp2,
-expm1, log, log2, log10, log1p, pow, sin, cos, tan, asin, acos, atan, atan2, sinh,
+expm1, log, log2, log10, log1p, pow, sin, cos, sincos, tan, asin, acos, atan, atan2, sinh,
 cosh, tanh, cbrt, hypot, erf and erfc) are written in Base in `src/math/`, so a
 program gets the same bits from them on arm64-macos, x86_64-linux and
 x86_64-windows; `math32` evaluates them in f64 and rounds once. The exactly
@@ -34,6 +34,7 @@ rounding operations retain their specified direction regardless of that environm
 | `log`, `log2`, `log10` | Logarithms for positive inputs. Zero gives negative infinity; negative inputs give NaN. |
 | `log1p` | `log(1+x)` retaining small x. At -1, negative infinity; below -1, NaN. Signed zero is preserved. |
 | `sin`, `cos`, `tan` | Trigonometric functions; infinite inputs produce NaN. Sin and tan preserve signed zero. |
+| `sincos` | `(sin(x), cos(x))` from one reduction, the same bits as the two calls. |
 | `asin`, `acos` | Principal inverse functions on [-1,1], with ranges [-pi/2,pi/2] and [0,pi]. Outside the domain, NaN. |
 | `atan` | Principal inverse tangent in [-pi/2,pi/2]; signed zero is preserved. |
 | `atan2(y,x)` | Four-quadrant angle in [-pi,pi]. Both argument signs matter, including signed zeros on the axes. |
@@ -70,6 +71,7 @@ two-sum, Dekker's product with Veltkamp's split), without fused multiply-adds.
 | `exp`, `exp2`, `expm1` | Tang's table-driven exponential with 2^(j/128) as pairs (ARM optimized-routines, musl) |
 | `log`, `log2`, `log10`, `log1p` | Tang's table-driven logarithm over 128 intervals (ARM optimized-routines' selection), log as a pair |
 | `pow` | e^(y·log x) with log x as a pair to about 2^-68 (ARM optimized-routines, musl) |
+| `sin`, `cos`, `sincos` | Below 2^20 first a table of sin(k·pi/128) as pairs, sin(a + r) = A·cos r + B·sin r with B·r exact (IBM's libultim, CORE-MATH), returned only when its error bound proves the rounding; otherwise as `tan` |
 | `sin`, `cos`, `tan` | fdlibm: Cody-Waite reduction by pi/2 in four parts, Payne-Hanek with 2/pi's bits above 2^20·pi/2, Taylor kernels; tan as sin/cos in pairs |
 | `atan`, `atan2` | Gal's accurate tables: atan(j/64) plus a short series in (y - c·x)/(x + c·y) |
 | `asin`, `acos` | fdlibm: a fitted polynomial to 1/2, pi/2 - 2·asin(sqrt((1 - x)/2)) beyond |
@@ -84,7 +86,10 @@ The elementary functions give identical bits on every supported target: Base
 neither contracts nor reassociates float arithmetic, x86-64 uses SSE2 (no x87),
 and the code uses no fused multiply-add and no host library call. Their results are
 within one ulp, and in the measured inputs within 0.51 ulp for most and 0.6 ulp for
-all; they are not promised correctly rounded. Special values follow C99 Annex F.
+all; they are not promised correctly rounded. Where a function has a fast path, the
+fast path returns only results its error bound proves correctly rounded and hands
+every other input to the accurate method, so the results do not depend on how fast
+the fast path is. Special values follow C99 Annex F.
 These promises hold in the default rounding direction, which the exact sums and the
 reductions assume; under a directed one the results stay close but may differ.
 Which NaN an invalid operation returns is the processor's (x86-64's has the sign bit
