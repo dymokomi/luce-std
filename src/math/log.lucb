@@ -3,7 +3,8 @@
 #   log - The logarithms: log, log2, log10, log1p, and log x as a pair for pow
 #
 #   DESCRIPTION:
-#       The method is Tang's table-driven logarithm, with the interval selection of ARM's
+#       log, log2 and log10 of normal x first try the fast path at the end of this file,
+#       which returns only results it proves correctly rounded. The method is Tang's table-driven logarithm, with the interval selection of ARM's
 #       optimized-routines (as in musl): x = 2^k·z with z in [0.6875, 1.375), whose top
 #       mantissa bits pick one of 128 intervals and its point F (the midpoint, or 1 beside 1),
 #       so log x = k·ln2 + log F + log1p(u) for u = (z - F)/F, |u| <= 2^-7. z - F is exact,
@@ -74,14 +75,14 @@ func log_special(x: f64) -> f64:
     return f64.bits(0x7ff8000000000000)
 
 ## The natural logarithm.
-func log_value(x: f64) -> f64:
+func log_accurate(x: f64) -> f64:
     if log_is_special(x):
         return log_special(x)
     let (h, l) = log_pair(x)
     return h + l
 
 ## The logarithm to base 2: log x times 1/ln2, both pairs. A power of two gives its exponent.
-func log2_value(x: f64) -> f64:
+func log2_accurate(x: f64) -> f64:
     if log_is_special(x):
         return log_special(x)
     let (h, l) = log_pair(x)
@@ -89,7 +90,7 @@ func log2_value(x: f64) -> f64:
     return p + q
 
 ## The logarithm to base 10: log x times 1/ln10, both pairs.
-func log10_value(x: f64) -> f64:
+func log10_accurate(x: f64) -> f64:
     if log_is_special(x):
         return log_special(x)
     let (h, l) = log_pair(x)
@@ -116,3 +117,85 @@ func log1p_value(x: f64) -> f64:
     let (s, c) = two_sum(1.0, x)
     let (h, l) = log_pair(s)
     return h + (l + c / s)
+
+# mark: The fast path =========================================================================
+
+# For normal x, log, log2 and log10 first try the same reduction with fused multiply-adds:
+# u = (z - F)/F as uh + ul, with z - F exact and ul from the remainder f - uh·F, which a
+# fused multiply-add gives exactly (uh·F needs 62 bits, and the remainder is within 10
+# bits of the last of them). k·ln2_high + log F is exact, and is zero or larger than u
+# (beside 1, F is 1; one interval on, |log F| >= 2^-7.4 against |u| <= 2^-8), so adding
+# uh keeps its error by Dekker's fast two-sum. u² is exact as a pair, and what remains
+# (u³·Q(u), the cross terms and the low parts) is under 2^-20 of the result and summed in
+# doubles.
+#
+# The error budget, relative to the result: Q's truncation (u^10/11 against u) 2^-73; its
+# evaluation, under 2^-53 of u³/3, 2^-75; the dropped ul² and ul·u² 2^-104; the rounding of
+# the remainder's quotient 2^-106; five roundings in the low sum, each under 2^-53 of 2^-20
+# of the result, 2^-71; the tables' and ln2_low's representation 2^-95. Under 2^-70 in
+# all; the test allows 2^-63 of h (log2 and log10 2^-62, their constants and products
+# adding 2^-104), so a fast return is the correctly rounded value. Inputs within 2^-63 of a
+# rounding boundary, subnormals, zero, negative x, infinity and NaN take the method above.
+
+## log1p(u) - u + u²/2 for |u| <= 2^-7: u³·Q(u), Q the Taylor series from 1/3 to -1/10.
+inline func log_series_fast(u: f64) -> f64:
+    let u2 = u * u
+    let p01 = u.mul_add(-0.25, 0.3333333333333333)
+    let p23 = u.mul_add(-0.16666666666666666, 0.2)
+    let p45 = u.mul_add(-0.125, 0.14285714285714285)
+    let p67 = u.mul_add(-0.1, 0.1111111111111111)
+    let q = (u2 * u2).mul_add(u2.mul_add(p67, p45), u2.mul_add(p23, p01))
+    return u * u2 * q
+
+## log x as h + l for x positive, normal and finite.
+inline func log_fast(x: f64) -> (f64, f64):
+    let ix = x.bits()
+    let shifted = ix -% log_offset
+    let i = (usize)((shifted >> 45) & 127)
+    let kd = (f64)((i64)shifted >> 52)
+    let z = f64.bits(ix -% (shifted & 0xfff0000000000000))
+    let point = f64.bits(log_point[i])
+    let inverse = f64.bits(log_inverse[i])
+    let f = z - point
+    let uh = f * inverse
+    let ul = (-uh).mul_add(point, f) * inverse
+    let (s1, e1) = fast_two_sum(kd * f64.bits(ln2_high) + f64.bits(log_table_high[i]), uh)
+    let (q, qe) = two_square(uh)
+    let (h, e2) = fast_two_sum(s1, -0.5 * q)
+    let low = kd * f64.bits(ln2_low) + f64.bits(log_table_low[i])
+    return (h, ((e1 + e2) + low) + ((ul - uh * ul - 0.5 * qe) + log_series_fast(uh)))
+
+## Whether x is positive, normal and finite.
+inline func log_is_normal(x: f64) -> bool:
+    return x.bits() -% 0x0010000000000000 < 0x7fe0000000000000
+
+## Whether h + l rounds the same at both ends of `relative`·|h|.
+inline func rounds_within(h: f64, l: f64, relative: f64) -> bool:
+    let bound = abs(h) * relative
+    return h + (l - bound) == h + (l + bound)
+
+## The natural logarithm: the fast path when it vouches for its rounding, else log_accurate.
+func log_value(x: f64) -> f64:
+    if log_is_normal(x):
+        let (h, l) = log_fast(x)
+        if rounds_within(h, l, 1.0842021724855044e-19):
+            return h + l
+    return log_accurate(x)
+
+## log x times 1/ln2 as a pair.
+func log2_value(x: f64) -> f64:
+    if log_is_normal(x):
+        let (h, l) = log_fast(x)
+        let (p, q) = multiply_pairs(h, l, f64.bits(log2_e_high), f64.bits(log2_e_low))
+        if rounds_within(p, q, 2.168404344971009e-19):
+            return p + q
+    return log2_accurate(x)
+
+## log x times 1/ln10 as a pair.
+func log10_value(x: f64) -> f64:
+    if log_is_normal(x):
+        let (h, l) = log_fast(x)
+        let (p, q) = multiply_pairs(h, l, f64.bits(log10_e_high), f64.bits(log10_e_low))
+        if rounds_within(p, q, 2.168404344971009e-19):
+            return p + q
+    return log10_accurate(x)

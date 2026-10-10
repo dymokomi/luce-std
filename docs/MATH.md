@@ -73,6 +73,7 @@ two-sum, Dekker's fast two-sum, and a product's exact error by a fused multiply-
 | --- | --- |
 | `exp`, `exp2` | For normal results first the same table with 2^(j/128)·r exact as a pair, returned only when its error bound proves the rounding |
 | `exp`, `exp2`, `expm1` | Tang's table-driven exponential with 2^(j/128) as pairs (ARM optimized-routines, musl) |
+| `log`, `log2`, `log10` | For normal x first the same intervals with u as an exact pair by fused multiply-adds, returned only when its error bound proves the rounding |
 | `log`, `log2`, `log10`, `log1p` | Tang's table-driven logarithm over 128 intervals (ARM optimized-routines' selection), log as a pair |
 | `pow` | e^(y·log x) with log x as a pair to about 2^-68 (ARM optimized-routines, musl) |
 | `sin`, `cos`, `sincos` | Below 2^20 first a table of sin(k·pi/128) as pairs, sin(a + r) = A·cos r + B·sin r with B·r exact (IBM's libultim, CORE-MATH), returned only when its error bound proves the rounding; otherwise as `tan` |
