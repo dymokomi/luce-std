@@ -1,0 +1,129 @@
+## math's elementary functions timed against the C library's on the same inputs: the
+## nanoseconds per call of each, best of seven passes over 4096 values in the function's
+## working range, and their ratio. It prints the table and fails only past ten times the
+## library's time, a regression no machine's noise explains.
+from luce_std import math
+import time
+# valgrind: skip -- timings under valgrind mean nothing
+
+extern func libm_exp as "exp"(x: f64) -> f64
+extern func libm_exp2 as "exp2"(x: f64) -> f64
+extern func libm_expm1 as "expm1"(x: f64) -> f64
+extern func libm_log as "log"(x: f64) -> f64
+extern func libm_log2 as "log2"(x: f64) -> f64
+extern func libm_log10 as "log10"(x: f64) -> f64
+extern func libm_log1p as "log1p"(x: f64) -> f64
+extern func libm_pow as "pow"(x: f64, y: f64) -> f64
+extern func libm_sin as "sin"(x: f64) -> f64
+extern func libm_cos as "cos"(x: f64) -> f64
+extern func libm_tan as "tan"(x: f64) -> f64
+extern func libm_asin as "asin"(x: f64) -> f64
+extern func libm_acos as "acos"(x: f64) -> f64
+extern func libm_atan as "atan"(x: f64) -> f64
+extern func libm_atan2 as "atan2"(y: f64, x: f64) -> f64
+extern func libm_sinh as "sinh"(x: f64) -> f64
+extern func libm_cosh as "cosh"(x: f64) -> f64
+extern func libm_tanh as "tanh"(x: f64) -> f64
+extern func libm_cbrt as "cbrt"(x: f64) -> f64
+extern func libm_hypot as "hypot"(x: f64, y: f64) -> f64
+
+let names: str[20] = ["exp", "exp2", "expm1", "log", "log2", "log10", "log1p", "pow", "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "cbrt", "hypot"]
+let lows: f64[20] = [-700.0, -1000.0, -5.0, 0.0, 0.0, 0.0, -0.9, 0.0, -10.0, -10.0, -10.0, -1.0, -1.0, -10.0, -10.0, -20.0, -20.0, -5.0, -1000.0, -1000.0]
+let highs: f64[20] = [700.0, 1000.0, 5.0, 1000.0, 1000.0, 1000.0, 10.0, 10.0, 10.0, 10.0, 10.0, 1.0, 1.0, 10.0, 10.0, 20.0, 20.0, 5.0, 1000.0, 1000.0]
+
+func ours(k: usize, x: f64, y: f64) -> f64:
+    match k:
+        0: return math.exp(x)
+        1: return math.exp2(x)
+        2: return math.expm1(x)
+        3: return math.log(x)
+        4: return math.log2(x)
+        5: return math.log10(x)
+        6: return math.log1p(x)
+        7: return math.pow(x, y)
+        8: return math.sin(x)
+        9: return math.cos(x)
+        10: return math.tan(x)
+        11: return math.asin(x)
+        12: return math.acos(x)
+        13: return math.atan(x)
+        14: return math.atan2(x, y)
+        15: return math.sinh(x)
+        16: return math.cosh(x)
+        17: return math.tanh(x)
+        18: return math.cbrt(x)
+        19: return math.hypot(x, y)
+        _: trap("function")
+
+func library(k: usize, x: f64, y: f64) -> f64:
+    match k:
+        0: return libm_exp(x)
+        1: return libm_exp2(x)
+        2: return libm_expm1(x)
+        3: return libm_log(x)
+        4: return libm_log2(x)
+        5: return libm_log10(x)
+        6: return libm_log1p(x)
+        7: return libm_pow(x, y)
+        8: return libm_sin(x)
+        9: return libm_cos(x)
+        10: return libm_tan(x)
+        11: return libm_asin(x)
+        12: return libm_acos(x)
+        13: return libm_atan(x)
+        14: return libm_atan2(x, y)
+        15: return libm_sinh(x)
+        16: return libm_cosh(x)
+        17: return libm_tanh(x)
+        18: return libm_cbrt(x)
+        19: return libm_hypot(x, y)
+        _: trap("function")
+
+let count: usize = 4096
+
+## Nanoseconds per call of function `k`, ours or the library's, best of seven passes.
+func time_function(k: usize, xs: f64[], ys: f64[], use_library: bool) -> f64:
+    var best: u64 = 0xffffffffffffffff
+    var sink: f64 = 0.0
+    for pass in 0..<7:
+        let start = time.now()
+        for i in 0..<count:
+            sink = sink + (library(k, xs[i], ys[i]) if use_library else ours(k, xs[i], ys[i]))
+        let elapsed = time.since(start)
+        best = elapsed if elapsed < best else best
+        _ = pass
+    # keep the sum alive without printing it
+    if sink == 1.25:
+        print("")
+    return (f64)best / (f64)count
+
+pub func main(arguments: str[]) -> i32:
+    _ = arguments
+    var xs: f64[4096]
+    var ys: f64[4096]
+    var state: u64 = 0x5eed
+    var slowest: f64 = 0.0
+    print("  function    ours ns   libm ns   ratio")
+    for k in 0..<names.length:
+        for i in 0..<count:
+            for which in 0..<2:
+                state = state +% 0x9e3779b97f4a7c15
+                var z = state
+                z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9
+                z = (z ^ (z >> 27)) *% 0x94d049bb133111eb
+                let fraction = (f64)((z ^ (z >> 31)) >> 11) * 1.1102230246251565e-16
+                let value = lows[k] + (highs[k] - lows[k]) * fraction
+                if which == 0:
+                    xs[i] = value
+                else:
+                    ys[i] = value
+        let mine = time_function(k, xs, ys, false)
+        let theirs = time_function(k, xs, ys, true)
+        let ratio = mine / theirs
+        slowest = ratio if ratio > slowest else slowest
+        print(f"  {names[k]}  {mine}  {theirs}  {ratio}")
+    if slowest > 10.0:
+        print(f"math_speed: a function takes {slowest} times the C library's time")
+        return 1
+    print("ok math speed against the C library printed")
+    return 0

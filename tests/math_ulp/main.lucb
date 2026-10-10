@@ -1,0 +1,173 @@
+## math's elementary functions against arbitrary-precision references (reference.txt, from
+## generate.py with mpmath): every result within one ulp of the exact value, the largest
+## error per function printed. The f32 rows check math32 the same way, in f32 ulps.
+## `MATH_ULP_REFERENCE=path` checks another file of the same form, such as a larger one.
+import c
+from luce_std import files, math, math32
+import os
+import paths
+# valgrind: skip -- valgrind does not reproduce floating-point results bit for bit
+
+let names: str[20] = ["exp", "exp2", "expm1", "log", "log2", "log10", "log1p", "pow", "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "cbrt", "hypot"]
+
+## Function `k` of math at (x, y).
+func evaluate64(k: usize, x: f64, y: f64) -> f64:
+    match k:
+        0: return math.exp(x)
+        1: return math.exp2(x)
+        2: return math.expm1(x)
+        3: return math.log(x)
+        4: return math.log2(x)
+        5: return math.log10(x)
+        6: return math.log1p(x)
+        7: return math.pow(x, y)
+        8: return math.sin(x)
+        9: return math.cos(x)
+        10: return math.tan(x)
+        11: return math.asin(x)
+        12: return math.acos(x)
+        13: return math.atan(x)
+        14: return math.atan2(x, y)
+        15: return math.sinh(x)
+        16: return math.cosh(x)
+        17: return math.tanh(x)
+        18: return math.cbrt(x)
+        19: return math.hypot(x, y)
+        _: trap("function")
+
+## Function `k` of math32 at (x, y), both f32 values.
+func evaluate32(k: usize, x64: f64, y64: f64) -> f32:
+    let x = (f32)x64
+    let y = (f32)y64
+    match k:
+        0: return math32.exp(x)
+        1: return math32.exp2(x)
+        2: return math32.expm1(x)
+        3: return math32.log(x)
+        4: return math32.log2(x)
+        5: return math32.log10(x)
+        6: return math32.log1p(x)
+        7: return math32.pow(x, y)
+        8: return math32.sin(x)
+        9: return math32.cos(x)
+        10: return math32.tan(x)
+        11: return math32.asin(x)
+        12: return math32.acos(x)
+        13: return math32.atan(x)
+        14: return math32.atan2(x, y)
+        15: return math32.sinh(x)
+        16: return math32.cosh(x)
+        17: return math32.tanh(x)
+        18: return math32.cbrt(x)
+        19: return math32.hypot(x, y)
+        _: trap("function")
+
+## 2^e as a double, subnormal powers included.
+func power(e: i64) -> f64:
+    if e >= -1022:
+        return f64.bits((u64)(e + 1023) << 52)
+    return f64.bits((u64)1 << (u64)(e + 1074))
+
+## How far `actual` is from the exact `high + low`, in ulps of a float with `precision`
+## bits whose smallest normal exponent is `minimum`.
+func ulp_error(actual: f64, high: f64, low: f64, precision: i64, minimum: i64) -> f64:
+    if high == 0.0:
+        return 0.0 if actual == 0.0 else math.infinity
+    var exponent = (i64)((high.bits() >> 52) & 0x7ff) - 1023
+    if (high.bits() & 0x000fffffffffffff) == 0 and math.signbit(low) != math.signbit(high) and low != 0.0:
+        # just below a power of two, where the ulp is half the power's
+        exponent -= 1
+    if exponent < minimum:
+        exponent = minimum
+    return math.abs((actual - high) - low) / power(exponent - precision + 1)
+
+## The value of the hexadecimal digits `text`.
+func parse_hex(text: const u8[]) -> u64:
+    var value: u64 = 0
+    for character in text:
+        let digit = (u64)character
+        value = value * 16 + (digit - 48 if digit <= 57 else digit - 87)
+    return value
+
+## Where the fields of `line`, separated by single spaces, start and end: up to six, and
+## how many there were.
+func fields_of(line: const u8[]) -> (usize[6], usize[6], usize):
+    var starts: usize[6]
+    var ends: usize[6]
+    var count: usize = 0
+    var start: usize = 0
+    for i in 0..=line.length:
+        if i == line.length or line[i] == ' ':
+            if count < 6:
+                starts[count] = start
+                ends[count] = i
+            count += 1
+            start = i + 1
+    return (starts, ends, count)
+
+func find(name: str) -> usize?:
+    for k in 0..<names.length:
+        if names[k] == name:
+            return k
+    return none
+
+pub func main(arguments: str[]) -> i32!:
+    _ = arguments
+    let here = os.env("LUC_TEST_DIR") else "tests/math_ulp"
+    let default_path = try paths.join(here, "reference.txt")
+    defer default_path.release()
+    let path = os.env("MATH_ULP_REFERENCE") else (str)default_path.value
+    let text = try files.read((c.str)path)
+    defer text.release()
+    var worst: f64[40]
+    var counts: u64[40]
+    var failures = 0
+    let data = text.value
+    var line_start: usize = 0
+    for position in 0..<data.length:
+        if data[position] != '\n':
+            continue
+        let line = data[line_start..<position]
+        line_start = position + 1
+        if line.length == 0 or line[0] == '#':
+            continue
+        let (starts, ends, count) = fields_of(line)
+        assert(count == 6)
+        let label = (str)line[0..<ends[0]]
+        let single = label.bytes[label.length - 2] == '3'
+        let base = (str)label.bytes[0..<label.length - 2] if single else label
+        let k = find(base) else trap("unknown function in the reference")
+        let x = f64.bits(parse_hex(line[starts[1]..<ends[1]]))
+        let y = f64.bits(parse_hex(line[starts[2]..<ends[2]]))
+        let kind = line[starts[3]..<ends[3]][0]
+        let high = f64.bits(parse_hex(line[starts[4]..<ends[4]]))
+        let low = f64.bits(parse_hex(line[starts[5]..<ends[5]]))
+        let actual = (f64)evaluate32(k, x, y) if single else evaluate64(k, x, y)
+        let slot = k + (20 if single else 0)
+        counts[slot] += 1
+        var distance: f64 = 0.0
+        if kind == 'n':
+            distance = 0.0 if math.is_nan(actual) else math.infinity
+        elif kind == 'i':
+            distance = 0.0 if actual == math.copysign(math.infinity, high) else math.infinity
+        elif math.is_nan(actual) or math.is_infinite(actual):
+            distance = math.infinity
+        elif single:
+            distance = ulp_error(actual, high, low, 24, -126)
+        else:
+            distance = ulp_error(actual, high, low, 53, -1022)
+        if distance > worst[slot]:
+            worst[slot] = distance
+        if distance > 1.0:
+            failures += 1
+            if failures <= 20:
+                print(f"math_ulp: {label}({x}, {y}) = {actual}, {distance} ulp from {high} + {low}")
+    for slot in 0..<40:
+        if counts[slot] > 0:
+            let module = "math32" if slot >= 20 else "math"
+            print(f"  {module}.{names[slot % 20]}: {counts[slot]} inputs, at most {worst[slot]} ulp")
+    if failures > 0:
+        print(f"math_ulp: {failures} results more than one ulp from the reference")
+        return 1
+    print("ok math within one ulp of the arbitrary-precision references")
+    return 0

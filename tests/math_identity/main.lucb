@@ -1,0 +1,192 @@
+## Every math and math32 function over a fixed input set, its results' bits hashed: the
+## hashes in expected.lucb must come out on every target, so a result that differs by one
+## bit on one operating system fails here. The inputs are edge cases and, per function,
+## a thousand raw bit patterns, a thousand values in the function's working range and a
+## thousand log-uniform magnitudes, from a fixed seed. `MATH_IDENTITY_PRINT=1` prints the
+## table to check in.
+import expected
+from luce_std import math, math32
+import os
+
+## splitmix64: a fixed stream of 64-bit values from a seed.
+struct Stream:
+    var state: u64
+
+    func next() -> u64:
+        self.state = self.state +% 0x9e3779b97f4a7c15
+        var z = self.state
+        z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9
+        z = (z ^ (z >> 27)) *% 0x94d049bb133111eb
+        return z ^ (z >> 31)
+
+    ## Uniform in [first, last).
+    func uniform(first: f64, last: f64) -> f64:
+        let fraction = (f64)(self.next() >> 11) * 1.1102230246251565e-16
+        return first + (last - first) * fraction
+
+    ## A random sign times 2^e for e uniform in [-30, 30), times a mantissa in [1, 2).
+    func log_uniform() -> f64:
+        let bits = self.next()
+        let exponent = (u64)(1023 - 30) + (bits >> 58) % 60
+        return f64.bits((bits & 0x800fffffffffffff) | (exponent << 52))
+
+## The functions, in the order of expected.lucb's hashes; each has a working range.
+let names: str[35] = ["exp", "exp2", "expm1", "log", "log2", "log10", "log1p", "pow", "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "cbrt", "hypot", "erf", "erfc", "floor", "ceil", "round", "trunc", "sqrt", "mod", "remainder", "fma", "frexp", "scalbn", "modf", "nextafter", "pow_integers"]
+let lows: f64[35] = [-746.0, -1080.0, -40.0, 0.0, 0.0, 0.0, -1.0, 0.0, -10.0, -10.0, -10.0, -1.0, -1.0, -10.0, -10.0, -30.0, -30.0, -10.0, -100.0, -100.0, -7.0, -7.0, -1.0e6, -1.0e6, -1.0e6, -1.0e6, 0.0, -100.0, -100.0, -10.0, -1.0e10, -10.0, -1.0e6, -10.0, -4.0]
+let highs: f64[35] = [710.0, 1025.0, 710.0, 10.0, 10.0, 10.0, 10.0, 4.0, 10.0, 10.0, 10.0, 1.0, 1.0, 10.0, 10.0, 30.0, 30.0, 10.0, 100.0, 100.0, 7.0, 7.0, 1.0e6, 1.0e6, 1.0e6, 1.0e6, 100.0, 100.0, 100.0, 10.0, 1.0e10, 10.0, 1.0e6, 10.0, 4.0]
+
+let edges: u64[24] = [0x0000000000000000, 0x8000000000000000, 0x3ff0000000000000, 0xbff0000000000000, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000000000000, 0x0000000000000001, 0x8000000000000001, 0x000fffffffffffff, 0x0010000000000000, 0x7fefffffffffffff, 0xffefffffffffffff, 0x3fe0000000000000, 0x4000000000000000, 0x3ff921fb54442d18, 0x400921fb54442d18, 0x3fe921fb54442d18, 0x40862e42fefa39ef, 0xc0874910d52d3051, 0x3feffffffffffffe, 0x3ff0000000000001, 0x3c90000000000000, 0x7fe3bd7a8f8d7f3c]
+
+## A result's bits, every NaN as one: which NaN an invalid operation makes is the
+## processor's (x86-64's has the sign bit set, arm64's not), and Base promises none.
+func bits64(value: f64) -> u64:
+    return 0x7ff8000000000000 if value != value else value.bits()
+
+## The same for f32.
+func bits32(value: f32) -> u64:
+    return 0x7fc00000 if value != value else (u64)value.bits()
+
+## f64 results of function `k` at (x, y), as bits; two-result functions fold both.
+func result64(k: usize, x: f64, y: f64) -> u64:
+    match k:
+        0: return bits64(math.exp(x))
+        1: return bits64(math.exp2(x))
+        2: return bits64(math.expm1(x))
+        3: return bits64(math.log(x))
+        4: return bits64(math.log2(x))
+        5: return bits64(math.log10(x))
+        6: return bits64(math.log1p(x))
+        7: return bits64(math.pow(x, y))
+        8: return bits64(math.sin(x))
+        9: return bits64(math.cos(x))
+        10: return bits64(math.tan(x))
+        11: return bits64(math.asin(x))
+        12: return bits64(math.acos(x))
+        13: return bits64(math.atan(x))
+        14: return bits64(math.atan2(x, y))
+        15: return bits64(math.sinh(x))
+        16: return bits64(math.cosh(x))
+        17: return bits64(math.tanh(x))
+        18: return bits64(math.cbrt(x))
+        19: return bits64(math.hypot(x, y))
+        20: return bits64(math.erf(x))
+        21: return bits64(math.erfc(x))
+        22: return bits64(math.floor(x))
+        23: return bits64(math.ceil(x))
+        24: return bits64(math.round(x))
+        25: return bits64(math.trunc(x))
+        26: return bits64(math.sqrt(x))
+        27: return bits64(math.mod(x, y))
+        28: return bits64(math.remainder(x, y))
+        29: return bits64(math.fma(x, y, x * 0.75))
+        30:
+            let (fraction, exponent) = math.frexp(x)
+            return bits64(fraction) ^ (u64)(i64)exponent
+        31: return bits64(math.scalbn(x, (i32)(y.bits() % 2200) - 1100))
+        32:
+            let (fraction, whole) = math.modf(x)
+            return bits64(fraction) ^ (bits64(whole) *% 3)
+        33: return bits64(math.nextafter(x, y))
+        34: return bits64(math.pow(x, math.round(y * 20.0)))
+        _: trap("function")
+
+## The same for math32, at (x, y) rounded to f32.
+func result32(k: usize, x64: f64, y64: f64) -> u64:
+    let x = (f32)x64
+    let y = (f32)y64
+    match k:
+        0: return bits32(math32.exp(x))
+        1: return bits32(math32.exp2(x))
+        2: return bits32(math32.expm1(x))
+        3: return bits32(math32.log(x))
+        4: return bits32(math32.log2(x))
+        5: return bits32(math32.log10(x))
+        6: return bits32(math32.log1p(x))
+        7: return bits32(math32.pow(x, y))
+        8: return bits32(math32.sin(x))
+        9: return bits32(math32.cos(x))
+        10: return bits32(math32.tan(x))
+        11: return bits32(math32.asin(x))
+        12: return bits32(math32.acos(x))
+        13: return bits32(math32.atan(x))
+        14: return bits32(math32.atan2(x, y))
+        15: return bits32(math32.sinh(x))
+        16: return bits32(math32.cosh(x))
+        17: return bits32(math32.tanh(x))
+        18: return bits32(math32.cbrt(x))
+        19: return bits32(math32.hypot(x, y))
+        20: return bits32(math32.erf(x))
+        21: return bits32(math32.erfc(x))
+        22: return bits32(math32.floor(x))
+        23: return bits32(math32.ceil(x))
+        24: return bits32(math32.round(x))
+        25: return bits32(math32.trunc(x))
+        26: return bits32(math32.sqrt(x))
+        27: return bits32(math32.mod(x, y))
+        28: return bits32(math32.remainder(x, y))
+        29: return bits32(math32.fma(x, y, x * 0.75))
+        30:
+            let (fraction, exponent) = math32.frexp(x)
+            return bits32(fraction) ^ (u64)(i64)exponent
+        31: return bits32(math32.scalbn(x, (i32)(y64.bits() % 320) - 160))
+        32:
+            let (fraction, whole) = math32.modf(x)
+            return bits32(fraction) ^ (bits32(whole) *% 3)
+        33: return bits32(math32.nextafter(x, y))
+        34: return bits32(math32.pow(x, math32.round(y * 20.0)))
+        _: trap("function")
+
+## Mixes one result into the running hash.
+func mix(hash: u64, value: u64) -> u64:
+    let h = (hash ^ value) *% 0x100000001b3
+    return h ^ (h >> 29)
+
+## Function `k`'s hash over every input, f64 (`single` false) or f32.
+func hash_function(k: usize, single: bool) -> u64:
+    var stream = Stream(state = 0x5eed0000 + (u64)k)
+    var hash: u64 = 0xcbf29ce484222325
+    for a in edges:
+        for b in edges:
+            let x = f64.bits(a)
+            let y = f64.bits(b)
+            hash = mix(hash, result32(k, x, y) if single else result64(k, x, y))
+    for kind in 0..<3:
+        for i in 0..<1000:
+            var x: f64
+            var y: f64
+            if kind == 0:
+                x = f64.bits(stream.next())
+                y = f64.bits(stream.next())
+            elif kind == 1:
+                x = stream.uniform(lows[k], highs[k])
+                y = stream.uniform(lows[k], highs[k])
+            else:
+                x = stream.log_uniform()
+                y = stream.log_uniform()
+            hash = mix(hash, result32(k, x, y) if single else result64(k, x, y))
+            _ = i
+    return hash
+
+pub func main(arguments: str[]) -> i32:
+    _ = arguments
+    let printing = os.env("MATH_IDENTITY_PRINT") != none
+    var failures = 0
+    if printing:
+        print("pub let hashes: u64[70] = [")
+    for single in [false, true]:
+        for k in 0..<names.length:
+            let hash = hash_function(k, single)
+            let slot = k + (names.length if single else 0)
+            if printing:
+                print(f"    0x{hash:016x},  # {names[k]}{"32" if single else ""}")
+            elif hash != expected.hashes[slot]:
+                print(f"math_identity: {names[k]}{"32" if single else ""} hashes to 0x{hash:016x}, expected 0x{expected.hashes[slot]:016x}")
+                failures += 1
+    if printing:
+        print("]")
+        return 0
+    if failures > 0:
+        print(f"math_identity: {failures} of 70 functions differ from the checked-in results")
+        return 1
+    print("ok math results identical to the checked-in hashes (70 functions)")
+    return 0

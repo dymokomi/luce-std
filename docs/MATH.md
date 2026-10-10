@@ -1,13 +1,16 @@
 # Numerical contracts and reference coverage
 
-`math` operates on f64 and `math32` on f32. Native Base programs call the host
-math library through the C ABI; f32 wrappers call its single-precision functions.
-The wrappers allocate no Base storage. They return floating-point values directly,
-including NaN and infinity, and do not translate host errno or floating-point
-exception flags into Base errors. Those side effects follow the host library.
-See [the host error model](https://man7.org/linux/man-pages/man7/math_error.7.html).
-Base enforces the exact negative-infinity limit of expm1 and the dividend's sign
-on a zero remainder; some host implementations violate these under directed rounding.
+`math` operates on f64 and `math32` on f32. The elementary functions (exp, exp2,
+expm1, log, log2, log10, log1p, pow, sin, cos, tan, asin, acos, atan, atan2, sinh,
+cosh, tanh, cbrt, hypot, erf and erfc) are written in Base in `src/math/`, so a
+program gets the same bits from them on arm64-macos, x86_64-linux and
+x86_64-windows; `math32` evaluates them in f64 and rounds once. The exactly
+specified operations (floor, ceil, round, trunc, sqrt, fma, mod, remainder,
+nextafter, frexp, scalbn, modf) call the host C library, whose results IEEE 754
+fixes bit for bit. Nothing allocates. Results are returned directly, NaN and
+infinity included; errno and floating-point exception flags are not translated
+into Base errors and are whatever the arithmetic leaves. Base enforces the
+dividend's sign on a zero remainder, which some hosts lose under directed rounding.
 
 ## Operations
 
@@ -26,7 +29,7 @@ rounding operations retain their specified direction regardless of that environm
 | `mod` | `x - trunc(x/y)*y`, with the sign of x on a zero result. A zero divisor or infinite dividend produces NaN. |
 | `remainder` | `x - n*y`, where n is the nearest integer quotient with ties to even, independently of the current rounding direction. A zero result has x's sign. |
 | `pow` | Real x raised to y. Negative finite bases require an integral exponent for a real result. Zero exponent and base +1 produce 1, including with a NaN counterpart. |
-| `exp`, `exp2` | Exponentials with bases e and 2. Overflow and underflow follow host floating-point behavior. |
+| `exp`, `exp2` | Exponentials with bases e and 2. Overflow gives infinity; underflow rounds once into the subnormals. |
 | `expm1` | `exp(x)-1` evaluated without the direct subtraction's cancellation near zero; signed zero is preserved. |
 | `log`, `log2`, `log10` | Logarithms for positive inputs. Zero gives negative infinity; negative inputs give NaN. |
 | `log1p` | `log(1+x)` retaining small x. At -1, negative infinity; below -1, NaN. Signed zero is preserved. |
@@ -35,7 +38,7 @@ rounding operations retain their specified direction regardless of that environm
 | `atan` | Principal inverse tangent in [-pi/2,pi/2]; signed zero is preserved. |
 | `atan2(y,x)` | Four-quadrant angle in [-pi,pi]. Both argument signs matter, including signed zeros on the axes. |
 | `sinh`, `cosh`, `tanh` | Hyperbolic functions. Sinh and tanh preserve signed zero; tanh approaches signed 1 at infinite arguments. |
-| `erf`, `erfc` | The error function, odd, from -1 to 1, and its complement `1 - erf(x)`, from 2 to 0, computed without the subtraction's cancellation; erfc underflows to zero above about 27.2. Written in Base after fdlibm's method, so only `exp` comes from the host; `math32` evaluates them in f64 and rounds once. Signed zero is preserved by erf; ±infinity gives ±1 (erf) and 0 or 2 (erfc). |
+| `erf`, `erfc` | The error function, odd, from -1 to 1, and its complement `1 - erf(x)`, from 2 to 0, computed without the subtraction's cancellation; erfc underflows to zero above about 27.2. Written in Base after fdlibm's method; `math32` evaluates them in f64 and rounds once. Signed zero is preserved by erf; ±infinity gives ±1 (erf) and 0 or 2 (erfc). |
 | `fma` | Multiply x and y, then add z with one final rounding; no separately rounded product. |
 | `nextafter`, `next_up`, `next_down` | Adjacent representable values. Equal nextafter arguments return the destination, including its zero sign. NaN arguments give NaN. |
 | `frexp` | Exact `(fraction, exponent)` decomposition for finite nonzero values, with absolute fraction in [0.5,1). Zero and nonfinite values return `(x,0)`. |
@@ -44,8 +47,8 @@ rounding operations retain their specified direction regardless of that environm
 
 The complete special-case rules for [power](https://man7.org/linux/man-pages/man3/pow.3.html),
 [atan2](https://man7.org/linux/man-pages/man3/atan2.3.html) and
-[remainder](https://man7.org/linux/man-pages/man3/remainder.3.html) come from their
-host interfaces. Base does not promise a particular NaN payload from arithmetic.
+[remainder](https://man7.org/linux/man-pages/man3/remainder.3.html) are C99 Annex F's.
+Base does not promise a particular NaN payload from arithmetic.
 
 Classification, absolute value and copying a sign inspect or modify representation
 bits. Classification therefore accepts signaling NaNs without doing floating-point
@@ -55,18 +58,49 @@ propagates NaNs and traps on reversed non-NaN bounds. Integer helpers use i64;
 checked absolute value and floor division return none on unrepresentable results,
 and checked floor modulus accepts the minimum i64 modulo -1 as zero.
 
+## Methods
+
+Each function names its reference method in its file; the code is written anew from
+the method, and the tables are computed by `tools/math_tables.py` with mpmath.
+Intermediate values are carried as pairs of doubles (`double_double.lucb`: Knuth's
+two-sum, Dekker's product with Veltkamp's split), without fused multiply-adds.
+
+| Functions | Method |
+| --- | --- |
+| `exp`, `exp2`, `expm1` | Tang's table-driven exponential with 2^(j/128) as pairs (ARM optimized-routines, musl) |
+| `log`, `log2`, `log10`, `log1p` | Tang's table-driven logarithm over 128 intervals (ARM optimized-routines' selection), log as a pair |
+| `pow` | e^(y·log x) with log x as a pair to about 2^-68 (ARM optimized-routines, musl) |
+| `sin`, `cos`, `tan` | fdlibm: Cody-Waite reduction by pi/2 in four parts, Payne-Hanek with 2/pi's bits above 2^20·pi/2, Taylor kernels; tan as sin/cos in pairs |
+| `atan`, `atan2` | Gal's accurate tables: atan(j/64) plus a short series in (y - c·x)/(x + c·y) |
+| `asin`, `acos` | fdlibm: a fitted polynomial to 1/2, pi/2 - 2·asin(sqrt((1 - x)/2)) beyond |
+| `sinh`, `cosh`, `tanh` | fdlibm's definitions in e^x, with e^x, its reciprocal and quotients as pairs; series near zero |
+| `cbrt` | fdlibm's plan: a cubic guess, one Halley step, one Newton step from the exact residual |
+| `hypot` | Exact squares as pairs and a corrected root (Borges 2019), scaled by 2^±600 |
+| `erf`, `erfc` | fdlibm's rational approximations, with math's own exp |
+
 ## Precision policy and evidence
 
-Base does not currently promise identical transcendental bits across supported
-hosts or a certified global ULP bound. The native compiler must preserve the
-specified operation and precision, including fused arithmetic and special values.
-Tests run native optimization levels 0–3 and both C comparison configurations.
-The contract suite exercises all four host rounding directions, including halfway
-fma, subnormal scalbn, sqrt rounding, exact remainder vectors, signed-zero and
-infinity rules, and signaling-NaN classification without raising invalid. It also
-verifies that calls retain the selected rounding direction.
+The elementary functions give identical bits on every supported target: Base
+neither contracts nor reassociates float arithmetic, x86-64 uses SSE2 (no x87),
+and the code uses no fused multiply-add and no host library call. Their results are
+within one ulp, and in the measured inputs within 0.51 ulp for most and 0.6 ulp for
+all; they are not promised correctly rounded. Special values follow C99 Annex F.
+These promises hold in the default rounding direction, which the exact sums and the
+reductions assume; under a directed one the results stay close but may differ.
+Which NaN an invalid operation returns is the processor's (x86-64's has the sign bit
+set); Base promises none.
 
-The accuracy gate contains two independent reference campaigns:
+- `tests/math_identity` hashes the results of every math and math32 function over
+  edge cases and three thousand inputs each from a fixed seed; the checked-in
+  hashes must come out on every target.
+- `tests/math_ulp` checks every elementary function, f64 and f32, against
+  arbitrary-precision references (`generate.py`, mpmath 1.3.0 at 400 and 600 bits)
+  and asserts one ulp, printing the largest error of each.
+  `generate.py --count N` with `MATH_ULP_REFERENCE` runs the same check on more inputs.
+- `tests/math_speed` times each function against the host library and prints the
+  table; it fails only past ten times the library's time.
+
+The older accuracy gate contains two independent reference campaigns:
 
 - 100 log1p/expm1 vectors computed during each run with Python Decimal at 160 and
   240 digits. Their rounded references must agree; the test budget is two ULPs.
