@@ -11,7 +11,7 @@ pub let hashes: u64[70] = [
     0x3584f0f109d6db8c,  # pow
     0x46f60773f5556e1d,  # sin
     0xcb68ea0f0bec844d,  # cos
-    0xc1c88462f287032e,  # tan
+    0xebe476e1fdb66b63,  # tan
     0x60e35d8f1deb9e31,  # asin
     0xb907d2f567f76958,  # acos
     0x5231ca6ff3894b99,  # atan

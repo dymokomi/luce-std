@@ -3,8 +3,8 @@
 #   trig - sin, cos, sincos and tan, and the reduction of an argument by pi/2
 #
 #   DESCRIPTION:
-#       sin and cos below 2^20 first try the table method at the end of this file, which
-#       returns only results it proves correctly rounded. Everything else takes the
+#       sin, cos and tan below 2^20 first try the table method at the end of this file,
+#       which returns only results it proves correctly rounded. Everything else takes the
 #       accurate method. That method is fdlibm's (Sun's, as in FreeBSD and musl): x = n·pi/2 + r with r as a
 #       pair, |r| <= pi/4, then sin or cos of r by its series, picked and signed by n mod 4.
 #       Below 2^20·pi/2 the reduction is Cody and Waite's, with pi/2 in three 33-bit parts
@@ -159,7 +159,7 @@ func cos_accurate(x: f64) -> f64:
     return -(h + l) if quadrant == 1 or quadrant == 2 else h + l
 
 ## tan x: sin r / cos r as pairs, or -cos r / sin r for odd n.
-func tan_value(x: f64) -> f64:
+func tan_accurate(x: f64) -> f64:
     let magnitude = x.bits() & 0x7fffffffffffffff
     if magnitude < 0x3e40000000000000:
         # below 2^-27, x³/3 is under half an ulp of x
@@ -272,3 +272,28 @@ func sincos_value(x: f64) -> (f64, f64):
         if rounds_alike(sh, sl) and rounds_alike(ch, cl):
             return (sh + sl, ch + cl)
     return (sin_value(x), cos_value(x))
+
+## tan x as the quotient of the table method's sin x and cos x, each within 2^-62.3 of
+## itself plus 2^-86, with its remainder by a fused multiply-add. Where both are at least
+## 2^-20 that is within 2^-61.2 of tan x; the test allows 2^-60. Near a multiple of pi/2,
+## and for the inputs the test turns down, tan_accurate.
+func tan_value(x: f64) -> f64:
+    if (x.bits() & 0x7fffffffffffffff) -% fast_trig_low < fast_trig_span:
+        let (n, rh, rl) = reduce_step(x)
+        let z = rh * rh
+        let c = cos_less_one(z)
+        let t = sin_less_r(rh, z)
+        let (ah, al) = sine_entry(n)
+        let (bh, bl) = sine_entry(n +% 64)
+        # rotate's low parts reach 2^-13 of the high ones: renormalize before dividing
+        let (s0, s1) = rotate(ah, al, bh, bl, rh, rl, c, t)
+        let (c0, c1) = rotate(bh, bl, -ah, -al, rh, rl, c, t)
+        let (sh, sl) = fast_two_sum(s0, s1)
+        let (ch, cl) = fast_two_sum(c0, c1)
+        if abs(sh) >= 9.5367431640625e-07 and abs(ch) >= 9.5367431640625e-07:
+            let qh = sh / ch
+            let ql = ((-qh).mul_add(ch, sh) + (sl - qh * cl)) / ch
+            let bound = abs(qh) * 8.673617379884035e-19
+            if qh + (ql - bound) == qh + (ql + bound):
+                return qh + ql
+    return tan_accurate(x)
