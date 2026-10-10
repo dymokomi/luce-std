@@ -3,7 +3,8 @@
 #   roots - cbrt and hypot
 #
 #   DESCRIPTION:
-#       cbrt follows fdlibm's plan: a first guess, an iteration to about 2^-40, then one
+#       hypot first tries the fast path at the end of this file, which returns only results
+#       it proves correctly rounded. cbrt follows fdlibm's plan: a first guess, an iteration to about 2^-40, then one
 #       Newton step from the exact residual A - y³ (y³ as a pair), so the result rounds once
 #       from an error near 2^-80. Here the guess is a cubic in the mantissa times a table's
 #       cube root of 2^(exponent mod 3), and the iteration is Halley's. hypot squares both arguments exactly as pairs (Dekker),
@@ -49,7 +50,7 @@ func cbrt_value(x: f64) -> f64:
 
 ## sqrt(x² + y²) without overflow or underflow in the squares, within half an ulp and a
 ## hair; an infinite argument gives +infinity even beside NaN.
-func hypot_value(x: f64, y: f64) -> f64:
+func hypot_accurate(x: f64, y: f64) -> f64:
     var a = abs(x)
     var b = abs(y)
     if a == infinity or b == infinity:
@@ -82,3 +83,29 @@ func hypot_value(x: f64, y: f64) -> f64:
     let exponent = (i64)(rh.bits() >> 52) - 1023
     let down = power_of_two(-exponent)
     return scale_pair(rh * down, rl * down, exponent + scale)
+
+# mark: The fast path =========================================================================
+
+# hypot with the larger magnitude in [2^-500, 2^500]: both squares exact as pairs by fused
+# multiply-adds (the smaller's error is negligible even where it underflows), their sum
+# with its error kept, and the root of the sum corrected by the exact residual s - r², a
+# fused multiply-add: Borges's method without the scaling. The pair is within 2^-100 of the
+# hypotenuse; the test allows 2^-63 of it, so a fast return is the correctly rounded value.
+
+func hypot_value(x: f64, y: f64) -> f64:
+    let a = abs(x)
+    let b = abs(y)
+    let swap = b > a
+    let large = b if swap else a
+    let small = a if swap else b
+    if large.bits() -% 0x20b0000000000000 < 0x5f30000000000000 - 0x20b0000000000000:
+        let (lh, ll) = two_square(large)
+        let (sh, sl) = two_square(small)
+        let (q, qe) = fast_two_sum(lh, sh)
+        let ql = qe + (ll + sl)
+        let r = c_sqrt(q)
+        let rl = ((-r).mul_add(r, q) + ql) / (r + r)
+        let bound = r * 1.0842021724855044e-19
+        if r + (rl - bound) == r + (rl + bound):
+            return r + rl
+    return hypot_accurate(x, y)

@@ -92,6 +92,7 @@ two-sum, Dekker's fast two-sum, and a product's exact error by a fused multiply-
 | `sinh`, `cosh`, `tanh` | First e^a and its reciprocal as pairs from the fast exp, or below 2^-5 the series with its first term exact, returned only when the error bound proves the rounding |
 | `sinh`, `cosh`, `tanh` | fdlibm's definitions in e^x, with e^x, its reciprocal and quotients as pairs; series near zero |
 | `cbrt` | fdlibm's plan: a cubic guess, one Halley step, one Newton step from the exact residual |
+| `hypot` | With the larger magnitude in [2^-500, 2^500] first the same without scaling, by fused multiply-adds, returned only when its error bound proves the rounding |
 | `hypot` | Exact squares as pairs and a corrected root (Borges 2019), scaled by 2^±600 |
 | `erf`, `erfc` | fdlibm's rational approximations, with math's own exp |
 
