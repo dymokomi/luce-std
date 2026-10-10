@@ -89,6 +89,7 @@ two-sum, Dekker's fast two-sum, and a product's exact error by a fused multiply-
 | `atan`, `atan2` | For magnitudes in [2^-500, 2^500] first the same table with v as an exact quotient pair by fused multiply-adds and the quadrant picked branch-free, returned only when its error bound proves the rounding |
 | `atan`, `atan2` | Gal's accurate tables: atan(j/64) plus a short series in (y - c·x)/(x + c·y) |
 | `asin`, `acos` | fdlibm: a fitted polynomial to 1/2, pi/2 - 2·asin(sqrt((1 - x)/2)) beyond |
+| `sinh`, `cosh`, `tanh` | First e^a and its reciprocal as pairs from the fast exp, or below 2^-5 the series with its first term exact, returned only when the error bound proves the rounding |
 | `sinh`, `cosh`, `tanh` | fdlibm's definitions in e^x, with e^x, its reciprocal and quotients as pairs; series near zero |
 | `cbrt` | fdlibm's plan: a cubic guess, one Halley step, one Newton step from the exact residual |
 | `hypot` | Exact squares as pairs and a corrected root (Borges 2019), scaled by 2^±600 |
