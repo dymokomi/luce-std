@@ -64,7 +64,7 @@ and checked floor modulus accepts the minimum i64 modulo -1 as zero.
 Each function names its reference method in its file; the code is written anew from
 the method, and the tables are computed by `tools/math_tables.py` with mpmath.
 Intermediate values are carried as pairs of doubles (`double_double.lucb`: Knuth's
-two-sum, Dekker's product with Veltkamp's split), without fused multiply-adds.
+two-sum, Dekker's fast two-sum, and a product's exact error by a fused multiply-add).
 
 | Functions | Method |
 | --- | --- |
@@ -84,7 +84,8 @@ two-sum, Dekker's product with Veltkamp's split), without fused multiply-adds.
 
 The elementary functions give identical bits on every supported target: Base
 neither contracts nor reassociates float arithmetic, x86-64 uses SSE2 (no x87),
-and the code uses no fused multiply-add and no host library call. Their results are
+and the code's fused multiply-adds (`mul_add`) are IEEE 754's, the same bits everywhere:
+an instruction where the processor has one and the C library's `fma` otherwise. Their results are
 within one ulp, and in the measured inputs within 0.51 ulp for most and 0.6 ulp for
 all; they are not promised correctly rounded. Where a function has a fast path, the
 fast path returns only results its error bound proves correctly rounded and hands

@@ -1,6 +1,5 @@
 module.lucb
 double_double.lucb
-tables.lucb
 exp.lucb
 log.lucb
 pow.lucb

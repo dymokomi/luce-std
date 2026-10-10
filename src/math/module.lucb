@@ -12,6 +12,7 @@
 #       functions are Base.
 #
 #==============================================================================================
+from math_tables import asin_coefficients, atan_table_high, atan_table_low, exp_table_high, exp_table_low, inverse_ln2_128, inverse_step, ln2_128_high, ln2_128_low, ln2_double_high, ln2_double_low, ln2_high, ln2_low, log10_e_high, log10_e_low, log2_e_high, log2_e_low, log_inverse, log_point, log_table_high, log_table_low, pi_high, pi_low, pio2_1, pio2_2, pio2_3, pio2_4, pio2_high, pio2_low, sine_table, step_1, step_2, step_3, two_over_pi, two_over_pi_double
 extern func c_floor as "floor"(x: f64) -> f64
 extern func c_ceil as "ceil"(x: f64) -> f64
 extern func c_round as "round"(x: f64) -> f64

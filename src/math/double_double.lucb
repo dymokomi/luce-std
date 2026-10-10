@@ -5,10 +5,12 @@
 #   DESCRIPTION:
 #       The elementary functions carry intermediate values as a pair `(high, low)` whose
 #       exact sum is the value, `low` far below an ulp of `high`: about 106 bits. The
-#       error-free transformations here are Knuth's two-sum, Dekker's fast two-sum and
-#       Dekker's product with Veltkamp's split, written with plain additions and products
-#       and no fused multiply-add, so every target computes the same bits. Base neither
-#       contracts nor reassociates float arithmetic (base.md §7.2), which these depend on.
+#       error-free transformations here are Knuth's two-sum, Dekker's fast two-sum, and the
+#       product's error as one fused multiply-add (`mul_add`, base.md §7.2), which IEEE 754
+#       defines bit for bit: one instruction on arm64 and x86-64-v3, the C library's fma
+#       below v3, the same bits either way. Veltkamp's split remains for the logarithm's
+#       quotient. Base neither contracts nor reassociates other float arithmetic, which
+#       these depend on.
 #
 #==============================================================================================
 
@@ -33,18 +35,16 @@ inline func split(a: f64) -> (f64, f64):
     let high = t - (t - a)
     return (high, a - high)
 
-## `a * b` as the rounded product and its exact error, when neither underflows.
+## `a * b` as the rounded product and its exact error, when the error is not below the
+## normal range: the fused `a·b - p`, which is that error exactly.
 inline func two_product(a: f64, b: f64) -> (f64, f64):
     let p = a * b
-    let (ah, al) = split(a)
-    let (bh, bl) = split(b)
-    return (p, ((ah * bh - p) + ah * bl + al * bh) + al * bl)
+    return (p, a.mul_add(b, -p))
 
 ## `a * a` as the rounded square and its exact error.
 inline func two_square(a: f64) -> (f64, f64):
     let p = a * a
-    let (ah, al) = split(a)
-    return (p, ((ah * ah - p) + 2.0 * ah * al) + al * al)
+    return (p, a.mul_add(a, -p))
 
 ## The pair `(ah, al)` times the pair `(bh, bl)`, to about 2^-104 relative.
 inline func multiply_pairs(ah: f64, al: f64, bh: f64, bl: f64) -> (f64, f64):
