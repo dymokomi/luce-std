@@ -79,6 +79,7 @@ two-sum, Dekker's fast two-sum, and a product's exact error by a fused multiply-
 | `pow` | e^(y·log x) with log x as a pair to about 2^-68 (ARM optimized-routines, musl) |
 | `sin`, `cos`, `sincos` | Below 2^20 first a table of sin(k·pi/128) as pairs, sin(a + r) = A·cos r + B·sin r with B·r exact (IBM's libultim, CORE-MATH), returned only when its error bound proves the rounding; otherwise as `tan` |
 | `sin`, `cos`, `tan` | fdlibm: Cody-Waite reduction by pi/2 in four parts, Payne-Hanek with 2/pi's bits above 2^20·pi/2, Taylor kernels; tan as sin/cos in pairs |
+| `atan`, `atan2` | For magnitudes in [2^-500, 2^500] first the same table with v as an exact quotient pair by fused multiply-adds and the quadrant picked branch-free, returned only when its error bound proves the rounding |
 | `atan`, `atan2` | Gal's accurate tables: atan(j/64) plus a short series in (y - c·x)/(x + c·y) |
 | `asin`, `acos` | fdlibm: a fitted polynomial to 1/2, pi/2 - 2·asin(sqrt((1 - x)/2)) beyond |
 | `sinh`, `cosh`, `tanh` | fdlibm's definitions in e^x, with e^x, its reciprocal and quotients as pairs; series near zero |

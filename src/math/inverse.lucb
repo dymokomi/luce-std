@@ -3,7 +3,8 @@
 #   inverse - The inverse trigonometric functions: atan, atan2, asin and acos
 #
 #   DESCRIPTION:
-#       atan follows the table-driven method of Gal's accurate tables (as in IBM's
+#       atan and atan2 of arguments between 2^-500 and 2^500 first try the fast path at the
+#       end of this file, which returns only results it proves correctly rounded. atan follows the table-driven method of Gal's accurate tables (as in IBM's
 #       libultim, which glibc used): for t in [0, 1], c = j/64 is the nearest point and
 #       atan t = atan c + atan v with v = (t - c)/(1 + t·c), |v| <= 2^-7, whose series to
 #       v^9 stays below 2^-70 of v. t above 1 uses pi/2 - atan(1/t). For t = y/x, v is
@@ -45,7 +46,7 @@ inline func atan2_pair(y: f64, x: f64) -> (f64, f64):
     return add_pairs(f64.bits(pio2_high), f64.bits(pio2_low), -h, -l)
 
 ## The arctangent, in [-pi/2, pi/2].
-func atan_value(x: f64) -> f64:
+func atan_accurate(x: f64) -> f64:
     let magnitude = x.bits() & 0x7fffffffffffffff
     if magnitude < 0x3e40000000000000:
         # below 2^-27, x³/3 is under half an ulp of x: x itself, signed zero kept
@@ -58,7 +59,7 @@ func atan_value(x: f64) -> f64:
     return copysign(h + l, x)
 
 ## The angle of the point (x, y), in [-pi, pi], with Annex F's signed zeros and infinities.
-func atan2_value(y: f64, x: f64) -> f64:
+func atan2_accurate(y: f64, x: f64) -> f64:
     if x != x or y != y:
         return x + y
     let ay = abs(y)
@@ -168,3 +169,86 @@ func acos_value(x: f64) -> f64:
         return 2.0 * (sh + sl)
     let (h, hl) = two_sum(f64.bits(pi_high), -2.0 * sh)
     return h + (hl + (f64.bits(pi_low) - 2.0 * sl))
+
+# mark: The fast path =========================================================================
+
+# atan and atan2 of magnitudes in [2^-500, 2^500] first try the same table with fused
+# multiply-adds: for n <= d, c = j/64 nearest n/d, and v = (n - c·d)/(d + c·n) with both
+# the numerator and the denominator exact pairs (fused products and two-sums) and the
+# quotient's remainder by a fused multiply-add, so v is good to about 2^-100. atan c + v is
+# an exact sum (atan c is zero or above 2^-6, |v| below 2^-7), and v³·S(v²), atan's series
+# to v^9, is under 2^-22 of v and summed in doubles. The quadrant is a base of 0, pi/2 or pi
+# and a sign, picked by selections; the base's sum is exact again.
+#
+# The error budget, relative to the result: the series' truncation (v^11/11 against v)
+# 2^-80; its evaluation 2^-75; the table, the quotient and pi's parts 2^-99; four
+# roundings of terms under 2^-22 of the result 2^-73; the quadrant's base adds at most a
+# factor two, as pi/2 - a >= pi/4. Under 2^-71 in all; the test allows 2^-63 of h, so a
+# fast return is the correctly rounded value.
+
+## The bits of 2^-500, and the span from it to 2^500.
+let atan_low_bits: u64 = 0x20b0000000000000
+let atan_span_bits: u64 = 0x5f30000000000000 - 0x20b0000000000000
+
+## atan(n/d) for 0 < n <= d as a pair.
+inline func atan_ratio_fast(n: f64, d: f64) -> (f64, f64):
+    let jd = (n / d * 64.0 + round_shift) - round_shift
+    let c = jd * 0.015625
+    let (p, pe) = two_product(c, d)
+    let (nh, ne) = two_sum(n, -p)
+    let (q, qe) = two_product(c, n)
+    let (dh, de) = fast_two_sum(d, q)
+    let vh = nh / dh
+    let vl = ((-vh).mul_add(dh, nh) + ((ne - pe) - vh * (de + qe))) / dh
+    let z = vh * vh
+    let series = vh * z * z.mul_add(z.mul_add(z.mul_add(0.1111111111111111, -0.14285714285714285), 0.2), -0.3333333333333333)
+    let j = (usize)(i64)jd
+    let (h, he) = fast_two_sum(f64.bits(atan_table_high[j]), vh)
+    return (h, he + (f64.bits(atan_table_low[j]) + (vl + series)))
+
+## Whether a magnitude is in the fast path's range.
+inline func atan_in_range(a: f64) -> bool:
+    return a.bits() -% atan_low_bits < atan_span_bits
+
+## The angle of (b, a) for a and b positive in range, as base + sign·atan(min/max): the
+## quadrant of (x < 0, |y| > |x|) picks the base, 0, pi/2 or pi, and the sign.
+inline func angle_fast(a: f64, b: f64, behind: bool) -> (f64, f64):
+    let swapped = a > b
+    let n = b if swapped else a
+    let d = a if swapped else b
+    let (h, l) = atan_ratio_fast(n, d)
+    let negate = swapped != behind
+    let half_h = f64.bits(pio2_high)
+    let half_l = f64.bits(pio2_low)
+    let whole_h = f64.bits(pi_high)
+    let whole_l = f64.bits(pi_low)
+    let behind_h = whole_h if behind else 0.0
+    let behind_l = whole_l if behind else 0.0
+    let base_h = half_h if swapped else behind_h
+    let base_l = half_l if swapped else behind_l
+    let sh = -h if negate else h
+    let sl = -l if negate else l
+    let (s, se) = two_sum(base_h, sh)
+    return (s, se + (base_l + sl))
+
+func atan_value(x: f64) -> f64:
+    let a = abs(x)
+    if atan_in_range(a):
+        let (h, l) = angle_fast(a, 1.0, false)
+        if rounds_within_inverse(h, l):
+            return copysign(h + l, x)
+    return atan_accurate(x)
+
+func atan2_value(y: f64, x: f64) -> f64:
+    let a = abs(y)
+    let b = abs(x)
+    if atan_in_range(a) and atan_in_range(b):
+        let (h, l) = angle_fast(a, b, x < 0.0)
+        if rounds_within_inverse(h, l):
+            return copysign(h + l, y)
+    return atan2_accurate(y, x)
+
+## Whether h + l rounds the same at both ends of 2^-63 of h.
+inline func rounds_within_inverse(h: f64, l: f64) -> bool:
+    let bound = abs(h) * 1.0842021724855044e-19
+    return h + (l - bound) == h + (l + bound)
