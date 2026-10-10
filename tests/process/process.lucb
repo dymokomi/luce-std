@@ -1,11 +1,13 @@
 ## The `process` module against its archive: `run` spawns a child, waits for it, and
 ## answers its exit status with the captured standard output and error, owned by the
-## result and released with it. The child programs -- `echo` and `sh` -- resolve through
-## PATH on every POSIX host these tests run on, and on Windows from Git's bash.
+## result and released with it. The child program is `sh`, which resolves through PATH on
+## every POSIX host these tests run on, and on Windows to Git's; Windows has no `echo`
+## program on PATH outside Git's bash.
 
 test "run captures a child's standard output and a zero exit status":
-    let arguments: c.str[2] = ["-n", "hello there"]
-    let done = try run("echo", arguments)
+    # `hello there` reaches the child as one argument, the space and all
+    let arguments: c.str[4] = ["-c", "printf %s \"$1\"", "sh", "hello there"]
+    let done = try run("sh", arguments)
     defer done.release()
     let status = done.value.exit_code
     let out = done.value.output

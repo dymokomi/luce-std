@@ -1,11 +1,12 @@
 # process: running a program to completion, a background command waited for, environment
-# variables and the working directory.
+# variables and the working directory. The child is always `sh`: Windows has no `echo`
+# program on PATH outside Git's bash.
 from luce_std import paths, process
 
 pub func main(arguments: list[str]) -> int!:
     let done = process.run("sh", ["-c", "echo out; echo err 1>&2; exit 3"])
     print(done.exit_code, done.output, done.error_output)
-    print(process.run("echo", ["-n", "hi"]).output)
+    print(process.run("sh", ["-c", "printf %s \"$1\"", "sh", "hi there"]).output)
     with process.Command("sh", ["-c", "echo first; exit 7"]) as command:
         print(command.wait(), command.output(), command.is_finished())
     process.set_variable("LUCE_STD_SURFACE", "value=with=equals")
