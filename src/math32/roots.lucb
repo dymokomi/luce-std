@@ -1,0 +1,21 @@
+#==============================================================================================
+#
+#   roots - hypot in single precision
+#
+#   DESCRIPTION:
+#       The squares of two f32 are exact as doubles, never overflow or underflow, and their
+#       sum and its root round once each, so the double is within 2^-52 of the hypotenuse.
+#       When every value within 2^-50 rounds to one f32, that is the correctly rounded
+#       result; infinities, NaN and the inputs the test turns down take math's f64 result
+#       rounded once, as before.
+#
+#==============================================================================================
+
+func hypot_value(x: f32, y: f32) -> f32:
+    if (x.bits() & magnitude_mask) < exponent_mask and (y.bits() & magnitude_mask) < exponent_mask:
+        let a = (f64)x
+        let b = (f64)y
+        let h = math.sqrt(a * a + b * b)
+        if rounds_once(h, 8.881784197001252e-16):
+            return (f32)h
+    return (f32)math.hypot((f64)x, (f64)y)

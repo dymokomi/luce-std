@@ -1,0 +1,116 @@
+#==============================================================================================
+#
+#   inverse - atan, atan2, asin and acos in single precision
+#
+#   DESCRIPTION:
+#       In doubles alone. atan t for t in [0, 1] is the Taylor series of atan about the
+#       nearest c = j/64, to d^7 in d = t - c (|d| <= 2^-7, d exact), from a table of the
+#       65 points' coefficients; above 1, pi/2 - atan(1/t). atan2 is atan of the ratio of
+#       its arguments' magnitudes, one division, then placed in its quadrant. asin is
+#       math's: up to 1/2, w + w·z·P(z) for z = w², P the table's fit; beyond,
+#       pi/2 - 2·asin(sqrt((1 - w)/2)), whose square is exact; acos is pi/2 less it, or
+#       twice the latter. No step cancels much and atan's relative condition number is at
+#       most one, so each double is within about 2^-50 of its angle; when every value within
+#       2^-46 of it rounds to one f32, that is the correctly rounded result. Zeros where a
+#       sign matters, infinities, NaN, |x| > 1 and the inputs the test turns down take
+#       math's f64 result rounded once, as before.
+#
+#==============================================================================================
+
+## The f32 bits of a nonzero finite magnitude, less one, are below this.
+let finite_span: u32 = 0x7f7fffff
+
+## atan t for t in [0, 1]: the series about j/64 for the j nearest, by Estrin's scheme.
+inline func atan_unit(t: f64) -> f64:
+    let j = (usize)(i64)(t * 64.0 + 0.5)
+    let d = t - (f64)j * 0.015625
+    let c = 8 * j
+    let d2 = d * d
+    let p01 = d.mul_add(taylor_at(c + 1), taylor_at(c))
+    let p23 = d.mul_add(taylor_at(c + 3), taylor_at(c + 2))
+    let p45 = d.mul_add(taylor_at(c + 5), taylor_at(c + 4))
+    let p67 = d.mul_add(taylor_at(c + 7), taylor_at(c + 6))
+    return (d2 * d2).mul_add(d2.mul_add(p67, p45), d2.mul_add(p23, p01))
+
+inline func taylor_at(i: usize) -> f64:
+    return f64.bits(atan_taylor[i])
+
+## atan(a/b) for a and b nonnegative and finite, not both zero, in [0, pi/2]: the smaller
+## over the larger, and pi/2 less the angle when a is the larger. Selections, not branches,
+## pick each, as random inputs would mispredict the branches.
+inline func angle(a: f64, b: f64) -> f64:
+    let swapped = a > b
+    let low = b if swapped else a
+    let high = a if swapped else b
+    let t = atan_unit(low / high)
+    let complement = f64.bits(pio2_high) - t
+    return complement if swapped else t
+
+## asin w for w in [0, 1] as math's asin computes it, in doubles: w + w·z·P(z) for
+## z = w² up to 1/2, pi/2 - 2·(s + s·z·P(z)) for z = (1 - w)/2 and s = sqrt(z) beyond,
+## the two picked by selections rather than branches, which random inputs would mispredict.
+inline func asin_unit(w: f64) -> f64:
+    let inner = w <= 0.5
+    let z = w * w if inner else (1.0 - w) * 0.5
+    let root = math.sqrt(z)
+    let s = w if inner else root
+    let t = s + s * z * asin_series(z)
+    let far = f64.bits(pio2_high) - 2.0 * t
+    return t if inner else far
+
+## P(z), the fit of (asin w - w)/w³ in z = w² for z in [0, 1/4], by Estrin's scheme.
+inline func asin_series(z: f64) -> f64:
+    let k: const f64[] = asin_coefficients
+    let z2 = z * z
+    let z4 = z2 * z2
+    let low = z4.mul_add(z2.mul_add(z.mul_add(k[7], k[6]), z.mul_add(k[5], k[4])), z2.mul_add(z.mul_add(k[3], k[2]), z.mul_add(k[1], k[0])))
+    let high = z4.mul_add(z.mul_add(k[13], k[12]), z2.mul_add(z.mul_add(k[11], k[10]), z.mul_add(k[9], k[8])))
+    return (z4 * z4).mul_add(high, low)
+
+## The f32 nearest h with the sign of `sign_source`.
+inline func signed32(h: f64, sign_source: f32) -> f32:
+    return f32.bits(((f32)h).bits() | (sign_source.bits() & sign_mask))
+
+func atan_value(x: f32) -> f32:
+    if (x.bits() & magnitude_mask) < exponent_mask:
+        let h = angle(magnitude64((f64)x), 1.0)
+        if rounds_once(h, relative_46):
+            return signed32(h, x)
+    return (f32)math.atan((f64)x)
+
+func atan2_value(y: f32, x: f32) -> f32:
+    if (y.bits() & magnitude_mask) -% 1 < finite_span and (x.bits() & magnitude_mask) -% 1 < finite_span:
+        let a = angle(magnitude64((f64)y), magnitude64((f64)x))
+        let behind = f64.bits(pi_high) - a
+        let h = behind if x < 0.0 else a
+        if rounds_once(h, relative_46):
+            return signed32(h, y)
+    return (f32)math.atan2((f64)y, (f64)x)
+
+func asin_value(x: f32) -> f32:
+    if (x.bits() & magnitude_mask) -% 1 < 0x3f800000:
+        let h = asin_unit(magnitude64((f64)x))
+        if rounds_once(h, relative_46):
+            return signed32(h, x)
+    return (f32)math.asin((f64)x)
+
+func acos_value(x: f32) -> f32:
+    if (x.bits() & magnitude_mask) <= 0x3f800000:
+        # pi/2 - asin x up to 1/2, beyond it 2·asin(sqrt((1 - |x|)/2)), or pi less that
+        let a = magnitude64((f64)x)
+        let inner = a <= 0.5
+        let z = a * a if inner else (1.0 - a) * 0.5
+        let root = math.sqrt(z)
+        let s = a if inner else root
+        let t = s + s * z * asin_series(z)
+        let negative = x < 0.0
+        let below = f64.bits(pio2_high) - t
+        let above = f64.bits(pio2_high) + t
+        let twice = 2.0 * t
+        let beyond = f64.bits(pi_high) - twice
+        let h_near = above if negative else below
+        let h_far = beyond if negative else twice
+        let h = h_near if inner else h_far
+        if rounds_once(h, relative_46):
+            return (f32)h
+    return (f32)math.acos((f64)x)

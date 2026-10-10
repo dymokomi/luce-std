@@ -20,7 +20,7 @@
 ## y - c·x is exact, c being within a factor two of y/x or zero.
 inline func atan_ratio(y: f64, x: f64) -> (f64, f64):
     let jd = (y / x * 64.0 + round_shift) - round_shift
-    let j = (usize)jd
+    let j = (usize)(i64)jd
     let c = jd * 0.015625
     let (p, pe) = two_product(c, x)
     let (nh, nl) = two_sum(y - p, -pe)

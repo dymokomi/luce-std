@@ -167,7 +167,8 @@ func hash_function(k: usize, single: bool) -> u64:
             _ = i
     return hash
 
-## Whether `math.sincos` gives `math.sin` and `math.cos`'s bits at every input of sin's row.
+## Whether `sincos` gives `sin` and `cos`'s bits, in math and math32, at every input of
+## sin's row.
 func sincos_agrees() -> bool:
     var stream = Stream(state = 0x5eed0008)
     for i in 0..<3600:
@@ -175,6 +176,11 @@ func sincos_agrees() -> bool:
         let (s, c) = math.sincos(x)
         if bits64(s) != bits64(math.sin(x)) or bits64(c) != bits64(math.cos(x)):
             print(f"math_identity: sincos({x}) differs from sin and cos")
+            return false
+        let x32 = (f32)x
+        let (s32, c32) = math32.sincos(x32)
+        if bits32(s32) != bits32(math32.sin(x32)) or bits32(c32) != bits32(math32.cos(x32)):
+            print(f"math_identity: math32.sincos({x32}) differs from sin and cos")
             return false
     return true
 

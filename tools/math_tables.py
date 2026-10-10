@@ -97,6 +97,14 @@ for j in range(65):
 sections.append(words("atan_table_high", atan_high, "atan(j/64), rounded to a double."))
 sections.append(words("atan_table_low", atan_low, "atan(j/64) less its high part, rounded to a double."))
 
+# atan for math32: atan(j/64 + d) as its Taylor series in d to d^7, for j in [0, 64], the
+# eight coefficients of each point in a row.
+atan_series = []
+for j in range(65):
+    with mp.workdps(60):
+        atan_series += [bits(c) for c in mp.taylor(mp.atan, mp.mpf(j) / 64, 7)]
+sections.append(words("atan_taylor", atan_series, "atan(j/64 + d) = sum of c[8j + k]·d^k for k in [0, 8)."))
+
 # asin: (asin w - w)/w³ as a polynomial in z = w² on [0, 1/4], a Chebyshev fit of degree 13
 # (near minimax), good to about 2^-61 of asin w.
 with mp.workdps(50):

@@ -1,0 +1,32 @@
+#==============================================================================================
+#
+#   exp - e^x in single precision
+#
+#   DESCRIPTION:
+#       math's table method in doubles alone: x = k·ln2/128 + r with |r| <= ln2/256, and
+#       e^x = 2^(k/128)·e^r with the table's high part and e^r's Taylor series to r^4. The
+#       double is within about 2^-49 of e^x; when every value within 2^-46 of it rounds to
+#       one f32, that is the correctly rounded result. |x| from 87 on (overflow and the
+#       subnormal results), NaN and the inputs the test turns down take math's f64 result
+#       rounded once, as before.
+#
+#==============================================================================================
+
+## The f32 bits of 87.
+let exp_limit: u32 = 0x42ae0000
+
+## e^x as a double for |x| < 87 (so k/128 below 126 in magnitude).
+inline func exp_double(x: f64) -> f64:
+    let kd = (x * f64.bits(inverse_ln2_128) + round_shift) - round_shift
+    let r = (x - kd * f64.bits(ln2_128_high)) - kd * f64.bits(ln2_128_low)
+    let k = (i64)kd
+    let t = f64.bits(exp_table_high[(usize)(k & 127)]) * f64.bits((u64)((k >> 7) + 1023) << 52)
+    let p = r + r * r * (0.5 + r * (0.16666666666666666 + r * 0.041666666666666664))
+    return t + t * p
+
+func exp_value(x: f32) -> f32:
+    if (x.bits() & magnitude_mask) < exp_limit:
+        let h = exp_double((f64)x)
+        if rounds_once(h, relative_46):
+            return (f32)h
+    return (f32)math.exp((f64)x)

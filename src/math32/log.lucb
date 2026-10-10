@@ -1,0 +1,54 @@
+#==============================================================================================
+#
+#   log - log, log2 and log10 in single precision
+#
+#   DESCRIPTION:
+#       math's interval method in doubles alone: x = 2^k·z with z in [0.6875, 1.375), its
+#       point F from the table, and log x = k·ln2 + log F + log1p(u) for u = (z - F)/F,
+#       |u| <= 2^-7, by the series to u^6. z - F is exact and the three terms never cancel
+#       far, so the double is within about 2^-50 of log x; log2 and log10 multiply it by a
+#       rounded 1/ln2 or 1/ln10. When every value within 2^-46 rounds to one f32, that is the
+#       correctly rounded result. Zero, negative x, infinity, NaN and the inputs the test
+#       turns down take math's f64 result rounded once, as before. Subnormal x are normal as
+#       doubles and need no step of their own.
+#
+#==============================================================================================
+
+## The bits of 0.6875, as math's log has them.
+let log_offset: u64 = 0x3fe6000000000000
+
+## The bits of a positive, finite, nonzero f32 less one are below this.
+let log_span: u32 = 0x7f7fffff
+
+## log x as a double, for x positive, finite and normal as a double.
+inline func log_double(x: f64) -> f64:
+    let ix = x.bits()
+    let shifted = ix -% log_offset
+    let i = (usize)((shifted >> 45) & 127)
+    let k = (i64)shifted >> 52
+    let z = f64.bits(ix -% (shifted & 0xfff0000000000000))
+    let u = (z - f64.bits(log_point[i])) * f64.bits(log_inverse[i])
+    let series = u * u * (-0.5 + u * (0.3333333333333333 + u * (-0.25 + u * (0.2 + u * -0.16666666666666666))))
+    let base = (f64)k * 0.6931471805599453 + (f64.bits(log_table_high[i]) + f64.bits(log_table_low[i]))
+    return base + (u + series)
+
+func log_value(x: f32) -> f32:
+    if x.bits() -% 1 < log_span:
+        let h = log_double((f64)x)
+        if rounds_once(h, relative_46):
+            return (f32)h
+    return (f32)math.log((f64)x)
+
+func log2_value(x: f32) -> f32:
+    if x.bits() -% 1 < log_span:
+        let h = log_double((f64)x) * 1.4426950408889634
+        if rounds_once(h, relative_46):
+            return (f32)h
+    return (f32)math.log2((f64)x)
+
+func log10_value(x: f32) -> f32:
+    if x.bits() -% 1 < log_span:
+        let h = log_double((f64)x) * 0.43429448190325176
+        if rounds_once(h, relative_46):
+            return (f32)h
+    return (f32)math.log10((f64)x)

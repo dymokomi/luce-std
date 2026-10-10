@@ -240,7 +240,7 @@ func sin_value(x: f64) -> f64:
         let (n, rh, rl) = reduce_step(x)
         let z = rh * rh
         let (ah, al) = sine_entry(n)
-        let (bh, bl) = sine_entry(n + 64)
+        let (bh, bl) = sine_entry(n +% 64)
         let (h, l) = rotate(ah, al, bh, bl, rh, rl, cos_less_one(z), sin_less_r(rh, z))
         if rounds_alike(h, l):
             return h + l
@@ -251,8 +251,8 @@ func cos_value(x: f64) -> f64:
     if (x.bits() & 0x7fffffffffffffff) -% fast_trig_low < fast_trig_span:
         let (n, rh, rl) = reduce_step(x)
         let z = rh * rh
-        let (ah, al) = sine_entry(n + 64)
-        let (bh, bl) = sine_entry(n + 128)
+        let (ah, al) = sine_entry(n +% 64)
+        let (bh, bl) = sine_entry(n +% 128)
         let (h, l) = rotate(ah, al, bh, bl, rh, rl, cos_less_one(z), sin_less_r(rh, z))
         if rounds_alike(h, l):
             return h + l
@@ -266,7 +266,7 @@ func sincos_value(x: f64) -> (f64, f64):
         let c = cos_less_one(z)
         let t = sin_less_r(rh, z)
         let (ah, al) = sine_entry(n)
-        let (bh, bl) = sine_entry(n + 64)
+        let (bh, bl) = sine_entry(n +% 64)
         let (sh, sl) = rotate(ah, al, bh, bl, rh, rl, c, t)
         let (ch, cl) = rotate(bh, bl, -ah, -al, rh, rl, c, t)
         if rounds_alike(sh, sl) and rounds_alike(ch, cl):

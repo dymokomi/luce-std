@@ -4,14 +4,19 @@
 #
 #   DESCRIPTION:
 #       Single-precision mathematics. `math32` has the floating-point operations of `math`, with
-#       f32 arguments and results and the same special-value contracts. The elementary
-#       functions are `math`'s own, evaluated in f64 and rounded once to f32: `math`'s results
-#       are within about 2^-52 relative, so the f32 result is within half an ulp and a hair
-#       of the exact value, and identical on every target. The exact operations (rounding,
-#       sqrt, fma, mod, remainder and the decompositions) are the host's single-precision ones.
+#       f32 arguments and results and the same special-value contracts. exp, log, log2,
+#       log10, pow, sin, cos, sincos, tan, asin, acos, atan, atan2 and hypot have
+#       algorithms of their own in doubles (the files of this directory), each with an error
+#       bound: when every value within the bound rounds to one f32, that is the correctly
+#       rounded result, and the others, rare, take math's f64 result rounded once. That is
+#       how every elementary function here was defined before, and every f32 input of the
+#       one-argument functions gives the same bits as then. The rest of the elementary
+#       functions are math's, rounded once. The exact operations (rounding, sqrt, fma, mod,
+#       remainder and the decompositions) are the host's single-precision ones.
 #
 #==============================================================================================
 import math
+from math_tables import asin_coefficients, atan_taylor, exp_table_high, inverse_ln2_128, inverse_step, ln2_128_high, ln2_128_low, log_inverse, log_point, log_table_high, log_table_low, pi_high, pio2_high, sine_table, step_1, step_2, step_3
 extern func c_floor as "floorf"(x: f32) -> f32
 extern func c_ceil as "ceilf"(x: f32) -> f32
 extern func c_round as "roundf"(x: f32) -> f32
@@ -39,6 +44,22 @@ pub let nan: f32 = f32.bits(2143289344)
 let sign_mask: u32 = 0x80000000
 let magnitude_mask: u32 = 0x7fffffff
 let exponent_mask: u32 = 0x7f800000
+
+## 1.5·2^52: adding and subtracting it rounds a double below 2^51 to an integer.
+let round_shift: f64 = 6755399441055744.0
+
+## |h| for a double, by its bits.
+inline func magnitude64(h: f64) -> f64:
+    return f64.bits(h.bits() & 0x7fffffffffffffff)
+
+## 2^-46: the relative error bound most of the single-precision algorithms test against.
+let relative_46: f64 = 1.4210854715202004e-14
+
+## Whether every value within `relative` of h, relatively, rounds to the same f32. Rounding
+## is monotonic, so when the two ends do, so does the exact value the bound covers.
+inline func rounds_once(h: f64, relative: f64) -> bool:
+    let bound = magnitude64(h) * relative
+    return (f32)(h - bound) == (f32)(h + bound)
 
 # mark: Real functions ========================================================================
 
@@ -69,7 +90,7 @@ pub func cbrt(x: f32) -> f32:
 
 ## `sqrt(x * x + y * y)` without overflow in the squares.
 pub func hypot(x: f32, y: f32) -> f32:
-    return (f32)math.hypot((f64)x, (f64)y)
+    return hypot_value(x, y)
 
 ## The remainder of `x / y` with the sign of `x`, as C's `fmod`; a zero has the sign of `x`.
 pub func mod(x: f32, y: f32) -> f32:
@@ -80,11 +101,11 @@ pub func mod(x: f32, y: f32) -> f32:
 
 ## `x` raised to the power `y`.
 pub func pow(x: f32, y: f32) -> f32:
-    return (f32)math.pow((f64)x, (f64)y)
+    return pow_value(x, y)
 
 ## `e` raised to the power `x`.
 pub func exp(x: f32) -> f32:
-    return (f32)math.exp((f64)x)
+    return exp_value(x)
 
 ## `2` raised to the power `x`.
 pub func exp2(x: f32) -> f32:
@@ -92,15 +113,15 @@ pub func exp2(x: f32) -> f32:
 
 ## The natural logarithm of `x`.
 pub func log(x: f32) -> f32:
-    return (f32)math.log((f64)x)
+    return log_value(x)
 
 ## The base-2 logarithm of `x`.
 pub func log2(x: f32) -> f32:
-    return (f32)math.log2((f64)x)
+    return log2_value(x)
 
 ## The base-10 logarithm of `x`.
 pub func log10(x: f32) -> f32:
-    return (f32)math.log10((f64)x)
+    return log10_value(x)
 
 ## Natural logarithm of `1 + x`, retaining accuracy when adding `x` to one would
 ## round it away. At -1 the result is negative infinity; below -1 it is NaN.
@@ -159,31 +180,35 @@ pub func remainder(x: f32, y: f32) -> f32:
 
 ## The sine of `x` radians.
 pub func sin(x: f32) -> f32:
-    return (f32)math.sin((f64)x)
+    return sin_value(x)
 
 ## The cosine of `x` radians.
 pub func cos(x: f32) -> f32:
-    return (f32)math.cos((f64)x)
+    return cos_value(x)
+
+## The sine and the cosine of `x` radians, `(sin(x), cos(x))`, from one reduction.
+pub func sincos(x: f32) -> (f32, f32):
+    return sincos_value(x)
 
 ## The tangent of `x` radians.
 pub func tan(x: f32) -> f32:
-    return (f32)math.tan((f64)x)
+    return tan_value(x)
 
 ## The arcsine of `x`, in radians.
 pub func asin(x: f32) -> f32:
-    return (f32)math.asin((f64)x)
+    return asin_value(x)
 
 ## The arccosine of `x`, in radians.
 pub func acos(x: f32) -> f32:
-    return (f32)math.acos((f64)x)
+    return acos_value(x)
 
 ## The arctangent of `x`, in radians.
 pub func atan(x: f32) -> f32:
-    return (f32)math.atan((f64)x)
+    return atan_value(x)
 
 ## The angle of the point `(x, y)`, in all four quadrants.
 pub func atan2(y: f32, x: f32) -> f32:
-    return (f32)math.atan2((f64)y, (f64)x)
+    return atan2_value(y, x)
 
 ## The hyperbolic sine of `x`.
 pub func sinh(x: f32) -> f32:

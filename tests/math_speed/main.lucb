@@ -1,8 +1,8 @@
-## math's elementary functions timed against the C library's on the same inputs: the
-## nanoseconds per call of each, best of seven passes over 4096 values in the function's
-## working range, and their ratio. It prints the table and fails only past ten times the
-## library's time, a regression no machine's noise explains.
-from luce_std import math
+## math's and math32's elementary functions timed against the C library's on the same
+## inputs: the nanoseconds per call of each, best of fifteen passes over 4096 values in the
+## function's working range, and their ratio. It prints the table and fails only past ten
+## times the library's time, a regression no machine's noise explains.
+from luce_std import math, math32
 import time
 # valgrind: skip -- timings under valgrind mean nothing
 
@@ -26,6 +26,17 @@ extern func libm_cosh as "cosh"(x: f64) -> f64
 extern func libm_tanh as "tanh"(x: f64) -> f64
 extern func libm_cbrt as "cbrt"(x: f64) -> f64
 extern func libm_hypot as "hypot"(x: f64, y: f64) -> f64
+extern func libm_expf as "expf"(x: f32) -> f32
+extern func libm_logf as "logf"(x: f32) -> f32
+extern func libm_log2f as "log2f"(x: f32) -> f32
+extern func libm_powf as "powf"(x: f32, y: f32) -> f32
+extern func libm_sinf as "sinf"(x: f32) -> f32
+extern func libm_cosf as "cosf"(x: f32) -> f32
+extern func libm_tanf as "tanf"(x: f32) -> f32
+extern func libm_asinf as "asinf"(x: f32) -> f32
+extern func libm_atanf as "atanf"(x: f32) -> f32
+extern func libm_atan2f as "atan2f"(y: f32, x: f32) -> f32
+extern func libm_hypotf as "hypotf"(x: f32, y: f32) -> f32
 
 let names: str[20] = ["exp", "exp2", "expm1", "log", "log2", "log10", "log1p", "pow", "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "cbrt", "hypot"]
 let lows: f64[20] = [-700.0, -1000.0, -5.0, 0.0, 0.0, 0.0, -0.9, 0.0, -10.0, -10.0, -10.0, -1.0, -1.0, -10.0, -10.0, -20.0, -20.0, -5.0, -1000.0, -1000.0]
@@ -79,23 +90,108 @@ func library(k: usize, x: f64, y: f64) -> f64:
         19: return libm_hypot(x, y)
         _: trap("function")
 
+## The f32 functions, with math32's working ranges (exp's kept below overflow).
+let names32: str[11] = ["exp32", "log32", "log232", "pow32", "sin32", "cos32", "tan32", "asin32", "atan32", "atan232", "hypot32"]
+let lows32: f64[11] = [-80.0, 0.0, 0.0, 0.0, -10.0, -10.0, -10.0, -1.0, -10.0, -10.0, -1000.0]
+let highs32: f64[11] = [80.0, 1000.0, 1000.0, 10.0, 10.0, 10.0, 10.0, 1.0, 10.0, 10.0, 1000.0]
+
+func ours32(k: usize, x: f32, y: f32) -> f32:
+    match k:
+        0: return math32.exp(x)
+        1: return math32.log(x)
+        2: return math32.log2(x)
+        3: return math32.pow(x, y * 0.5)
+        4: return math32.sin(x)
+        5: return math32.cos(x)
+        6: return math32.tan(x)
+        7: return math32.asin(x)
+        8: return math32.atan(x)
+        9: return math32.atan2(x, y)
+        10: return math32.hypot(x, y)
+        _: trap("function")
+
+func library32(k: usize, x: f32, y: f32) -> f32:
+    match k:
+        0: return libm_expf(x)
+        1: return libm_logf(x)
+        2: return libm_log2f(x)
+        3: return libm_powf(x, y * 0.5)
+        4: return libm_sinf(x)
+        5: return libm_cosf(x)
+        6: return libm_tanf(x)
+        7: return libm_asinf(x)
+        8: return libm_atanf(x)
+        9: return libm_atan2f(x, y)
+        10: return libm_hypotf(x, y)
+        _: trap("function")
+
 let count: usize = 4096
 
-## Nanoseconds per call of function `k`, ours or the library's, best of seven passes.
-func time_function(k: usize, xs: f64[], ys: f64[], use_library: bool) -> f64:
-    var best: u64 = 0xffffffffffffffff
+## Nanoseconds per call of function `k`, ours and the library's, each the best of fifteen
+## passes; the two alternate pass by pass, so a busy machine slows both alike.
+func time_function(k: usize, xs: f64[], ys: f64[]) -> (f64, f64):
+    var best_ours: u64 = 0xffffffffffffffff
+    var best_library: u64 = 0xffffffffffffffff
     var sink: f64 = 0.0
-    for pass in 0..<7:
+    for pass in 0..<15:
         let start = time.now()
         for i in 0..<count:
-            sink = sink + (library(k, xs[i], ys[i]) if use_library else ours(k, xs[i], ys[i]))
-        let elapsed = time.since(start)
-        best = elapsed if elapsed < best else best
+            sink = sink + ours(k, xs[i], ys[i])
+        let mine = time.since(start)
+        let again = time.now()
+        for i in 0..<count:
+            sink = sink + library(k, xs[i], ys[i])
+        let theirs = time.since(again)
+        best_ours = mine if mine < best_ours else best_ours
+        best_library = theirs if theirs < best_library else best_library
         _ = pass
     # keep the sum alive without printing it
     if sink == 1.25:
         print("")
-    return (f64)best / (f64)count
+    return ((f64)best_ours / (f64)count, (f64)best_library / (f64)count)
+
+## The same for f32 function `k`.
+func time_function32(k: usize, xs: f32[], ys: f32[]) -> (f64, f64):
+    var best_ours: u64 = 0xffffffffffffffff
+    var best_library: u64 = 0xffffffffffffffff
+    var sink: f32 = 0.0
+    for pass in 0..<15:
+        let start = time.now()
+        for i in 0..<count:
+            sink = sink + ours32(k, xs[i], ys[i])
+        let mine = time.since(start)
+        let again = time.now()
+        for i in 0..<count:
+            sink = sink + library32(k, xs[i], ys[i])
+        let theirs = time.since(again)
+        best_ours = mine if mine < best_ours else best_ours
+        best_library = theirs if theirs < best_library else best_library
+        _ = pass
+    if sink == 1.25:
+        print("")
+    return ((f64)best_ours / (f64)count, (f64)best_library / (f64)count)
+
+## sincos against sin and cos called apart, over [-10, 10].
+func time_sincos(xs: f64[]) -> (f64, f64):
+    var best_pair: u64 = 0xffffffffffffffff
+    var best_apart: u64 = 0xffffffffffffffff
+    var sink: f64 = 0.0
+    for pass in 0..<7:
+        let start = time.now()
+        for i in 0..<count:
+            let (s, c) = math.sincos(xs[i])
+            sink = sink + s + c
+        let pair = time.since(start)
+        let again = time.now()
+        for i in 0..<count:
+            sink = sink + math.sin(xs[i]) + math.cos(xs[i])
+        let apart = time.since(again)
+        best_pair = pair if pair < best_pair else best_pair
+        best_apart = apart if apart < best_apart else best_apart
+        _ = pass
+    if sink == 1.25:
+        print("")
+    return ((f64)best_pair / (f64)count, (f64)best_apart / (f64)count)
 
 pub func main(arguments: str[]) -> i32:
     _ = arguments
@@ -117,11 +213,33 @@ pub func main(arguments: str[]) -> i32:
                     xs[i] = value
                 else:
                     ys[i] = value
-        let mine = time_function(k, xs, ys, false)
-        let theirs = time_function(k, xs, ys, true)
+        let (mine, theirs) = time_function(k, xs, ys)
         let ratio = mine / theirs
         slowest = ratio if ratio > slowest else slowest
         print(f"  {names[k]}  {mine}  {theirs}  {ratio}")
+    var xs32: f32[4096]
+    var ys32: f32[4096]
+    for k in 0..<names32.length:
+        for i in 0..<count:
+            for which in 0..<2:
+                state = state +% 0x9e3779b97f4a7c15
+                var z = state
+                z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9
+                z = (z ^ (z >> 27)) *% 0x94d049bb133111eb
+                let fraction = (f64)((z ^ (z >> 31)) >> 11) * 1.1102230246251565e-16
+                let value = (f32)(lows32[k] + (highs32[k] - lows32[k]) * fraction)
+                if which == 0:
+                    xs32[i] = value
+                else:
+                    ys32[i] = value
+        let (mine, theirs) = time_function32(k, xs32, ys32)
+        let ratio = mine / theirs
+        slowest = ratio if ratio > slowest else slowest
+        print(f"  {names32[k]}  {mine}  {theirs}  {ratio}")
+    for i in 0..<count:
+        xs[i] = -10.0 + 20.0 * (f64)i / (f64)count
+    let (pair, apart) = time_sincos(xs)
+    print(f"  sincos  {pair}  (sin + cos apart: {apart})")
     if slowest > 10.0:
         print(f"math_speed: a function takes {slowest} times the C library's time")
         return 1

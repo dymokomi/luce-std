@@ -1,0 +1,83 @@
+#==============================================================================================
+#
+#   trig - sin, cos, sincos and tan in single precision
+#
+#   DESCRIPTION:
+#       math's table method in doubles alone: x = n·pi/128 + r with |r| <= pi/256, and
+#       sin x = A·cos r + B·sin r for A = sin(n·pi/128) and B = cos(n·pi/128), the table's
+#       high parts, with cos r and sin r by their Taylor series to r^6 and r^5. Every step
+#       is relative to the result (|A| is at least twice |B·r| or zero, and x - n·step_1
+#       and n·step_2 are exact), so the double is within about 2^-50 of it, far inside the
+#       2^-46 the rounding test allows. When both ends of that bound round to one f32, it
+#       is the correctly rounded result; otherwise, and for zero, |x| >= 2^20, infinities
+#       and NaN, the f32 is math's f64 result rounded once, as it was before.
+#
+#==============================================================================================
+
+## The f32 bits of 2^20 less one: a nonzero |x| below 2^20 is (bits - 1) below this.
+let trig_span: u32 = 0x49800000 - 1
+
+## 2^-46 of the result, and 2^-90 of x for what the reduction drops.
+let trig_relative: f64 = 1.4210854715202004e-14
+let trig_absolute: f64 = 8.077935669463161e-28
+
+## x = n·pi/128 + r in doubles, for |x| < 2^20 (n below 2^26).
+inline func reduce_step(x: f64) -> (i64, f64):
+    let kd = (x * f64.bits(inverse_step) + round_shift) - round_shift
+    let r = ((x - kd * f64.bits(step_1)) - kd * f64.bits(step_2)) - kd * f64.bits(step_3)
+    return ((i64)kd, r)
+
+## sin(k·pi/128) for k mod 256, the table's high part.
+inline func sine_at(k: i64) -> f64:
+    return f64.bits(sine_table[(usize)(k & 255) * 2])
+
+## A·cos r + B·sin r from z = r².
+inline func rotate(a: f64, b: f64, r: f64, z: f64) -> f64:
+    let c = z * (-0.5 + z * (0.041666666666666664 + z * -0.001388888888888889))
+    let s = r * z * (-0.16666666666666666 + z * 0.008333333333333333)
+    return a + (a * c + b * (r + s))
+
+## Whether every double within the bound of h, for argument x, rounds to the same f32.
+inline func rounds_alike(h: f64, x: f64) -> bool:
+    let bound = magnitude64(h) * trig_relative + magnitude64(x) * trig_absolute
+    return (f32)(h - bound) == (f32)(h + bound)
+
+func sin_value(x: f32) -> f32:
+    if (x.bits() & magnitude_mask) -% 1 < trig_span:
+        let (n, r) = reduce_step((f64)x)
+        let h = rotate(sine_at(n), sine_at(n +% 64), r, r * r)
+        if rounds_alike(h, (f64)x):
+            return (f32)h
+    return (f32)math.sin((f64)x)
+
+func cos_value(x: f32) -> f32:
+    if (x.bits() & magnitude_mask) -% 1 < trig_span:
+        let (n, r) = reduce_step((f64)x)
+        let h = rotate(sine_at(n +% 64), sine_at(n +% 128), r, r * r)
+        if rounds_alike(h, (f64)x):
+            return (f32)h
+    return (f32)math.cos((f64)x)
+
+func sincos_value(x: f32) -> (f32, f32):
+    if (x.bits() & magnitude_mask) -% 1 < trig_span:
+        let (n, r) = reduce_step((f64)x)
+        let z = r * r
+        let a = sine_at(n)
+        let b = sine_at(n +% 64)
+        let s = rotate(a, b, r, z)
+        let c = rotate(b, -a, r, z)
+        if rounds_alike(s, (f64)x) and rounds_alike(c, (f64)x):
+            return ((f32)s, (f32)c)
+    return (sin_value(x), cos_value(x))
+
+## tan x as the quotient of the two, each within 2^-50, so within 2^-48.
+func tan_value(x: f32) -> f32:
+    if (x.bits() & magnitude_mask) -% 1 < trig_span:
+        let (n, r) = reduce_step((f64)x)
+        let z = r * r
+        let a = sine_at(n)
+        let b = sine_at(n +% 64)
+        let h = rotate(a, b, r, z) / rotate(b, -a, r, z)
+        if rounds_alike(h, (f64)x):
+            return (f32)h
+    return (f32)math.tan((f64)x)

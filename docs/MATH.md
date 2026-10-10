@@ -4,7 +4,10 @@
 expm1, log, log2, log10, log1p, pow, sin, cos, sincos, tan, asin, acos, atan, atan2, sinh,
 cosh, tanh, cbrt, hypot, erf and erfc) are written in Base in `src/math/`, so a
 program gets the same bits from them on arm64-macos, x86_64-linux and
-x86_64-windows; `math32` evaluates them in f64 and rounds once. The exactly
+x86_64-windows. `math32` has algorithms of its own in doubles for exp, log, log2, log10,
+pow, sin, cos, sincos, tan, asin, acos, atan, atan2 and hypot, which return only results
+their error bounds prove correctly rounded and otherwise round math's f64 result once,
+as the other f32 functions always do. The exactly
 specified operations (floor, ceil, round, trunc, sqrt, fma, mod, remainder,
 nextafter, frexp, scalbn, modf) call the host C library, whose results IEEE 754
 fixes bit for bit. Nothing allocates. Results are returned directly, NaN and

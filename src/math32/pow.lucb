@@ -1,0 +1,25 @@
+#==============================================================================================
+#
+#   pow - x^y in single precision
+#
+#   DESCRIPTION:
+#       e^(y·log x) in doubles alone, with log.lucb's log and exp.lucb's e^t: log x within
+#       about 2^-50 of itself puts t = y·log x within |t|·2^-50, which moves e^t by as
+#       much relatively, and e^t adds 2^-49. When every value within 2^-47 + |t|·2^-49 of
+#       the double rounds to one f32, that is the correctly rounded result; an exact result
+#       is never halfway between two f32, and one that is a halfway value never passes. Only
+#       positive finite x, finite y and |t| < 87 take this road; everything else, the signs
+#       and special values of C99 Annex F with it, is math's f64 result rounded once, as
+#       before.
+#
+#==============================================================================================
+
+func pow_value(x: f32, y: f32) -> f32:
+    if x.bits() -% 1 < log_span and (y.bits() & magnitude_mask) < exponent_mask:
+        let t = (f64)y * log_double((f64)x)
+        if magnitude64(t) < 87.0:
+            let h = exp_double(t)
+            let bound = magnitude64(h) * (7.105427357601002e-15 + magnitude64(t) * 1.7763568394002505e-15)
+            if (f32)(h - bound) == (f32)(h + bound):
+                return (f32)h
+    return (f32)math.pow((f64)x, (f64)y)
