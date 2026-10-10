@@ -4,10 +4,11 @@
 #
 #   DESCRIPTION:
 #       Single-precision mathematics. `math32` has the floating-point operations of `math`, with
-#       f32 arguments and results and the same special-value contracts. Elementary functions
-#       call the host's single-precision libm entry points directly; they do not compute in f64
-#       and then introduce an extra rounding step. `erf` and `erfc` are the exception: they are
-#       `math`'s, rounded once to f32.
+#       f32 arguments and results and the same special-value contracts. The elementary
+#       functions are `math`'s own, evaluated in f64 and rounded once to f32: `math`'s results
+#       are within about 2^-52 relative, so the f32 result is within half an ulp and a hair
+#       of the exact value, and identical on every target. The exact operations (rounding,
+#       sqrt, fma, mod, remainder and the decompositions) are the host's single-precision ones.
 #
 #==============================================================================================
 import math
@@ -16,27 +17,7 @@ extern func c_ceil as "ceilf"(x: f32) -> f32
 extern func c_round as "roundf"(x: f32) -> f32
 extern func c_trunc as "truncf"(x: f32) -> f32
 extern func c_sqrt as "sqrtf"(x: f32) -> f32
-extern func c_cbrt as "cbrtf"(x: f32) -> f32
-extern func c_hypot as "hypotf"(x: f32, y: f32) -> f32
 extern func c_fmod as "fmodf"(x: f32, y: f32) -> f32
-extern func c_pow as "powf"(x: f32, y: f32) -> f32
-extern func c_exp as "expf"(x: f32) -> f32
-extern func c_exp2 as "exp2f"(x: f32) -> f32
-extern func c_log as "logf"(x: f32) -> f32
-extern func c_log2 as "log2f"(x: f32) -> f32
-extern func c_log10 as "log10f"(x: f32) -> f32
-extern func c_sin as "sinf"(x: f32) -> f32
-extern func c_cos as "cosf"(x: f32) -> f32
-extern func c_tan as "tanf"(x: f32) -> f32
-extern func c_asin as "asinf"(x: f32) -> f32
-extern func c_acos as "acosf"(x: f32) -> f32
-extern func c_atan as "atanf"(x: f32) -> f32
-extern func c_atan2 as "atan2f"(y: f32, x: f32) -> f32
-extern func c_sinh as "sinhf"(x: f32) -> f32
-extern func c_cosh as "coshf"(x: f32) -> f32
-extern func c_tanh as "tanhf"(x: f32) -> f32
-extern func c_log1p as "log1pf"(x: f32) -> f32
-extern func c_expm1 as "expm1f"(x: f32) -> f32
 extern func c_fma as "fmaf"(x: f32, y: f32, z: f32) -> f32
 extern func c_fabs as "fabsf"(x: f32) -> f32
 extern func c_nextafter as "nextafterf"(x: f32, toward: f32) -> f32
@@ -84,11 +65,11 @@ pub func sqrt(x: f32) -> f32:
 
 ## The cube root of `x`.
 pub func cbrt(x: f32) -> f32:
-    return c_cbrt(x)
+    return (f32)math.cbrt((f64)x)
 
 ## `sqrt(x * x + y * y)` without overflow in the squares.
 pub func hypot(x: f32, y: f32) -> f32:
-    return c_hypot(x, y)
+    return (f32)math.hypot((f64)x, (f64)y)
 
 ## The remainder of `x / y` with the sign of `x`, as C's `fmod`; a zero has the sign of `x`.
 pub func mod(x: f32, y: f32) -> f32:
@@ -99,39 +80,36 @@ pub func mod(x: f32, y: f32) -> f32:
 
 ## `x` raised to the power `y`.
 pub func pow(x: f32, y: f32) -> f32:
-    return c_pow(x, y)
+    return (f32)math.pow((f64)x, (f64)y)
 
 ## `e` raised to the power `x`.
 pub func exp(x: f32) -> f32:
-    return c_exp(x)
+    return (f32)math.exp((f64)x)
 
 ## `2` raised to the power `x`.
 pub func exp2(x: f32) -> f32:
-    return c_exp2(x)
+    return (f32)math.exp2((f64)x)
 
 ## The natural logarithm of `x`.
 pub func log(x: f32) -> f32:
-    return c_log(x)
+    return (f32)math.log((f64)x)
 
 ## The base-2 logarithm of `x`.
 pub func log2(x: f32) -> f32:
-    return c_log2(x)
+    return (f32)math.log2((f64)x)
 
 ## The base-10 logarithm of `x`.
 pub func log10(x: f32) -> f32:
-    return c_log10(x)
+    return (f32)math.log10((f64)x)
 
 ## Natural logarithm of `1 + x`, retaining accuracy when adding `x` to one would
 ## round it away. At -1 the result is negative infinity; below -1 it is NaN.
 pub func log1p(x: f32) -> f32:
-    return c_log1p(x)
+    return (f32)math.log1p((f64)x)
 
 ## `exp(x) - 1` without cancellation near zero. Signed zero is preserved.
 pub func expm1(x: f32) -> f32:
-    # Preserve the exact negative-infinity limit under directed rounding too.
-    if x.bits() == (sign_mask | exponent_mask):
-        return -1.0
-    return c_expm1(x)
+    return (f32)math.expm1((f64)x)
 
 ## Multiply `x * y` and add `z` with one final rounding, rather than rounding the
 ## product first. Uses the host's floating-point rounding mode.
@@ -181,43 +159,43 @@ pub func remainder(x: f32, y: f32) -> f32:
 
 ## The sine of `x` radians.
 pub func sin(x: f32) -> f32:
-    return c_sin(x)
+    return (f32)math.sin((f64)x)
 
 ## The cosine of `x` radians.
 pub func cos(x: f32) -> f32:
-    return c_cos(x)
+    return (f32)math.cos((f64)x)
 
 ## The tangent of `x` radians.
 pub func tan(x: f32) -> f32:
-    return c_tan(x)
+    return (f32)math.tan((f64)x)
 
 ## The arcsine of `x`, in radians.
 pub func asin(x: f32) -> f32:
-    return c_asin(x)
+    return (f32)math.asin((f64)x)
 
 ## The arccosine of `x`, in radians.
 pub func acos(x: f32) -> f32:
-    return c_acos(x)
+    return (f32)math.acos((f64)x)
 
 ## The arctangent of `x`, in radians.
 pub func atan(x: f32) -> f32:
-    return c_atan(x)
+    return (f32)math.atan((f64)x)
 
 ## The angle of the point `(x, y)`, in all four quadrants.
 pub func atan2(y: f32, x: f32) -> f32:
-    return c_atan2(y, x)
+    return (f32)math.atan2((f64)y, (f64)x)
 
 ## The hyperbolic sine of `x`.
 pub func sinh(x: f32) -> f32:
-    return c_sinh(x)
+    return (f32)math.sinh((f64)x)
 
 ## The hyperbolic cosine of `x`.
 pub func cosh(x: f32) -> f32:
-    return c_cosh(x)
+    return (f32)math.cosh((f64)x)
 
 ## The hyperbolic tangent of `x`.
 pub func tanh(x: f32) -> f32:
-    return c_tanh(x)
+    return (f32)math.tanh((f64)x)
 
 ## The error function, as `math.erf`, evaluated in f64 and rounded once to f32: within a
 ## unit in the last place.

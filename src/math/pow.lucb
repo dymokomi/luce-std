@@ -1,0 +1,70 @@
+#==============================================================================================
+#
+#   pow - x raised to the power y
+#
+#   DESCRIPTION:
+#       The method is ARM optimized-routines' pow (as in musl): x^y = e^(y·log x) with
+#       log x as a pair good to about 2^-68 (log.lucb), y times it as an exact product plus
+#       the low part's, and e^(that pair) from exp.lucb's pair, which keeps the low part
+#       of its argument. An error of 2^-63 in y·log x moves the result 2^-63 relative, so a
+#       result is within 0.52 ulp and an exactly representable result is exact. The special
+#       cases are C99 Annex F.9.4.4's. Written anew from the method.
+#
+#==============================================================================================
+
+## 0 when `y` (finite, nonzero) is not an integer, 1 when it is odd, 2 when even.
+func integer_kind(y: f64) -> u32:
+    let exponent = (i64)((y.bits() >> 52) & 0x7ff) - 1023
+    if exponent < 0:
+        return 0
+    if exponent > 52:
+        return 2
+    let fraction_bits = (u64)(52 - exponent)
+    let mantissa = y.bits() & 0x000fffffffffffff
+    if fraction_bits > 0 and (mantissa & (((u64)1 << fraction_bits) - 1)) != 0:
+        return 0
+    if exponent == 0:
+        return 1
+    return 1 if (mantissa >> fraction_bits) & 1 == 1 else 2
+
+## `x` raised to `y`, every special value as Annex F gives it.
+func pow_value(x: f64, y: f64) -> f64:
+    let ix = x.bits()
+    let iy = y.bits()
+    let ax = ix & 0x7fffffffffffffff
+    let ay = iy & 0x7fffffffffffffff
+    if ay == 0 or ix == 0x3ff0000000000000:
+        # anything to the zeroth power, and 1 to any power, NaN included, is 1
+        return 1.0
+    if ax > 0x7ff0000000000000 or ay > 0x7ff0000000000000:
+        return x + y
+    if ay == 0x7ff0000000000000:
+        if ax == 0x3ff0000000000000:
+            return 1.0
+        return 0.0 if (ax < 0x3ff0000000000000) == (iy >> 63 == 0) else infinity
+    let kind = integer_kind(y)
+    let negative = ix >> 63 == 1 and kind == 1
+    if ax == 0 or ax == 0x7ff0000000000000:
+        # zero and infinity: the magnitude is 0 or infinity, by the signs of y and log x
+        let large = (ax == 0) == (iy >> 63 == 1)
+        let magnitude = infinity if large else 0.0
+        return -magnitude if negative else magnitude
+    if ix >> 63 == 1 and kind == 0:
+        return f64.bits(0x7ff8000000000000)
+    let ab = f64.bits(ax)
+    var magnitude: f64
+    if ay >= 0x43f0000000000000:
+        # |y| >= 2^64 against |log x| >= 2^-54: the exponent is past either end
+        magnitude = infinity if (ax > 0x3ff0000000000000) == (iy >> 63 == 0) else 0.0
+    else:
+        let (lh, ll) = log_pair(ab)
+        let (ph, pe) = two_product(y, lh)
+        let (th, tl) = fast_two_sum(ph, pe + y * ll)
+        if th > 709.8:
+            magnitude = infinity
+        elif th < -746.0:
+            magnitude = 0.0
+        else:
+            let (vh, vl, m) = exp_pair(th, tl)
+            magnitude = scale_pair(vh, vl, m)
+    return -magnitude if negative else magnitude

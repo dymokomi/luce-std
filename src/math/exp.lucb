@@ -1,0 +1,117 @@
+#==============================================================================================
+#
+#   exp - The exponential functions: exp, exp2, expm1, and e^x as a pair for the others
+#
+#   DESCRIPTION:
+#       The method is Tang's table-driven exponential, as ARM's optimized-routines and musl
+#       compute exp: x = (128m + j)·ln2/128 + r with |r| <= ln2/256, so
+#       e^x = 2^m · 2^(j/128) · e^r. The table holds 2^(j/128) as a double and its remainder;
+#       e^r - 1 is its Taylor polynomial to r^6, whose truncation stays below 2^-71. Written
+#       anew from the method; the tables come from tools/math_tables.py. A result is within
+#       0.51 ulp; `exp_pair` keeps about 2^-68 for pow and the hyperbolic functions.
+#
+#==============================================================================================
+
+## 1.5·2^52: adding and subtracting it rounds a double below 2^51 to an integer, in the
+## default rounding direction.
+let round_shift: f64 = 6755399441055744.0
+
+## 2^m for an integer m in [-1022, 1023], built from its bits.
+inline func power_of_two(m: i64) -> f64:
+    return f64.bits((u64)(m + 1023) << 52)
+
+## The reduction of `xh + xl` (|xh| < 746): `k` with `x = k·ln2/128 + r`, and `r` as a pair.
+## `k·ln2_128_high` is exact (35 bits times 18), and so is `xh` less it.
+inline func exp_reduce(xh: f64, xl: f64) -> (i64, f64, f64):
+    let kd = (xh * f64.bits(inverse_ln2_128) + round_shift) - round_shift
+    let r1 = xh - kd * f64.bits(ln2_128_high)
+    let (rh, rl) = two_sum(r1, -(kd * f64.bits(ln2_128_low)))
+    return ((i64)kd, rh, rl + xl)
+
+## e^r's Taylor coefficients from r²: 1/2!, ..., 1/6!.
+let exp_coefficients: f64[5] = [0.5, 0.16666666666666666, 0.041666666666666664, 0.008333333333333333, 0.001388888888888889]
+
+## e^r - 1 less r, for |r| <= ln2/256 + 2^-40: r²(1/2 + r/6 + ... + r^4/720).
+inline func exp_polynomial(r: f64) -> f64:
+    let k = exp_coefficients
+    return r * r * (k[0] + r * (k[1] + r * (k[2] + r * (k[3] + r * k[4]))))
+
+## `(vh + vl)·2^m` rounded once, for `vh` in [0.5, 4): exact scaling while the result is
+## normal, infinity past the largest double, and below the normal range the pair is
+## rounded to the subnormal grid in one step (adding 1 places the grid at 2^-52).
+func scale_pair(vh: f64, vl: f64, m: i64) -> f64:
+    if m >= -1020 and m <= 1023:
+        return (vh + vl) * power_of_two(m)
+    if m > 1023:
+        if m > 1024:
+            return f64.bits(0x7ff0000000000000)
+        return ((vh + vl) * power_of_two(m - 1)) * 2.0
+    if m < -1080:
+        return 0.0
+    let s = power_of_two(m + 1022)
+    let wh = vh * s
+    let wl = vl * s
+    if wh > 1.0 or (wh == 1.0 and wl >= 0.0):
+        return (wh + wl) * power_of_two(-1022)
+    let (a, ae) = two_sum(1.0, wh)
+    let b = a + (ae + wl)
+    return (b - 1.0) * power_of_two(-1022)
+
+## e^x as `(vh, vl, m)`, the value `(vh + vl)·2^m` with `vh` in [0.99, 2.01), to about
+## 2^-68 relative: the table pair times `1 + p` with the product's error kept.
+inline func exp_pair(xh: f64, xl: f64) -> (f64, f64, i64):
+    let (k, rh, rl) = exp_reduce(xh, xl)
+    let j = (usize)(k & 127)
+    let th = f64.bits(exp_table_high[j])
+    let tl = f64.bits(exp_table_low[j])
+    let (ph, pl) = fast_two_sum(rh, rl + rh * rl + exp_polynomial(rh))
+    let (a, ae) = two_product(th, ph)
+    let (vh, vl) = fast_two_sum(th, a)
+    return (vh, vl + (ae + (th * pl + tl * (1.0 + ph))), k >> 7)
+
+## e^x, within 0.51 ulp: one table product and one rounding, then `scale_pair`.
+func exp_value(x: f64) -> f64:
+    if not (x < 709.8):
+        return x + x if x != x else f64.bits(0x7ff0000000000000)
+    if x < -746.0:
+        return 0.0
+    let (k, rh, rl) = exp_reduce(x, 0.0)
+    let j = (usize)(k & 127)
+    let th = f64.bits(exp_table_high[j])
+    let p = rh + (rl + exp_polynomial(rh))
+    return scale_pair(th, f64.bits(exp_table_low[j]) + th * p, k >> 7)
+
+## 2^x: x splits exactly into k/128 + r, and e^(r·ln2) is exp's polynomial.
+func exp2_value(x: f64) -> f64:
+    if not (x < 1024.0):
+        return x + x if x != x else f64.bits(0x7ff0000000000000)
+    if x < -1080.0:
+        return 0.0
+    let kd = (x * 128.0 + round_shift) - round_shift
+    let k = (i64)kd
+    let (rh, rl) = multiply_pair(f64.bits(ln2_double_high), f64.bits(ln2_double_low), x - kd * 0.0078125)
+    let j = (usize)(k & 127)
+    let th = f64.bits(exp_table_high[j])
+    let p = rh + (rl + exp_polynomial(rh))
+    return scale_pair(th, f64.bits(exp_table_low[j]) + th * p, k >> 7)
+
+## e^x - 1. Near zero (k = 0) it is the polynomial itself, with nothing cancelled;
+## elsewhere it is the exp pair, scaled, less one.
+func expm1_value(x: f64) -> f64:
+    if not (x < 709.8):
+        return x + x if x != x else f64.bits(0x7ff0000000000000)
+    if x < -40.0:
+        return -1.0
+    let magnitude = x.bits() & 0x7fffffffffffffff
+    if magnitude < 0x3c90000000000000:
+        # below 2^-54, x²/2 is under half an ulp of x: x itself, signed zero kept
+        return x
+    if x > 40.0:
+        return exp_value(x)
+    let (k, rh, rl) = exp_reduce(x, 0.0)
+    if k == 0:
+        return rh + (rl + rh * rl + exp_polynomial(rh))
+    let (vh, vl, m) = exp_pair(x, 0.0)
+    let s = power_of_two(m)
+    let (d, de) = two_sum(vh * s, -1.0)
+    return d + (de + vl * s)

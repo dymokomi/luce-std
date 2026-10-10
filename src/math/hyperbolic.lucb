@@ -1,0 +1,72 @@
+#==============================================================================================
+#
+#   hyperbolic - sinh, cosh and tanh
+#
+#   DESCRIPTION:
+#       From their definitions in e^x, as fdlibm does, but with e^|x| as exp.lucb's pair
+#       (about 2^-68) and the reciprocal, sum, difference and quotient taken as pairs, so
+#       each result rounds once. Below 2^-7, where e^x - e^-x would cancel, sinh and tanh are
+#       their Taylor series (to x^7 and x^9, below 2^-70); from 22 on, e^-|x| is under 2^-63
+#       of e^|x| and sinh and cosh are e^|x|/2, scaled without overflowing early. Written
+#       anew from the method.
+#
+#==============================================================================================
+
+## e^a as a pair, for 0 <= a <= 22, where 2^m scales the pair exactly.
+inline func exp_scaled_pair(a: f64) -> (f64, f64):
+    let (vh, vl, m) = exp_pair(a, 0.0)
+    let s = power_of_two(m)
+    return (vh * s, vl * s)
+
+## The hyperbolic sine: odd, overflowing past about 710.48.
+func sinh_value(x: f64) -> f64:
+    let a = abs(x)
+    if not (a < 746.0):
+        # past the overflow, infinity with x's sign; NaN stays NaN
+        return x * infinity
+    if a < 0.0078125:
+        if a < 1.4901161193847656e-08:
+            # below 2^-26, x³/6 is under half an ulp of x: x itself, signed zero kept
+            return x
+        let z = x * x
+        return x + x * z * (0.16666666666666666 + z * (0.008333333333333333 + z * 0.0001984126984126984))
+    if a >= 22.0:
+        let (vh, vl, m) = exp_pair(a, 0.0)
+        return copysign(scale_pair(vh, vl, m - 1), x)
+    let (eh, el) = exp_scaled_pair(a)
+    let (ih, il) = divide_pairs(1.0, 0.0, eh, el)
+    let (dh, dl) = add_pairs(eh, el, -ih, -il)
+    return copysign(0.5 * (dh + dl), x)
+
+## The hyperbolic cosine: even, at least 1, overflowing past about 710.48.
+func cosh_value(x: f64) -> f64:
+    let a = abs(x)
+    if not (a < 746.0):
+        return a * infinity
+    if a < 7.450580596923828e-09:
+        # below 2^-27, x²/2 is under half an ulp of 1
+        return 1.0
+    if a >= 22.0:
+        let (vh, vl, m) = exp_pair(a, 0.0)
+        return scale_pair(vh, vl, m - 1)
+    let (eh, el) = exp_scaled_pair(a)
+    let (ih, il) = divide_pairs(1.0, 0.0, eh, el)
+    let (sh, sl) = add_pairs(eh, el, ih, il)
+    return 0.5 * (sh + sl)
+
+## The hyperbolic tangent: odd, (e^2x - 1)/(e^2x + 1), within half an ulp of ±1 from 22.
+func tanh_value(x: f64) -> f64:
+    let a = abs(x)
+    if not (a < 22.0):
+        return x + x if x != x else copysign(1.0, x)
+    if a < 0.0078125:
+        if a < 7.450580596923828e-09:
+            # below 2^-27, x³/3 is under half an ulp of x: x itself, signed zero kept
+            return x
+        let z = x * x
+        return x + x * z * (-0.3333333333333333 + z * (0.13333333333333333 + z * (-0.05396825396825397 + z * 0.021869488536155203)))
+    let (eh, el) = exp_scaled_pair(a + a)
+    let (nh, nl) = add_pairs(eh, el, -1.0, 0.0)
+    let (dh, dl) = add_pairs(eh, el, 1.0, 0.0)
+    let (qh, ql) = divide_pairs(nh, nl, dh, dl)
+    return copysign(qh + ql, x)

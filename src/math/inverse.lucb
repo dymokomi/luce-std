@@ -1,0 +1,170 @@
+#==============================================================================================
+#
+#   inverse - The inverse trigonometric functions: atan, atan2, asin and acos
+#
+#   DESCRIPTION:
+#       atan follows the table-driven method of Gal's accurate tables (as in IBM's
+#       libultim, which glibc used): for t in [0, 1], c = j/64 is the nearest point and
+#       atan t = atan c + atan v with v = (t - c)/(1 + t·c), |v| <= 2^-7, whose series to
+#       v^9 stays below 2^-70 of v. t above 1 uses pi/2 - atan(1/t). For t = y/x, v is
+#       (y - c·x)/(x + c·y), one quotient taken as a pair, so atan2 loses nothing to y/x's
+#       rounding. asin follows fdlibm: up to 1/2, x + x³·P(x²), P here a Chebyshev fit made
+#       by tools/math_tables.py; beyond, pi/2 - 2·asin(sqrt((1 - x)/2)), the root a pair.
+#       acos is pi/2 less asin, or twice that asin. The special cases are C99 Annex F.9.1's.
+#       Written anew from the methods; the tables come from tools/math_tables.py.
+#
+#==============================================================================================
+
+## atan(y/x) as a pair, for 0 <= y <= x: c = j/64 nearest y/x, and
+## v = (y - c·x)/(x + c·y), which is (t - c)/(1 + t·c) for t = y/x with one division.
+## y - c·x is exact, c being within a factor two of y/x or zero.
+inline func atan_ratio(y: f64, x: f64) -> (f64, f64):
+    let jd = (y / x * 64.0 + round_shift) - round_shift
+    let j = (usize)jd
+    let c = jd * 0.015625
+    let (p, pe) = two_product(c, x)
+    let (nh, nl) = two_sum(y - p, -pe)
+    let (q, qe) = two_product(c, y)
+    let (dh, de) = fast_two_sum(x, q)
+    let (vh, vl) = divide_pairs(nh, nl, dh, de + qe)
+    let z = vh * vh
+    let k = atan_coefficients
+    let series = vh * z * (k[0] + z * (k[1] + z * (k[2] + z * k[3])))
+    let (s, se) = fast_two_sum(f64.bits(atan_table_high[j]), vh)
+    return fast_two_sum(s, se + (f64.bits(atan_table_low[j]) + (vl + series)))
+
+## atan's Taylor coefficients from v³: -1/3, 1/5, -1/7, 1/9.
+let atan_coefficients: f64[4] = [-0.3333333333333333, 0.2, -0.14285714285714285, 0.1111111111111111]
+
+## atan(y/x) as a pair in [0, pi/2], for y and x positive with neither far from 1 (both
+## within 2^±600 and their ratio within 2^±62), so every product stays exact.
+inline func atan2_pair(y: f64, x: f64) -> (f64, f64):
+    if y <= x:
+        return atan_ratio(y, x)
+    let (h, l) = atan_ratio(x, y)
+    return add_pairs(f64.bits(pio2_high), f64.bits(pio2_low), -h, -l)
+
+## The arctangent, in [-pi/2, pi/2].
+func atan_value(x: f64) -> f64:
+    let magnitude = x.bits() & 0x7fffffffffffffff
+    if magnitude < 0x3e40000000000000:
+        # below 2^-27, x³/3 is under half an ulp of x: x itself, signed zero kept
+        return x
+    if magnitude >= 0x4410000000000000:
+        # from 2^66, pi/2 - 1/x rounds to pi/2's double
+        return x + x if x != x else copysign(f64.bits(pio2_high), x)
+    let a = f64.bits(magnitude)
+    let (h, l) = atan2_pair(a, 1.0)
+    return copysign(h + l, x)
+
+## The angle of the point (x, y), in [-pi, pi], with Annex F's signed zeros and infinities.
+func atan2_value(y: f64, x: f64) -> f64:
+    if x != x or y != y:
+        return x + y
+    let ay = abs(y)
+    let ax = abs(x)
+    let negative_x = signbit(x)
+    if ay == 0.0 or ax == infinity:
+        if ay == infinity:
+            # both infinite: a quarter or three quarters of pi
+            let angle = 2.356194490192345 if negative_x else 0.7853981633974483
+            return copysign(angle, y)
+        if negative_x:
+            return copysign(f64.bits(pi_high), y)
+        return copysign(0.0, y)
+    if ax == 0.0 or ay == infinity:
+        return copysign(f64.bits(pio2_high), y)
+    if ay > ax * 4.611686018427388e+18:
+        # |y/x| beyond 2^62: pi/2 less or plus a quotient too small for its series to matter
+        let t = ax / ay
+        return copysign(f64.bits(pio2_high) + (f64.bits(pio2_low) + (t if negative_x else -t)), y)
+    if ax > ay * 4.611686018427388e+18:
+        # |y/x| below 2^-62: atan is the quotient itself, rounded once
+        if not negative_x:
+            return copysign(ay / ax, y)
+        return copysign(f64.bits(pi_high) + (f64.bits(pi_low) - ay / ax), y)
+    # bring the larger into [2^-500, 2^500]; the smaller stays within 2^62 of it
+    var sy = ay
+    var sx = ax
+    let larger = ay if ay > ax else ax
+    if larger > 3.273390607896142e+150:
+        sy = sy * 2.409919865102884e-181
+        sx = sx * 2.409919865102884e-181
+    elif larger < 3.054936363499605e-151:
+        sy = sy * 4.149515568880993e+180
+        sx = sx * 4.149515568880993e+180
+    var angle = atan2_pair(sy, sx)
+    if negative_x:
+        angle = add_pairs(f64.bits(pi_high), f64.bits(pi_low), -angle.0, -angle.1)
+    return copysign(angle.0 + angle.1, y)
+
+## P(z) less its constant term, for 0 <= z <= 1/4: Estrin's scheme, pairs and then pairs of
+## pairs, for a shorter chain than Horner's.
+inline func asin_series(z: f64) -> f64:
+    let k = asin_coefficients
+    let z2 = z * z
+    let z4 = z2 * z2
+    let p12 = k[1] + z * k[2]
+    let p34 = k[3] + z * k[4]
+    let p56 = k[5] + z * k[6]
+    let p78 = k[7] + z * k[8]
+    let p910 = k[9] + z * k[10]
+    let p1112 = k[11] + z * k[12]
+    let low = (p12 + z2 * p34) + z4 * (p56 + z2 * p78)
+    let high = (p910 + z2 * p1112) + z4 * k[13]
+    return z * (low + (z4 * z4) * high)
+
+## asin w - w for 0 <= w <= 1/2, given z = w²: w·z·P(z), P fitted to (asin w - w)/w³.
+inline func asin_tail(w: f64, z: f64) -> f64:
+    return w * z * (asin_coefficients[0] + asin_series(z))
+
+## asin(wh + wl) as a pair less nothing, for w = sqrt(z) in [0, 1/2] given as a pair: the
+## tail w·z·P(z) with w·z and its leading term kept exactly, as the result it feeds is
+## pi/2 less twice it, where its errors would otherwise count double.
+inline func asin_pair(wh: f64, wl: f64, z: f64) -> (f64, f64):
+    let (a, ae) = two_product(wh, z)
+    let (t, te) = two_product(a, asin_coefficients[0])
+    # asin(wh + wl) = asin wh + wl/sqrt(1 - z), the derivative's series to z³
+    let rest = te + ae * asin_coefficients[0] + a * asin_series(z) + wl * (1.0 + z * (0.5 + z * (0.375 + z * 0.3125)))
+    let (h, hl) = fast_two_sum(wh, t)
+    return fast_two_sum(h, hl + rest)
+
+## The arcsine, in [-pi/2, pi/2]. Up to 1/2 it is x + x³·P(x²); beyond, fdlibm's
+## pi/2 - 2·asin(w) for w = sqrt((1 - |x|)/2), whose square is exact and w a pair.
+func asin_value(x: f64) -> f64:
+    let a = abs(x)
+    if not (a < 1.0):
+        if a == 1.0:
+            return copysign(f64.bits(pio2_high), x)
+        return (x - x) / (x - x)
+    if a < 1.4901161193847656e-08:
+        # below 2^-26, x³/6 is under half an ulp of x: x itself, signed zero kept
+        return x
+    if a <= 0.5:
+        return x + asin_tail(x, x * x)
+    let z = (1.0 - a) * 0.5
+    let (wh, wl) = pair_square_root(z, 0.0)
+    let (sh, sl) = asin_pair(wh, wl, z)
+    let (h, hl) = two_sum(f64.bits(pio2_high), -2.0 * sh)
+    return copysign(h + (hl + (f64.bits(pio2_low) - 2.0 * sl)), x)
+
+## The arccosine, in [0, pi]: pi/2 - asin x up to 1/2; beyond, 2·asin(w) for
+## w = sqrt((1 - x)/2), or pi less that for negative x.
+func acos_value(x: f64) -> f64:
+    let a = abs(x)
+    if not (a < 1.0):
+        if x == 1.0:
+            return 0.0
+        if x == -1.0:
+            return f64.bits(pi_high)
+        return (x - x) / (x - x)
+    if a <= 0.5:
+        let (h, hl) = two_sum(f64.bits(pio2_high), -x)
+        return h + (hl + (f64.bits(pio2_low) - asin_tail(x, x * x)))
+    let z = (1.0 - a) * 0.5
+    let (wh, wl) = pair_square_root(z, 0.0)
+    let (sh, sl) = asin_pair(wh, wl, z)
+    if x > 0.0:
+        return 2.0 * (sh + sl)
+    let (h, hl) = two_sum(f64.bits(pi_high), -2.0 * sh)
+    return h + (hl + (f64.bits(pi_low) - 2.0 * sl))

@@ -1,0 +1,174 @@
+#==============================================================================================
+#
+#   trig - sin, cos and tan, and the reduction of an argument by pi/2
+#
+#   DESCRIPTION:
+#       The method is fdlibm's (Sun's, as in FreeBSD and musl): x = n·pi/2 + r with r as a
+#       pair, |r| <= pi/4, then sin or cos of r by its series, picked and signed by n mod 4.
+#       Below 2^20·pi/2 the reduction is Cody and Waite's, with pi/2 in three 33-bit parts
+#       and a fourth, so n times each of the first three is exact and the error stays near
+#       2^-131. Above that it is Payne and Hanek's: the 53-bit integer of x times a window of
+#       2/pi's bits, in 32-bit words, gives n mod 8 and the fraction to beyond 2^-160, as
+#       fdlibm's __kernel_rem_pio2 does with floats. sin and cos of r are their Taylor series
+#       to r^19 and r^20, below 2^-72; tan is their quotient as pairs. Written anew from the
+#       method; 2/pi's bits come from tools/math_tables.py.
+#
+#==============================================================================================
+
+## The bits of x's magnitude below which r is x itself (pi/4), and below which the
+## Cody-Waite reduction's n fits in 20 bits (2^20·pi/2).
+let quarter_pi_bits: u64 = 0x3fe921fb54442d18
+let cody_waite_bits: u64 = 0x413921fb54442d18
+
+## 64 bits of the little-endian 32-bit words `words`, from bit `position` up.
+func bits_at(words: u32[], position: usize) -> u64:
+    let w = position // 32
+    let offset = (u64)(position % 32)
+    let low = (u64)words[w] | ((u64)words[w + 1] << 32)
+    if offset == 0:
+        return low
+    let high = (u64)words[w + 2] | ((u64)words[w + 3] << 32)
+    return (low >> offset) | (high << (64 - offset))
+
+## x = n·pi/2 + r for |x| >= 2^20·pi/2, finite: n mod 4 and r as a pair (Payne-Hanek).
+func reduce_large(x: f64) -> (i64, f64, f64):
+    let ix = x.bits()
+    let exponent = (i64)((ix >> 52) & 0x7ff) - 1075
+    let m = (ix & 0x000fffffffffffff) | 0x0010000000000000
+    # Words of 2/pi before `first` contribute multiples of 8 to x·2/pi: m·2^exponent times a
+    # bit worth 2^-i is a multiple of 8 when i <= exponent - 3.
+    let first = (usize)((exponent - 3) // 32) if exponent >= 3 else 0
+    let count: usize = 8
+    var product: u64[12]
+    let m_low = m & 0xffffffff
+    let m_high = m >> 32
+    for j in 0..<count:
+        # word j of the window, counted from its least significant end
+        let word = (u64)two_over_pi[first + count - 1 - j]
+        let low_part = m_low * word
+        let high_part = m_high * word
+        product[j] += low_part & 0xffffffff
+        product[j + 1] += (low_part >> 32) + (high_part & 0xffffffff)
+        product[j + 2] += high_part >> 32
+    # four words of zeros past the product, for bits_at's reads
+    var words: u32[16]
+    var carry: u64 = 0
+    for c in 0..<12:
+        let total = product[c] + carry
+        words[c] = (u32)(total & 0xffffffff)
+        carry = total >> 32
+    # x·2/pi = product·2^-shift; the bits at and above `shift` are the integer part
+    let shift = (usize)((i64)(32 * (first + count)) - exponent)
+    var n = (i64)(bits_at(words, shift) & 7)
+    let f0 = bits_at(words, shift - 64)
+    let f1 = bits_at(words, shift - 128)
+    let f2 = bits_at(words, shift - 192)
+    # the fraction as a pair, from exact pieces of at most 53 bits, largest first
+    let pieces: f64[5] = [(f64)(f0 >> 11) * 1.1102230246251565e-16, (f64)(f0 & 0x7ff) * 5.421010862427522e-20, (f64)(f1 >> 11) * 6.018531076210112e-36, (f64)(f1 & 0x7ff) * 2.938735877055719e-39, (f64)(f2 >> 11) * 3.2626522339992623e-55]
+    var fh: f64 = 0.0
+    var fl: f64 = 0.0
+    for piece in pieces:
+        let (s, t) = two_sum(fh, piece)
+        fh = s
+        fl += t
+    if f0 >> 63 == 1:
+        # past one half: the nearer multiple is the next, and r is negative
+        n += 1
+        let (s, t) = two_sum(fh, -1.0)
+        fh = s
+        fl += t
+    let (rh, rl) = multiply_pairs(fh, fl, f64.bits(pio2_high), f64.bits(pio2_low))
+    if ix >> 63 == 1:
+        return (-n, -rh, -rl)
+    return (n, rh, rl)
+
+## x = n·pi/2 + r for finite x: n (its low two bits are what matter) and r as a pair with
+## |r| <= pi/4 or a hair beyond.
+inline func reduce_half_pi(x: f64) -> (i64, f64, f64):
+    let magnitude = x.bits() & 0x7fffffffffffffff
+    if magnitude <= quarter_pi_bits:
+        return (0, x, 0.0)
+    if magnitude >= cody_waite_bits:
+        return reduce_large(x)
+    let nd = (x * f64.bits(two_over_pi_double) + round_shift) - round_shift
+    let a = x - nd * f64.bits(pio2_1)
+    let (s1, e1) = two_sum(a, -(nd * f64.bits(pio2_2)))
+    let (s2, e2) = two_sum(s1, -(nd * f64.bits(pio2_3)))
+    let (rh, rl) = fast_two_sum(s2, (e1 + e2) - nd * f64.bits(pio2_4))
+    return ((i64)nd, rh, rl)
+
+## sin's Taylor coefficients from r^5: 1/5!, -1/7!, ..., -1/19!.
+let sin_coefficients: f64[8] = [0.008333333333333333, -0.0001984126984126984, 2.7557319223985893e-06, -2.505210838544172e-08, 1.6059043836821613e-10, -7.647163731819816e-13, 2.8114572543455206e-15, -8.22063524662433e-18]
+
+## cos's Taylor coefficients from r^4: 1/4!, -1/6!, ..., 1/20!.
+let cos_coefficients: f64[9] = [0.041666666666666664, -0.001388888888888889, 2.48015873015873e-05, -2.755731922398589e-07, 2.08767569878681e-09, -1.1470745597729725e-11, 4.779477332387385e-14, -1.5619206968586225e-16, 4.110317623312165e-19]
+
+## 1/6 as a double and the double nearest its remainder.
+let sixth_high: f64 = 0.16666666666666666
+let sixth_low: f64 = 9.25185853854297e-18
+
+## sin(rh + rl) for |r| <= pi/4, as a pair: rh - rh³/6 with the cube and the sixth kept as
+## pairs, then rh^5·S(rh²), S the Taylor series of (sin r - r + r³/6)/r^5 to r^14, and
+## rl·cos(rh).
+inline func sin_pair(rh: f64, rl: f64) -> (f64, f64):
+    let (zh, zl) = two_square(rh)
+    let (ch, ce) = two_product(rh, zh)
+    let (th, te) = two_product(ch, sixth_high)
+    let (s, se) = fast_two_sum(rh, -th)
+    let k = sin_coefficients
+    let series = k[0] + zh * (k[1] + zh * (k[2] + zh * (k[3] + zh * (k[4] + zh * (k[5] + zh * (k[6] + zh * k[7]))))))
+    let tail = (ce + rh * zl) * sixth_high + ch * sixth_low
+    return fast_two_sum(s, (se - (te + tail)) + (rl * (1.0 - 0.5 * zh) + rh * zh * zh * series))
+
+## cos(rh + rl) for |r| <= pi/4, as a pair: 1 - r²/2 with r² exact and the subtraction's
+## error kept, then r^4·C(r²), C the Taylor series of (cos r - 1 + r²/2)/r^4 to r^16.
+inline func cos_pair(rh: f64, rl: f64) -> (f64, f64):
+    let (zh, zl) = two_square(rh)
+    let half = 0.5 * zh
+    let (w, we) = fast_two_sum(1.0, -half)
+    let k = cos_coefficients
+    let series = k[0] + zh * (k[1] + zh * (k[2] + zh * (k[3] + zh * (k[4] + zh * (k[5] + zh * (k[6] + zh * (k[7] + zh * k[8])))))))
+    return fast_two_sum(w, (we - 0.5 * (zl + 2.0 * rh * rl)) + zh * zh * series)
+
+## sin x, picked from sin r and cos r by n mod 4.
+func sin_value(x: f64) -> f64:
+    let magnitude = x.bits() & 0x7fffffffffffffff
+    if magnitude < 0x3e50000000000000:
+        # below 2^-26, x³/6 is under half an ulp of x: x itself, signed zero kept
+        return x
+    if magnitude >= 0x7ff0000000000000:
+        return x - x
+    let (n, rh, rl) = reduce_half_pi(x)
+    let quadrant = n & 3
+    let (h, l) = cos_pair(rh, rl) if quadrant & 1 == 1 else sin_pair(rh, rl)
+    return -(h + l) if quadrant >= 2 else h + l
+
+## cos x, picked from cos r and sin r by n mod 4.
+func cos_value(x: f64) -> f64:
+    let magnitude = x.bits() & 0x7fffffffffffffff
+    if magnitude < 0x3e40000000000000:
+        # below 2^-27, x²/2 is under half an ulp of 1
+        return 1.0
+    if magnitude >= 0x7ff0000000000000:
+        return x - x
+    let (n, rh, rl) = reduce_half_pi(x)
+    let quadrant = n & 3
+    let (h, l) = sin_pair(rh, rl) if quadrant & 1 == 1 else cos_pair(rh, rl)
+    return -(h + l) if quadrant == 1 or quadrant == 2 else h + l
+
+## tan x: sin r / cos r as pairs, or -cos r / sin r for odd n.
+func tan_value(x: f64) -> f64:
+    let magnitude = x.bits() & 0x7fffffffffffffff
+    if magnitude < 0x3e40000000000000:
+        # below 2^-27, x³/3 is under half an ulp of x
+        return x
+    if magnitude >= 0x7ff0000000000000:
+        return x - x
+    let (n, rh, rl) = reduce_half_pi(x)
+    let (sh, sl) = sin_pair(rh, rl)
+    let (ch, cl) = cos_pair(rh, rl)
+    if n & 1 == 1:
+        let (h, l) = divide_pairs(ch, cl, sh, sl)
+        return -(h + l)
+    let (h, l) = divide_pairs(sh, sl, ch, cl)
+    return h + l

@@ -1,0 +1,84 @@
+#==============================================================================================
+#
+#   roots - cbrt and hypot
+#
+#   DESCRIPTION:
+#       cbrt follows fdlibm's plan: a first guess, an iteration to about 2^-40, then one
+#       Newton step from the exact residual A - y³ (y³ as a pair), so the result rounds once
+#       from an error near 2^-80. Here the guess is a cubic in the mantissa times a table's
+#       cube root of 2^(exponent mod 3), and the iteration is Halley's. hypot squares both arguments exactly as pairs (Dekker),
+#       adds them, and takes the root with its residual correction, as the correctly rounded
+#       hypot of Borges ("An Improved Algorithm for hypot(a, b)", 2019) does; arguments are
+#       scaled by 2^±600 first so that no square overflows or underflows. The special cases
+#       are C99 Annex F.9.4's. Written anew from the method.
+#
+#==============================================================================================
+
+## The cube roots of 1, 2 and 4.
+let cube_roots: f64[3] = [1.0, 1.2599210498948732, 1.5874010519681996]
+
+## The real cube root, odd, exact for perfect cubes.
+func cbrt_value(x: f64) -> f64:
+    var bits = x.bits() & 0x7fffffffffffffff
+    if bits == 0 or bits >= 0x7ff0000000000000:
+        # zeros and infinities are their own roots; NaN stays NaN
+        return x + x
+    var scale: i64 = 0
+    if bits < 0x0010000000000000:
+        # subnormal: 2^54 makes it normal, and 2^18 comes back off the root
+        bits = (f64.bits(bits) * 18014398509481984.0).bits()
+        scale = -18
+    # x = m·2^(3q + rest) with m in [1, 2): the biased exponent's third and remainder, by a
+    # multiply that divides by 3 below 2^17 (1023 being a multiple of 3, the bias drops out)
+    let biased = bits >> 52
+    let third = (biased * 43691) >> 17
+    let rest = biased - 3 * third
+    scale += (i64)third - 341
+    let m = f64.bits((bits & 0x000fffffffffffff) | 0x3ff0000000000000)
+    let big_a = m * f64.bits((u64)(rest + 1023) << 52)
+    # a cubic in m within 1e-4 of cbrt m, times cbrt(2^rest); Halley's step
+    # y·(y³ + 2A)/(2y³ + A) cubes the error to about 1e-12
+    var y = (0.5557909602691388 + m * (0.5808263911380952 + m * (-0.1586624600531909 + m * 0.022148699208245196))) * cube_roots[(usize)rest]
+    let cube = y * y * y
+    y = y * (cube + 2.0 * big_a) / (2.0 * cube + big_a)
+    # one Newton step from the exact residual A - y³ (y³ as a pair) squares that to 1e-24
+    let (sh, sl) = two_square(y)
+    let (ch, cl) = multiply_pairs(sh, sl, y, 0.0)
+    let residual = (big_a - ch) - cl
+    return copysign((y + residual / (3.0 * sh)) * power_of_two(scale), x)
+
+## sqrt(x² + y²) without overflow or underflow in the squares, within half an ulp and a
+## hair; an infinite argument gives +infinity even beside NaN.
+func hypot_value(x: f64, y: f64) -> f64:
+    var a = abs(x)
+    var b = abs(y)
+    if a == infinity or b == infinity:
+        return infinity
+    if a != a or b != b:
+        return x + y
+    if b > a:
+        let t = a
+        a = b
+        b = t
+    if b == 0.0 or a > b * 4.611686018427388e+18:
+        # beyond 2^62 apart, b²/2a is under 2^-125 of a: the sum rounds as hypot does
+        return a + b
+    var scale: i64 = 0
+    if a > 3.273390607896142e+150:
+        a = a * 2.409919865102884e-181
+        b = b * 2.409919865102884e-181
+        scale = 600
+    elif b < 3.054936363499605e-151:
+        a = a * 4.149515568880993e+180
+        b = b * 4.149515568880993e+180
+        scale = -600
+    let (ah, al) = two_square(a)
+    let (bh, bl) = two_square(b)
+    let (sh, sl) = add_pairs(ah, al, bh, bl)
+    let (rh, rl) = pair_square_root(sh, sl)
+    if scale == 0:
+        return rh + rl
+    # back by 2^±600 through scale_pair, which rounds a subnormal result once
+    let exponent = (i64)(rh.bits() >> 52) - 1023
+    let down = power_of_two(-exponent)
+    return scale_pair(rh * down, rl * down, exponent + scale)

@@ -1,0 +1,77 @@
+#==============================================================================================
+#
+#   double_double - Exact sums and products, and arithmetic on unevaluated pairs
+#
+#   DESCRIPTION:
+#       The elementary functions carry intermediate values as a pair `(high, low)` whose
+#       exact sum is the value, `low` far below an ulp of `high`: about 106 bits. The
+#       error-free transformations here are Knuth's two-sum, Dekker's fast two-sum and
+#       Dekker's product with Veltkamp's split, written with plain additions and products
+#       and no fused multiply-add, so every target computes the same bits. Base neither
+#       contracts nor reassociates float arithmetic (base.md §7.2), which these depend on.
+#
+#==============================================================================================
+
+## 2^27 + 1: multiplying by it splits a double into two halves of 26 and 27 bits.
+let splitter: f64 = 134217729.0
+
+## `a + b` as the rounded sum and its exact error.
+inline func two_sum(a: f64, b: f64) -> (f64, f64):
+    let s = a + b
+    let bb = s - a
+    return (s, (a - (s - bb)) + (b - bb))
+
+## `a + b` as the rounded sum and its exact error, when `|a| >= |b|` or `a` is zero.
+inline func fast_two_sum(a: f64, b: f64) -> (f64, f64):
+    let s = a + b
+    return (s, b - (s - a))
+
+## `a` as a high half of 26 bits and the rest, whose sum is `a` exactly. `|a|` must stay
+## below 2^995, where multiplying by the splitter cannot overflow.
+inline func split(a: f64) -> (f64, f64):
+    let t = splitter * a
+    let high = t - (t - a)
+    return (high, a - high)
+
+## `a * b` as the rounded product and its exact error, when neither underflows.
+inline func two_product(a: f64, b: f64) -> (f64, f64):
+    let p = a * b
+    let (ah, al) = split(a)
+    let (bh, bl) = split(b)
+    return (p, ((ah * bh - p) + ah * bl + al * bh) + al * bl)
+
+## `a * a` as the rounded square and its exact error.
+inline func two_square(a: f64) -> (f64, f64):
+    let p = a * a
+    let (ah, al) = split(a)
+    return (p, ((ah * ah - p) + 2.0 * ah * al) + al * al)
+
+## The pair `(ah, al)` times the pair `(bh, bl)`, to about 2^-104 relative.
+inline func multiply_pairs(ah: f64, al: f64, bh: f64, bl: f64) -> (f64, f64):
+    let (p, pe) = two_product(ah, bh)
+    return fast_two_sum(p, pe + (ah * bl + al * bh))
+
+## The pair `(ah, al)` times the double `b`.
+inline func multiply_pair(ah: f64, al: f64, b: f64) -> (f64, f64):
+    let (p, pe) = two_product(ah, b)
+    return fast_two_sum(p, pe + al * b)
+
+## The pair `(ah, al)` plus the pair `(bh, bl)`, either larger.
+inline func add_pairs(ah: f64, al: f64, bh: f64, bl: f64) -> (f64, f64):
+    let (s, se) = two_sum(ah, bh)
+    return fast_two_sum(s, se + (al + bl))
+
+## The pair `(ah, al)` divided by the pair `(bh, bl)`: a quotient, then its correction from
+## the exact remainder.
+inline func divide_pairs(ah: f64, al: f64, bh: f64, bl: f64) -> (f64, f64):
+    let q = ah / bh
+    let (p, pe) = two_product(q, bh)
+    let r = (((ah - p) - pe) + al) - q * bl
+    return fast_two_sum(q, r / bh)
+
+## The square root of the pair `(ah, al)`, `ah` positive: the root of `ah` and a Newton
+## correction from the exact residual.
+inline func pair_square_root(ah: f64, al: f64) -> (f64, f64):
+    let s = c_sqrt(ah)
+    let (p, pe) = two_square(s)
+    return fast_two_sum(s, (((ah - p) - pe) + al) / (s + s))
