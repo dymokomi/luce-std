@@ -3,7 +3,8 @@
 #   pow - x raised to the power y
 #
 #   DESCRIPTION:
-#       The method is ARM optimized-routines' pow (as in musl): x^y = e^(y·log x) with
+#       Finite y and a normal x first try the fast path at the end of this file, which
+#       returns only results it proves correctly rounded. The method is ARM optimized-routines' pow (as in musl): x^y = e^(y·log x) with
 #       log x as a pair good to about 2^-68 (log.lucb), y times it as an exact product plus
 #       the low part's, and e^(that pair) from exp.lucb's pair, which keeps the low part
 #       of its argument. An error of 2^-63 in y·log x moves the result 2^-63 relative, so a
@@ -28,7 +29,7 @@ func integer_kind(y: f64) -> u32:
     return 1 if (mantissa >> fraction_bits) & 1 == 1 else 2
 
 ## `x` raised to `y`, every special value as Annex F gives it.
-func pow_value(x: f64, y: f64) -> f64:
+func pow_accurate(x: f64, y: f64) -> f64:
     let ix = x.bits()
     let iy = y.bits()
     let ax = ix & 0x7fffffffffffffff
@@ -68,3 +69,36 @@ func pow_value(x: f64, y: f64) -> f64:
             let (vh, vl, m) = exp_pair(th, tl)
             magnitude = scale_pair(vh, vl, m)
     return -magnitude if negative else magnitude
+
+# mark: The fast path =========================================================================
+
+# For a normal x (negative only with an integer y), finite y and |y·log x| < 708, so that
+# the result is normal: log.lucb's fast log |x| = lh + ll, within 2^-70 of itself, t = y·lh
+# exactly as a pair plus y·ll, and e^t by exp.lucb's table pair with t's low part folded
+# into the reduction (two_sum again), so that r's low part stays below 2^-62 and exp's
+# budget holds. An error of |t|·2^-69 in t moves e^t by as much relatively, and exp's own
+# is under 2^-67 of its value in [1, 2]; the test allows 2^-62 + |t|·2^-65 there, so a
+# fast return is the correctly rounded value. An exact result is never a halfway case and
+# passes; a halfway one never does and takes the method above, as do the special values.
+
+func pow_value(x: f64, y: f64) -> f64:
+    let ax = abs(x)
+    if log_is_normal(ax) and (y.bits() & 0x7fffffffffffffff) < 0x7ff0000000000000:
+        let kind = integer_kind(y) if x < 0.0 else 2
+        if kind != 0:
+            let (lh, ll) = log_fast(ax)
+            let (th, te) = two_product(y, lh)
+            if abs(th) < 708.0:
+                let tl = te + y * ll
+                let kd = (th * f64.bits(inverse_ln2_128) + round_shift) - round_shift
+                let p = kd * f64.bits(ln2_128_low)
+                let (s, se) = two_sum(tl, -p)
+                let (rh, re) = two_sum(th - kd * f64.bits(ln2_128_high), s)
+                let k = (i64)kd
+                let (h, l) = exp_table_pair(k, rh, (re + se) - kd.mul_add(f64.bits(ln2_128_low), -p))
+                let bound = 2.168404344971009e-19 + abs(th) * 2.710505431213761e-20
+                let low = h + (l - bound)
+                if low == h + (l + bound):
+                    let magnitude = low * power_of_two(k >> 7)
+                    return -magnitude if kind == 1 else magnitude
+    return pow_accurate(x, y)

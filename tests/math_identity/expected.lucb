@@ -8,7 +8,7 @@ pub let hashes: u64[70] = [
     0x0ca79426baf2ee60,  # log2
     0x2cf997918dc683e3,  # log10
     0x5468aa6030a8e2ea,  # log1p
-    0x86f39e4257f5949e,  # pow
+    0x3584f0f109d6db8c,  # pow
     0x46f60773f5556e1d,  # sin
     0xcb68ea0f0bec844d,  # cos
     0xc1c88462f287032e,  # tan
