@@ -71,6 +71,7 @@ two-sum, Dekker's fast two-sum, and a product's exact error by a fused multiply-
 
 | Functions | Method |
 | --- | --- |
+| `exp`, `exp2` | For normal results first the same table with 2^(j/128)·r exact as a pair, returned only when its error bound proves the rounding |
 | `exp`, `exp2`, `expm1` | Tang's table-driven exponential with 2^(j/128) as pairs (ARM optimized-routines, musl) |
 | `log`, `log2`, `log10`, `log1p` | Tang's table-driven logarithm over 128 intervals (ARM optimized-routines' selection), log as a pair |
 | `pow` | e^(y·log x) with log x as a pair to about 2^-68 (ARM optimized-routines, musl) |

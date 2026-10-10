@@ -3,7 +3,8 @@
 #   exp - The exponential functions: exp, exp2, expm1, and e^x as a pair for the others
 #
 #   DESCRIPTION:
-#       The method is Tang's table-driven exponential, as ARM's optimized-routines and musl
+#       exp and exp2 with normal results first try the fast path at the end of this file,
+#       which returns only results it proves correctly rounded. The method is Tang's table-driven exponential, as ARM's optimized-routines and musl
 #       compute exp: x = (128m + j)·ln2/128 + r with |r| <= ln2/256, so
 #       e^x = 2^m · 2^(j/128) · e^r. The table holds 2^(j/128) as a double and its remainder;
 #       e^r - 1 is its Taylor polynomial to r^6, whose truncation stays below 2^-71. Written
@@ -70,7 +71,7 @@ inline func exp_pair(xh: f64, xl: f64) -> (f64, f64, i64):
     return (vh, vl + (ae + (th * pl + tl * (1.0 + ph))), k >> 7)
 
 ## e^x, within 0.51 ulp: one table product and one rounding, then `scale_pair`.
-func exp_value(x: f64) -> f64:
+func exp_accurate(x: f64) -> f64:
     if not (x < 709.8):
         return x + x if x != x else f64.bits(0x7ff0000000000000)
     if x < -746.0:
@@ -82,7 +83,7 @@ func exp_value(x: f64) -> f64:
     return scale_pair(th, f64.bits(exp_table_low[j]) + th * p, k >> 7)
 
 ## 2^x: x splits exactly into k/128 + r, and e^(r·ln2) is exp's polynomial.
-func exp2_value(x: f64) -> f64:
+func exp2_accurate(x: f64) -> f64:
     if not (x < 1024.0):
         return x + x if x != x else f64.bits(0x7ff0000000000000)
     if x < -1080.0:
@@ -115,3 +116,66 @@ func expm1_value(x: f64) -> f64:
     let s = power_of_two(m)
     let (d, de) = two_sum(vh * s, -1.0)
     return d + (de + vl * s)
+
+# mark: The fast path =========================================================================
+
+# For results in the normal range, exp and exp2 first try the same table with more of
+# the work exact: r = rh + rl with the subtraction's error kept (two_sum, and the product
+# k·ln2_128_low's by a fused multiply-add), 2^(j/128)·rh exact as a pair, and
+# 2^(j/128) + that an exact sum. What is left, the table's low part and
+# 2^(j/128)·(rl + rh²·P(rh)) for P e^r's Taylor series from 1/2 to 1/720, is under 2^-17
+# of the result and summed in doubles.
+#
+# The error budget, relative to the result's 2^(j/128)·e^r in [1, 2): P's truncation
+# (r^7/5040) 2^-72; P's evaluation and the square 2^-71; the dropped rh·rl and
+# Tl·(rl + rh²·P) 2^-70; four roundings of terms under 2^-17, 2^-69; the reduction's
+# ln2_128_low and the table's low parts 2^-86. The total is under 2^-67; the test allows
+# 2^-63, so when h + (l - 2^-63) and h + (l + 2^-63) round alike, the exact value rounds to
+# them too, and the scaling by 2^m is exact: the result is correctly rounded. The rest,
+# about one input in a thousand, go to exp_accurate.
+
+## e^r - 1 - r for |r| <= ln2/256 + 2^-40, less nothing below 2^-72: r²·P(r).
+inline func exp_series(r: f64) -> f64:
+    let r2 = r * r
+    let low = r.mul_add(0.16666666666666666, 0.5)
+    let middle = r.mul_add(0.008333333333333333, 0.041666666666666664)
+    let high = r.mul_add(0.0001984126984126984, 0.001388888888888889)
+    return r2 * r2.mul_add(r2.mul_add(high, middle), low)
+
+## 2^(k/128)·e^(rh + rl) / 2^(k >> 7) as a double h in [1, 2] and a remainder l.
+inline func exp_table_pair(k: i64, rh: f64, rl: f64) -> (f64, f64):
+    let j = (usize)(k & 127)
+    let th = f64.bits(exp_table_high[j])
+    let tl = f64.bits(exp_table_low[j])
+    let (ph, pl) = two_product(th, rh)
+    let (h, he) = fast_two_sum(th, ph)
+    return (h, (he + pl) + (tl + (th * (rl + exp_series(rh)) + tl * rh)))
+
+## Whether h + l, h in [1, 2], rounds the same at both ends of 2^-63.
+inline func exp_rounds_alike(h: f64, l: f64) -> bool:
+    return h + (l - 1.0842021724855044e-19) == h + (l + 1.0842021724855044e-19)
+
+## e^x: the fast path for -708 < x < 709.7, where e^x is normal, else exp_accurate.
+func exp_value(x: f64) -> f64:
+    if x > -708.0 and x < 709.7:
+        let kd = (x * f64.bits(inverse_ln2_128) + round_shift) - round_shift
+        let p = kd * f64.bits(ln2_128_low)
+        let (rh, re) = two_sum(x - kd * f64.bits(ln2_128_high), -p)
+        let k = (i64)kd
+        let (h, l) = exp_table_pair(k, rh, re - kd.mul_add(f64.bits(ln2_128_low), -p))
+        if exp_rounds_alike(h, l):
+            return (h + l) * power_of_two(k >> 7)
+    return exp_accurate(x)
+
+## 2^x: x = k/128 + r exactly, and r·ln2 as a pair, for -1022 < x < 1024.
+func exp2_value(x: f64) -> f64:
+    if x > -1022.0 and x < 1024.0:
+        let kd = (x * 128.0 + round_shift) - round_shift
+        let r = x - kd * 0.0078125
+        let rh = r * f64.bits(ln2_double_high)
+        let rl = r.mul_add(f64.bits(ln2_double_high), -rh) + r * f64.bits(ln2_double_low)
+        let k = (i64)kd
+        let (h, l) = exp_table_pair(k, rh, rl)
+        if exp_rounds_alike(h, l):
+            return (h + l) * power_of_two(k >> 7)
+    return exp2_accurate(x)

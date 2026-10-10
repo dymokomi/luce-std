@@ -1,7 +1,7 @@
 ## The expected hashes of main.lucb, written by MATH_IDENTITY_PRINT=1 (see main.lucb); every
 ## target must reproduce them.
 pub let hashes: u64[70] = [
-    0xc2664ef51f01ff06,  # exp
+    0xf230050d44a1e588,  # exp
     0x85879ddb9f591d4b,  # exp2
     0x2d9748d3cde0448b,  # expm1
     0x8381948912cfc400,  # log
@@ -22,7 +22,7 @@ pub let hashes: u64[70] = [
     0x794e0ada99a71f80,  # cbrt
     0xf776dcb1fa3f95e3,  # hypot
     0xea8c2f48a95aef0a,  # erf
-    0x45fb6f2ee465628d,  # erfc
+    0xf406c2591b2ec635,  # erfc
     0xa8cf399306bb32ea,  # floor
     0xd6294ac639d89423,  # ceil
     0xad12e5471915751b,  # round
