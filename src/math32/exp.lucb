@@ -24,8 +24,12 @@ inline func exp_double(x: f64) -> f64:
     let p = r + r * r * (0.5 + r * (0.16666666666666666 + r * 0.041666666666666664))
     return t + t * p
 
+## Whether |x| < 87, where exp_double takes x.
+inline func exp_inside(x: f32) -> bool:
+    return (x.bits() & magnitude_mask) < exp_limit
+
 func exp_value(x: f32) -> f32:
-    if (x.bits() & magnitude_mask) < exp_limit:
+    if exp_inside(x):
         let h = exp_double((f64)x)
         if rounds_once(h, relative_46):
             return (f32)h

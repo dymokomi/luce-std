@@ -1,0 +1,124 @@
+#==============================================================================================
+#
+#   each - The functions over whole spans: sin_all, exp_all and the rest
+#
+#   DESCRIPTION:
+#       `math.sin_all(xs, out)` writes sin of each element of `xs` to `out`, the same bits
+#       as calling `sin` on each. The work goes in blocks of 64: a first pass runs the
+#       function's fast path on every element, inputs outside its range replaced by a
+#       harmless one, writes its result and keeps, without a branch, the position and input
+#       of any element whose rounding it could not prove; a second pass gives those few the
+#       scalar function's answer. The inputs are kept, so `xs` and `out` may be the same
+#       span. The first pass holds no call and no data-dependent branch, the shape a
+#       vectorizing compiler can take lane by lane.
+#
+#==============================================================================================
+
+## The elements of one block whose rounding the fast path left open: positions and inputs.
+struct Declined:
+    var at: usize[64]
+    var x: f64[64]
+    var count: usize
+
+    ## Keep element i, input x, unless `settled`: written either way, counted only if not.
+    func note(i: usize, x: f64, settled: bool):
+        self.at[self.count] = i
+        self.x[self.count] = x
+        self.count += 0 if settled else 1
+
+## The end of the block of at most 64 elements that starts at `start`.
+inline func block_end(start: usize, length: usize) -> usize:
+    return start + 64 if length - start > 64 else length
+
+## sin of each element of `xs`, into `out` of the same length (which may be `xs`).
+pub func sin_all(xs: const f64[], out: f64[]):
+    assert(xs.length == out.length)
+    var declined: Declined
+    var start: usize = 0
+    while start < xs.length:
+        let end = block_end(start, xs.length)
+        declined.count = 0
+        for i in start..<end:
+            let x = xs[i]
+            let inside = trig_inside(x)
+            let (h, l) = sin_parts(x if inside else 0.0)
+            out[i] = h + l
+            declined.note(i, x, inside and rounds_alike(h, l))
+        for d in 0..<declined.count:
+            out[declined.at[d]] = sin_value(declined.x[d])
+        start = end
+
+## cos of each element of `xs`, into `out` of the same length (which may be `xs`).
+pub func cos_all(xs: const f64[], out: f64[]):
+    assert(xs.length == out.length)
+    var declined: Declined
+    var start: usize = 0
+    while start < xs.length:
+        let end = block_end(start, xs.length)
+        declined.count = 0
+        for i in start..<end:
+            let x = xs[i]
+            let inside = trig_inside(x)
+            let (h, l) = cos_parts(x if inside else 0.0)
+            out[i] = h + l
+            declined.note(i, x, inside and rounds_alike(h, l))
+        for d in 0..<declined.count:
+            out[declined.at[d]] = cos_value(declined.x[d])
+        start = end
+
+## e raised to each element of `xs`, into `out` of the same length (which may be `xs`).
+pub func exp_all(xs: const f64[], out: f64[]):
+    assert(xs.length == out.length)
+    var declined: Declined
+    var start: usize = 0
+    while start < xs.length:
+        let end = block_end(start, xs.length)
+        declined.count = 0
+        for i in start..<end:
+            let x = xs[i]
+            let inside = exp_inside(x)
+            let (h, l, m) = exp_parts(x if inside else 0.0)
+            out[i] = (h + l) * power_of_two(m)
+            declined.note(i, x, inside and exp_rounds_alike(h, l))
+        for d in 0..<declined.count:
+            out[declined.at[d]] = exp_value(declined.x[d])
+        start = end
+
+## The natural logarithm of each element of `xs`, into `out` of the same length.
+pub func log_all(xs: const f64[], out: f64[]):
+    assert(xs.length == out.length)
+    var declined: Declined
+    var start: usize = 0
+    while start < xs.length:
+        let end = block_end(start, xs.length)
+        declined.count = 0
+        for i in start..<end:
+            let x = xs[i]
+            let inside = log_is_normal(x)
+            let (h, l) = log_fast(x if inside else 1.0)
+            out[i] = h + l
+            declined.note(i, x, inside and rounds_within(h, l, 1.0842021724855044e-19))
+        for d in 0..<declined.count:
+            out[declined.at[d]] = log_value(declined.x[d])
+        start = end
+
+## sin and cos of each element of `xs`, into `sines` and `cosines` of the same length.
+pub func sincos_all(xs: const f64[], sines: f64[], cosines: f64[]):
+    assert(xs.length == sines.length and xs.length == cosines.length)
+    var declined: Declined
+    var start: usize = 0
+    while start < xs.length:
+        let end = block_end(start, xs.length)
+        declined.count = 0
+        for i in start..<end:
+            let x = xs[i]
+            let inside = trig_inside(x)
+            let (sh, sl, ch, cl) = sincos_parts(x if inside else 0.0)
+            sines[i] = sh + sl
+            cosines[i] = ch + cl
+            declined.note(i, x, inside and rounds_alike(sh, sl) and rounds_alike(ch, cl))
+        for d in 0..<declined.count:
+            let (s, c) = sincos_value(declined.x[d])
+            sines[declined.at[d]] = s
+            cosines[declined.at[d]] = c
+        start = end

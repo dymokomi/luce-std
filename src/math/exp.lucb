@@ -155,16 +155,26 @@ inline func exp_table_pair(k: i64, rh: f64, rl: f64) -> (f64, f64):
 inline func exp_rounds_alike(h: f64, l: f64) -> bool:
     return h + (l - 1.0842021724855044e-19) == h + (l + 1.0842021724855044e-19)
 
-## e^x: the fast path for -708 < x < 709.7, where e^x is normal, else exp_accurate.
+## Whether e^x is normal, where the fast path takes x: -708 < x < 709.7.
+inline func exp_inside(x: f64) -> bool:
+    return x > -708.0 and x < 709.7
+
+## e^x by the fast path as (h + l)·2^m, h + l in [1, 2]; any x below 2^62 in magnitude
+## runs through it without a trap, m then being garbage.
+inline func exp_parts(x: f64) -> (f64, f64, i64):
+    let kd = (x * f64.bits(inverse_ln2_128) + round_shift) - round_shift
+    let p = kd * f64.bits(ln2_128_low)
+    let (rh, re) = two_sum(x - kd * f64.bits(ln2_128_high), -p)
+    let k = (i64)kd
+    let (h, l) = exp_table_pair(k, rh, re - kd.mul_add(f64.bits(ln2_128_low), -p))
+    return (h, l, k >> 7)
+
+## e^x: the fast path where it vouches for its rounding, else exp_accurate.
 func exp_value(x: f64) -> f64:
-    if x > -708.0 and x < 709.7:
-        let kd = (x * f64.bits(inverse_ln2_128) + round_shift) - round_shift
-        let p = kd * f64.bits(ln2_128_low)
-        let (rh, re) = two_sum(x - kd * f64.bits(ln2_128_high), -p)
-        let k = (i64)kd
-        let (h, l) = exp_table_pair(k, rh, re - kd.mul_add(f64.bits(ln2_128_low), -p))
+    if exp_inside(x):
+        let (h, l, m) = exp_parts(x)
         if exp_rounds_alike(h, l):
-            return (h + l) * power_of_two(k >> 7)
+            return (h + l) * power_of_two(m)
     return exp_accurate(x)
 
 ## 2^x: x = k/128 + r exactly, and r·ln2 as a pair, for -1022 < x < 1024.

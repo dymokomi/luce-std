@@ -1,0 +1,114 @@
+## The span forms (sin_all and the rest, in math and math32) against the scalar functions,
+## element by element and bit for bit: over raw bit patterns, the working ranges and the
+## edge cases, at every length up to 200 (so every block boundary and tail), into a
+## separate span and in place.
+from luce_std import math, math32
+
+## splitmix64: a fixed stream of 64-bit values from a seed.
+struct Stream:
+    var state: u64
+
+    func next() -> u64:
+        self.state = self.state +% 0x9e3779b97f4a7c15
+        var z = self.state
+        z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9
+        z = (z ^ (z >> 27)) *% 0x94d049bb133111eb
+        return z ^ (z >> 31)
+
+    ## Raw bits, a value in [-scale, scale], or an edge case, a third each.
+    func value(scale: f64) -> f64:
+        let kind = self.next() % 3
+        if kind == 0:
+            return f64.bits(self.next())
+        if kind == 1:
+            return ((f64)(self.next() >> 11) * 1.1102230246251565e-16 * 2.0 - 1.0) * scale
+        let edges: f64[8] = [0.0, -0.0, 1.0, 709.7, -708.5, 1.0e300, 3.141592653589793, 1048576.5]
+        return edges[self.next() % 8]
+
+func same64(a: f64, b: f64) -> bool:
+    return a.bits() == b.bits() or (a != a and b != b)
+
+func same32(a: f32, b: f32) -> bool:
+    return a.bits() == b.bits() or (a != a and b != b)
+
+## f64 function `k` of x, scalar.
+func scalar64(k: usize, x: f64) -> f64:
+    match k:
+        0: return math.sin(x)
+        1: return math.cos(x)
+        2: return math.exp(x)
+        _: return math.log(x)
+
+func span64(k: usize, xs: const f64[], out: f64[]):
+    match k:
+        0: math.sin_all(xs, out)
+        1: math.cos_all(xs, out)
+        2: math.exp_all(xs, out)
+        _: math.log_all(xs, out)
+
+func scalar32(k: usize, x: f32) -> f32:
+    match k:
+        0: return math32.sin(x)
+        1: return math32.cos(x)
+        2: return math32.tan(x)
+        3: return math32.exp(x)
+        4: return math32.log(x)
+        _: return math32.log2(x)
+
+func span32(k: usize, xs: const f32[], out: f32[]):
+    match k:
+        0: math32.sin_all(xs, out)
+        1: math32.cos_all(xs, out)
+        2: math32.tan_all(xs, out)
+        3: math32.exp_all(xs, out)
+        4: math32.log_all(xs, out)
+        _: math32.log2_all(xs, out)
+
+pub func main(arguments: str[]) -> i32:
+    _ = arguments
+    var stream = Stream(state = 0x5ba45)
+    var xs: f64[200]
+    var out: f64[200]
+    var inplace: f64[200]
+    var cosines: f64[200]
+    var xs32: f32[200]
+    var out32: f32[200]
+    var inplace32: f32[200]
+    var cosines32: f32[200]
+    var failures = 0
+    for length in 0..<201:
+        let n = (usize)length
+        for i in 0..<n:
+            xs[i] = stream.value(20.0)
+            xs32[i] = (f32)stream.value(20.0)
+        for k: usize in 0..<4:
+            for i in 0..<n:
+                inplace[i] = xs[i]
+            span64(k, xs[0..<n], out[0..<n])
+            span64(k, inplace[0..<n], inplace[0..<n])
+            for i in 0..<n:
+                let want = scalar64(k, xs[i])
+                if not same64(out[i], want) or not same64(inplace[i], want):
+                    failures += 1
+        math.sincos_all(xs[0..<n], out[0..<n], cosines[0..<n])
+        for i in 0..<n:
+            if not same64(out[i], math.sin(xs[i])) or not same64(cosines[i], math.cos(xs[i])):
+                failures += 1
+        for k: usize in 0..<6:
+            for i in 0..<n:
+                inplace32[i] = xs32[i]
+            span32(k, xs32[0..<n], out32[0..<n])
+            span32(k, inplace32[0..<n], inplace32[0..<n])
+            for i in 0..<n:
+                let want = scalar32(k, xs32[i])
+                if not same32(out32[i], want) or not same32(inplace32[i], want):
+                    failures += 1
+        math32.sincos_all(xs32[0..<n], out32[0..<n], cosines32[0..<n])
+        for i in 0..<n:
+            if not same32(out32[i], math32.sin(xs32[i])) or not same32(cosines32[i], math32.cos(xs32[i])):
+                failures += 1
+    if failures > 0:
+        print(f"math_spans: {failures} elements differ from the scalar functions")
+        return 1
+    print("ok the span forms give the scalar functions' bits")
+    return 0

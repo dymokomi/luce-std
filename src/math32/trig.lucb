@@ -42,42 +42,55 @@ inline func rounds_alike(h: f64, x: f64) -> bool:
     let bound = magnitude64(h) * trig_relative + magnitude64(x) * trig_absolute
     return (f32)(h - bound) == (f32)(h + bound)
 
+## Whether x is nonzero and below 2^20 in magnitude, where the doubles below take it.
+inline func trig_inside(x: f32) -> bool:
+    return (x.bits() & magnitude_mask) -% 1 < trig_span
+
+## sin x and cos x as doubles; any x runs through them without a trap.
+inline func sin_double(x: f64) -> f64:
+    let (n, r) = reduce_step(x)
+    return rotate(sine_at(n), sine_at(n +% 64), r, r * r)
+
+inline func cos_double(x: f64) -> f64:
+    let (n, r) = reduce_step(x)
+    return rotate(sine_at(n +% 64), sine_at(n +% 128), r, r * r)
+
+inline func sincos_double(x: f64) -> (f64, f64):
+    let (n, r) = reduce_step(x)
+    let z = r * r
+    let a = sine_at(n)
+    let b = sine_at(n +% 64)
+    return (rotate(a, b, r, z), rotate(b, -a, r, z))
+
+## tan x as the quotient of the two, each within 2^-50, so within 2^-48.
+inline func tan_double(x: f64) -> f64:
+    let (s, c) = sincos_double(x)
+    return s / c
+
 func sin_value(x: f32) -> f32:
-    if (x.bits() & magnitude_mask) -% 1 < trig_span:
-        let (n, r) = reduce_step((f64)x)
-        let h = rotate(sine_at(n), sine_at(n +% 64), r, r * r)
+    if trig_inside(x):
+        let h = sin_double((f64)x)
         if rounds_alike(h, (f64)x):
             return (f32)h
     return (f32)math.sin((f64)x)
 
 func cos_value(x: f32) -> f32:
-    if (x.bits() & magnitude_mask) -% 1 < trig_span:
-        let (n, r) = reduce_step((f64)x)
-        let h = rotate(sine_at(n +% 64), sine_at(n +% 128), r, r * r)
+    if trig_inside(x):
+        let h = cos_double((f64)x)
         if rounds_alike(h, (f64)x):
             return (f32)h
     return (f32)math.cos((f64)x)
 
 func sincos_value(x: f32) -> (f32, f32):
-    if (x.bits() & magnitude_mask) -% 1 < trig_span:
-        let (n, r) = reduce_step((f64)x)
-        let z = r * r
-        let a = sine_at(n)
-        let b = sine_at(n +% 64)
-        let s = rotate(a, b, r, z)
-        let c = rotate(b, -a, r, z)
+    if trig_inside(x):
+        let (s, c) = sincos_double((f64)x)
         if rounds_alike(s, (f64)x) and rounds_alike(c, (f64)x):
             return ((f32)s, (f32)c)
     return (sin_value(x), cos_value(x))
 
-## tan x as the quotient of the two, each within 2^-50, so within 2^-48.
 func tan_value(x: f32) -> f32:
-    if (x.bits() & magnitude_mask) -% 1 < trig_span:
-        let (n, r) = reduce_step((f64)x)
-        let z = r * r
-        let a = sine_at(n)
-        let b = sine_at(n +% 64)
-        let h = rotate(a, b, r, z) / rotate(b, -a, r, z)
+    if trig_inside(x):
+        let h = tan_double((f64)x)
         if rounds_alike(h, (f64)x):
             return (f32)h
     return (f32)math.tan((f64)x)

@@ -49,6 +49,13 @@ rounding operations retain their specified direction regardless of that environm
 | `scalbn` | Scale by an integer power of two without materializing that power as a float. |
 | `modf` | `(fractional, integral)` components, truncating toward zero. Both components have x's sign. Infinity gives a signed-zero fraction; NaN gives two NaNs. |
 
+Span forms take a whole span at once and give each element the scalar function's bits:
+`math.sin_all(xs, out)`, `cos_all`, `exp_all`, `log_all` and `sincos_all(xs, sines,
+cosines)` on f64, and the same with `tan_all` and `log2_all` on f32 in `math32`. `out`
+has the length of `xs` and may be `xs` itself. They run the fast path over blocks of 64
+without a branch or a call and give the few inputs it declines to the scalar function;
+`tests/math_spans` checks them against the scalar functions at every length to 200.
+
 The complete special-case rules for [power](https://man7.org/linux/man-pages/man3/pow.3.html),
 [atan2](https://man7.org/linux/man-pages/man3/atan2.3.html) and
 [remainder](https://man7.org/linux/man-pages/man3/remainder.3.html) are C99 Annex F's.

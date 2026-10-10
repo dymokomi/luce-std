@@ -234,41 +234,58 @@ inline func rounds_alike(h: f64, l: f64) -> bool:
     let bound = abs(h) * 4.336808689942018e-19 + 2.5849394142282115e-26
     return h + (l - bound) == h + (l + bound)
 
+## Whether the table method takes x: 2^-27 <= |x| < 2^20.
+inline func trig_inside(x: f64) -> bool:
+    return (x.bits() & 0x7fffffffffffffff) -% fast_trig_low < fast_trig_span
+
+## sin x by the table method as h + l; any x runs through it without a trap.
+inline func sin_parts(x: f64) -> (f64, f64):
+    let (n, rh, rl) = reduce_step(x)
+    let z = rh * rh
+    let (ah, al) = sine_entry(n)
+    let (bh, bl) = sine_entry(n +% 64)
+    return rotate(ah, al, bh, bl, rh, rl, cos_less_one(z), sin_less_r(rh, z))
+
+## cos x as sin x but from the entries a quarter turn on: cos(a + r) = B·cos r - A·sin r.
+inline func cos_parts(x: f64) -> (f64, f64):
+    let (n, rh, rl) = reduce_step(x)
+    let z = rh * rh
+    let (ah, al) = sine_entry(n +% 64)
+    let (bh, bl) = sine_entry(n +% 128)
+    return rotate(ah, al, bh, bl, rh, rl, cos_less_one(z), sin_less_r(rh, z))
+
+## sin x and cos x from one reduction and one pair of entries, each as h + l.
+inline func sincos_parts(x: f64) -> (f64, f64, f64, f64):
+    let (n, rh, rl) = reduce_step(x)
+    let z = rh * rh
+    let c = cos_less_one(z)
+    let t = sin_less_r(rh, z)
+    let (ah, al) = sine_entry(n)
+    let (bh, bl) = sine_entry(n +% 64)
+    let (sh, sl) = rotate(ah, al, bh, bl, rh, rl, c, t)
+    let (ch, cl) = rotate(bh, bl, -ah, -al, rh, rl, c, t)
+    return (sh, sl, ch, cl)
+
 ## sin x: the table method when it vouches for its rounding, else sin_accurate.
 func sin_value(x: f64) -> f64:
-    if (x.bits() & 0x7fffffffffffffff) -% fast_trig_low < fast_trig_span:
-        let (n, rh, rl) = reduce_step(x)
-        let z = rh * rh
-        let (ah, al) = sine_entry(n)
-        let (bh, bl) = sine_entry(n +% 64)
-        let (h, l) = rotate(ah, al, bh, bl, rh, rl, cos_less_one(z), sin_less_r(rh, z))
+    if trig_inside(x):
+        let (h, l) = sin_parts(x)
         if rounds_alike(h, l):
             return h + l
     return sin_accurate(x)
 
-## cos x, as sin x but from the entries a quarter turn on: cos(a + r) = B·cos r - A·sin r.
+## cos x: the table method when it vouches for its rounding, else cos_accurate.
 func cos_value(x: f64) -> f64:
-    if (x.bits() & 0x7fffffffffffffff) -% fast_trig_low < fast_trig_span:
-        let (n, rh, rl) = reduce_step(x)
-        let z = rh * rh
-        let (ah, al) = sine_entry(n +% 64)
-        let (bh, bl) = sine_entry(n +% 128)
-        let (h, l) = rotate(ah, al, bh, bl, rh, rl, cos_less_one(z), sin_less_r(rh, z))
+    if trig_inside(x):
+        let (h, l) = cos_parts(x)
         if rounds_alike(h, l):
             return h + l
     return cos_accurate(x)
 
 ## sin x and cos x from one reduction and one pair of entries.
 func sincos_value(x: f64) -> (f64, f64):
-    if (x.bits() & 0x7fffffffffffffff) -% fast_trig_low < fast_trig_span:
-        let (n, rh, rl) = reduce_step(x)
-        let z = rh * rh
-        let c = cos_less_one(z)
-        let t = sin_less_r(rh, z)
-        let (ah, al) = sine_entry(n)
-        let (bh, bl) = sine_entry(n +% 64)
-        let (sh, sl) = rotate(ah, al, bh, bl, rh, rl, c, t)
-        let (ch, cl) = rotate(bh, bl, -ah, -al, rh, rl, c, t)
+    if trig_inside(x):
+        let (sh, sl, ch, cl) = sincos_parts(x)
         if rounds_alike(sh, sl) and rounds_alike(ch, cl):
             return (sh + sl, ch + cl)
     return (sin_value(x), cos_value(x))
@@ -278,16 +295,9 @@ func sincos_value(x: f64) -> (f64, f64):
 ## 2^-20 that is within 2^-61.2 of tan x; the test allows 2^-60. Near a multiple of pi/2,
 ## and for the inputs the test turns down, tan_accurate.
 func tan_value(x: f64) -> f64:
-    if (x.bits() & 0x7fffffffffffffff) -% fast_trig_low < fast_trig_span:
-        let (n, rh, rl) = reduce_step(x)
-        let z = rh * rh
-        let c = cos_less_one(z)
-        let t = sin_less_r(rh, z)
-        let (ah, al) = sine_entry(n)
-        let (bh, bl) = sine_entry(n +% 64)
+    if trig_inside(x):
         # rotate's low parts reach 2^-13 of the high ones: renormalize before dividing
-        let (s0, s1) = rotate(ah, al, bh, bl, rh, rl, c, t)
-        let (c0, c1) = rotate(bh, bl, -ah, -al, rh, rl, c, t)
+        let (s0, s1, c0, c1) = sincos_parts(x)
         let (sh, sl) = fast_two_sum(s0, s1)
         let (ch, cl) = fast_two_sum(c0, c1)
         if abs(sh) >= 9.5367431640625e-07 and abs(ch) >= 9.5367431640625e-07:
