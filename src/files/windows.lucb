@@ -31,6 +31,7 @@ extern func win_handle as "_get_osfhandle"(descriptor: i32) -> isize
 extern func win_descriptor as "_open_osfhandle"(handle: isize, flags: i32) -> i32
 extern func SetFileInformationByHandle(handle: void*, kind: i32, info: void*, size: u32) -> i32
 extern func SetFileTime(handle: void*, created: const u64*?, accessed: const u64*, modified: const u64*) -> i32
+extern func GetSystemTimeAsFileTime(ticks: u64*)
 extern func CreateHardLinkW(destination: u16*, source: u16*, security: void*?) -> i32
 extern func CreateSymbolicLinkW(path: u16*, target: u16*, flags: u32) -> u8
 extern func DeviceIoControl(handle: void*, code: u32, input: void*?, input_size: u32, output: void*, output_size: u32, returned: u32*, overlapped: void*?) -> i32
@@ -121,6 +122,12 @@ func windows_set_times(descriptor: i32, accessed: FileTime, modified: FileTime) 
     let access_ticks = try windows_ticks(accessed)
     let modified_ticks = try windows_ticks(modified)
     if SetFileTime((void*)win_handle(descriptor), none, &access_ticks, &modified_ticks) == 0:
+        error(windows_error(GetLastError()), "file timestamps could not be changed")
+
+func windows_touch(descriptor: i32) -> !:
+    var now: u64 = 0
+    GetSystemTimeAsFileTime(&now)
+    if SetFileTime((void*)win_handle(descriptor), none, &now, &now) == 0:
         error(windows_error(GetLastError()), "file timestamps could not be changed")
 
 extern struct WinInformation:

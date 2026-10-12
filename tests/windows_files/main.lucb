@@ -36,6 +36,8 @@ func contract() -> !:
     let info = try file.metadata()
     assert(info.accessed.seconds == -12345 and info.accessed.nanoseconds == 123456700)
     assert(info.modified.seconds == 1234567890 and info.modified.nanoseconds == 765432100)
+    try file.touch()
+    assert((try file.metadata()).modified.seconds > 1234567890)
     try file.set_permissions(292)
     assert((try file.metadata()).permissions == 292)
     try file.set_permissions(438)

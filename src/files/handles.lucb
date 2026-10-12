@@ -119,6 +119,19 @@ pub struct File: io.Reader, io.Writer:
             if result != 0:
                 error(classify_error(c.errno()), "file timestamps could not be changed")
 
+    ## Set the access and modification times to now, as `touch` does to a file that exists.
+    pub func touch() -> !:
+        let descriptor = self.handle else error(io.closed, "the file is closed")
+        if platform.windows:
+            try windows_touch(descriptor)
+            return
+        else:
+            var result = futimens(descriptor, none)
+            while result != 0 and c.errno() == c.interrupted:
+                result = futimens(descriptor, none)
+            if result != 0:
+                error(classify_error(c.errno()), "file timestamps could not be changed")
+
     ## Read some bytes, retrying interruption. Zero for nonempty storage is EOF;
     ## empty input makes no system call. The handle must be open even for empty I/O.
     pub func read(buffer: u8[]) -> usize!:
@@ -224,6 +237,13 @@ pub func open(path: c.str, mode: OpenMode = OpenMode.read, permissions: u32 = 42
         opened.destroy()
         error(failure.code, failure.message)
     return reservation.publish(native)
+
+## Set the access and modification times of the file at `path` to now, as `touch` does to
+## a file that exists; a missing file is an error, not made.
+pub func touch(path: c.str) -> !:
+    var file = try File.open(path, OpenMode.read_write)
+    defer file.destroy()
+    try file.touch()
 
 ## The interop type of an open file.
 pub let file_type: interop.Type[File] = interop.Type[File]("File", File.destroy, closeable = true)

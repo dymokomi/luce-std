@@ -93,6 +93,14 @@ pub func main(arguments: c.str[]) -> i32!:
     let updated = try file.metadata()
     assert(updated.accessed.seconds == accessed.seconds and updated.modified.seconds == modified.seconds)
     compare(updated, path, true, descriptor)
+    # `touch` makes both times now, later than the ones just set, on the file or by its path
+    try files.touch(path)
+    assert((try file.metadata()).modified.seconds > modified.seconds)
+    try file.set_times(accessed, modified)
+    try file.touch()
+    let touched = try file.metadata()
+    assert(touched.modified.seconds > modified.seconds and touched.accessed.seconds > modified.seconds)
+    try file.set_times(accessed, modified)
     var invalid = false
     file.truncate(-1) catch failure:
         assert(failure.code == files.invalid_options)

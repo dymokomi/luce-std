@@ -112,7 +112,7 @@ extern func fstat_macos as "fstat"(descriptor: i32, result: MacMetadata*) -> i32
 extern func fstat_linux as "fstat"(descriptor: i32, result: LinuxMetadata*) -> i32
 extern func fstatat_macos as "fstatat"(directory: i32, path: c.str, result: MacMetadata*, flags: i32) -> i32
 extern func fstatat_linux as "fstatat"(directory: i32, path: c.str, result: LinuxMetadata*, flags: i32) -> i32
-extern func futimens(descriptor: i32, times: const NativeFileTime*) -> i32
+extern func futimens(descriptor: i32, times: const NativeFileTime*?) -> i32
 
 func file_kind(mode: u32) -> FileKind:
     let kind = mode & 61440
