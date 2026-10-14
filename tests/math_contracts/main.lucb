@@ -4,6 +4,7 @@ import c
 from luce_std import files, math, math32
 import memory
 import os
+import platform
 import remainders
 import strings
 
@@ -224,6 +225,9 @@ func check_remainders(corpus: const u8[], mode: i32):
 
 pub func main(arguments: c.str[]) -> i32!:
     _ = arguments
+    if platform.windows:
+        print("skip: reference.c needs a C compiler, which Windows builds do not use")
+        return 0
     # the reference rows are math_accuracy's, beside this program's directory
     let here = os.env("LUC_TEST_DIR") else "tests/math_contracts"
     let csv = try strings.join([here, "/../math_accuracy/reference.csv"], "")

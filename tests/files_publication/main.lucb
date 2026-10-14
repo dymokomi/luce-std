@@ -1,5 +1,6 @@
 import c
 from luce_std import files
+import platform
 import thread
 
 extern func publication_verify(data: const u8*, length: usize)
@@ -44,6 +45,9 @@ func worker(context: void*?):
 ## every version they see; afterwards the directory holds the file alone, no temporary.
 pub func main(arguments: c.str[]) -> i32!:
     _ = arguments
+    if platform.windows:
+        print("skip: reference.c needs a C compiler, which Windows builds do not use")
+        return 0
     let tree: c.str = "build/tests/files_publication/tree"
     if files.exists(tree): try files.remove_tree(tree)
     try files.ensure_directory((str)tree)
