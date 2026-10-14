@@ -7,8 +7,10 @@ import os
 import interop
 import process
 import strings
+import sync
 import thread
 import time
+import wake
 
 extern func pipe(descriptors: i32*) -> i32
 extern func close(descriptor: i32) -> i32
@@ -19,6 +21,70 @@ func wait_command(command: process.Command*) -> !:
     while not command.is_finished():
         assert(time.now() - started < 5000000000)
         thread.sleep(2)
+
+## What a test's waker heard: wakes while the command ran and after it finished, and
+## whether the waker was let go. The command's worker wakes it; the test waits on `heard`.
+struct Heard:
+    var command: process.Command*?
+    var lock: sync.Mutex
+    var heard: sync.Condition
+    var running: i64
+    var finished: i64
+    var released: bool
+
+func hear(context: void*):
+    let heard = (Heard*)context
+    heard.lock.lock()
+    let command = heard.command else trap("a wake before the command started")
+    if command.is_finished():
+        heard.finished += 1
+    else:
+        heard.running += 1
+    heard.heard.broadcast()
+    heard.lock.unlock()
+
+func let_go(context: void*):
+    let heard = (Heard*)context
+    heard.released = true
+
+## Wait on the condition (never a polling loop) until the command's last wake.
+func await_finish(heard: Heard*):
+    let started = time.now()
+    heard.lock.lock()
+    while heard.finished == 0:
+        assert(time.now() - started < 5000000000)
+        heard.heard.wait_for(&heard.lock, 1000)
+    heard.lock.unlock()
+
+## A command wakes its waker as output arrives and once it is done, cancelled too, and
+## lets it go when closed.
+func wakes(executable: str) -> !:
+    var heard = Heard(command = none, running = 0, finished = 0, released = false)
+    let waker = try wake.waker(hear, (void*)&heard, let_go)
+    # The started command's worker may wake before `command` holds the result.
+    heard.lock.lock()
+    var command = try process.Command(executable, ["stream"], waker = waker)
+    heard.command = &command
+    heard.lock.unlock()
+    await_finish(&heard)
+    assert(heard.running >= 1 and heard.finished == 1)
+    let text = try command.output()
+    defer text.release()
+    assert(text.value == "first\nsecond\n")
+    assert(try command.wait() == 7)
+    heard.lock.lock()
+    var sleeper = try process.Command(executable, ["sleep"], waker = waker)
+    heard.finished = 0
+    heard.command = &sleeper
+    heard.lock.unlock()
+    sleeper.cancel()
+    await_finish(&heard)
+    assert((sleeper.exit_code() else 0) == -1)
+    waker.release()
+    command.close()
+    assert(not heard.released)
+    sleeper.close()
+    assert(heard.released)
 
 pub func main(arguments: str[]) -> i32!:
     if arguments.length > 1:
@@ -112,4 +178,5 @@ pub func main(arguments: str[]) -> i32!:
         refused = true
         recover 0
     assert(refused)
+    try wakes(executable.value)
     return 0

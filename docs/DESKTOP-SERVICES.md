@@ -15,7 +15,11 @@ files. `read_text` defaults to a 4 MiB limit; names must be valid UTF-8.
 `process.Command(program, arguments, directory = "", output_limit = 1048576,
 environment = none)` starts a background worker without a shell. `is_finished`,
 `revision`, `output`, `exit_code`, and `error_message` are nonblocking observations;
-`wait` blocks until the program ends and answers its exit code.
+`wait` blocks until the program ends and answers its exit code. A UI does not poll
+those: `waker = notifier.waker()` (a luce-std `wake.Waker`; luce-ui's notifiers make
+them) is woken from the worker as output arrives and once the program has exited,
+failed or been cancelled, and the woken side reads `revision`, `output` and
+`is_finished`. The command holds the waker until `close`, after its worker is joined.
 `output` copies a stable snapshot under a mutex and replaces malformed bytes for
 display. Stdout/stderr are merged in observation order, not a guaranteed total
 ordering of child writes. `cancel` requests termination; `close` cancels and joins.

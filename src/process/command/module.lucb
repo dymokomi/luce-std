@@ -4,13 +4,16 @@
 #
 #   DESCRIPTION:
 #       A command owns a background worker and its child process tree. Only byte storage crosses
-#       the worker boundary; ARC objects stay on their owning thread.
+#       the worker boundary; ARC objects stay on their owning thread. A command given a waker
+#       wakes it from the worker as output arrives and once the child is done; the waker's
+#       reference stays on the owning thread, and the worker only calls the waker it points to.
 #
 #==============================================================================================
 
 import collections
 import thread
 import utf8
+import wake
 
 struct CommandState:
     var cancelled: @bool
@@ -28,6 +31,8 @@ struct CommandState:
     var environment_count: usize
     var code: i64
     var failure: str
+    ## The waker the worker calls on news, kept alive by the command's reference to it.
+    var waker: wake.Waker*?
 
 func command_text(text: str) -> str!:
     if not utf8.valid(text.bytes):
@@ -42,14 +47,19 @@ func command_text(text: str) -> str!:
 
 ## Launch without invoking a shell. `arguments` excludes the program name.
 ## Output merges stdout/stderr in observation order, bounded by output_limit.
-## wait blocks until the program ends; poll with is_finished without blocking the UI;
+## wait blocks until the program ends. A UI does not poll: given a `waker` (luce-ui's
+## `Notifier.waker()`), the worker wakes it whenever output arrives and once the program
+## is done, and the woken side reads `revision`, `output` and `is_finished`.
 ## close cancels a program still running, then joins.
 pub struct Command:
     var storage: CommandState*?
     var worker: thread.Handle?
+    var waker: interop.Reference[wake.Waker]?
 
-    ## Start `program` with `arguments` in a background worker, capturing output up to `output_limit`.
-    pub func init(program: str, arguments: const str[], directory: str = "", output_limit: usize = 1048576, environment: const str[]? = none) -> !:
+    ## Start `program` with `arguments` in a background worker, capturing output up to
+    ## `output_limit`. `waker` is woken from the worker on new output, and once when the
+    ## program has exited, failed or been cancelled; the command holds it until `close`.
+    pub func init(program: str, arguments: const str[], directory: str = "", output_limit: usize = 1048576, environment: const str[]? = none, waker: interop.Reference[wake.Waker]? = none) -> !:
         if program.length == 0 or output_limit < 1 or output_limit > 16777216:
             error(failed, "a command needs a program and an output limit in 1..16 MiB")
         let state = try new CommandState(limit = output_limit, code = -1) in memory.heap
@@ -65,9 +75,15 @@ pub struct Command:
             for index in 0..<overrides.length:
                 state.environment[index] = (c.str)(try command_text(overrides[index]))
                 state.environment_count += 1
+        if let told = waker:
+            state.waker = try told.get()
         let worker = try thread.spawn(command_entry, state, name = "command")
         self.storage = state
         self.worker = worker
+        var held: interop.Reference[wake.Waker]? = none
+        if let told = waker:
+            held = told.clone()
+        self.waker = held
 
     func state() -> CommandState*:
         return self.storage else trap("the command is closed")
@@ -76,7 +92,8 @@ pub struct Command:
     pub func is_finished() -> bool:
         return self.state().done.load(.acquire)
 
-    ## A counter that advances as captured output and status change.
+    ## A counter that advances as captured output and status change: each wake follows an
+    ## advance.
     pub func revision() -> i64:
         return (i64)self.state().changed.load(.acquire)
 
@@ -145,6 +162,10 @@ pub struct Command:
         let state = self.storage else return
         self.storage = none
         command_dispose(state)
+        # the worker has been joined: nothing wakes the waker now
+        if let told = self.waker:
+            self.waker = none
+            told.release()
 
 ## The interop type of a Command.
 pub let command_type: interop.Type[Command] = interop.Type[Command]("Command", Command.close, closeable = true)
@@ -175,14 +196,30 @@ func command_entry(raw: void*?):
     let state = (CommandState*)(raw else return)
     let outcome = run_controlled((c.str)state.program, state.arguments, (c.str)state.directory, state.environment if state.environment_count > 0 else none, state, false) catch failure:
         state.failure = strings.copy(failure.message) catch ignored: recover ""
-        state.done.store(true, .release)
+        command_finish(state)
         return
     state.code = (i64)outcome.0
     release_output(outcome.1)
     release_output(outcome.2)
-    state.done.store(true, .release)
+    command_finish(state)
 
+## Mark the command done and say so: the last change, and the last wake.
+func command_finish(state: CommandState*):
+    state.done.store(true, .release)
+    _ = state.changed.add(1, .release)
+    command_wake(state)
+
+func command_wake(state: CommandState*):
+    if let waker = state.waker:
+        waker.wake()
+
+## Keep `bytes` of the child's output, then wake the waker, outside the lock: a waker
+## may read the output at once.
 func command_append(state: CommandState*, bytes: const u8[]) -> !:
+    try command_store(state, bytes)
+    command_wake(state)
+
+func command_store(state: CommandState*, bytes: const u8[]) -> !:
     state.lock.lock()
     defer state.lock.unlock()
     if bytes.length > state.limit - state.used:

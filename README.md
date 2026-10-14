@@ -11,7 +11,8 @@ Base and serves Luce and Base programs alike.
 | --- | --- |
 | `from luce_std import files` | Files and directories: whole-file text and bytes, `File` objects, listings, walks, metadata, copying, renaming, temporary directories, read-only memory-mapped files (`map`) |
 | `from luce_std import paths` | Lexical filesystem paths: join, normalize, split |
-| `from luce_std import process` | Running programs (`run`, background `Command`), environment variables, the working directory |
+| `from luce_std import process` | Running programs (`run`, background `Command`, which wakes a `waker` as it writes and ends), environment variables, the working directory |
+| `from luce_std import wake` | `Waker`: how background work tells a waiting loop it has news, from any thread, without either knowing the other; luce-ui's `Notifier.waker()` makes one that wakes the UI loop, and `wake.waker(call, context, finish)` makes one from Base |
 | `from luce_std import net` | TCP connections and listeners by host name, name lookup, UDP; HTTP and WebSocket wire formats for Base; for event loops, connects that do not wait (`Connection.start_connect`, `finish_connect`) and name lookups on a thread of their own (`Lookup`) |
 | `from luce_std import clock` | The monotonic clock, durations, sleeping, calendar dates and ISO 8601 |
 | `from luce_std import ramp` | Houdini's ramp parameter (VEX `chramp`): a value or a color along 0..1 from points, each with a position, a value or color and an interpolation (`constant`, `linear`, `smooth` Catmull-Rom, `monotone` cubic, `bspline`), kept as a flat `f64` list; `lookup(data, t)`, `lookup_color` and `lookup_into` read it without allocating, `check(data)` validates it. See [Ramps](#ramps) |

@@ -1,0 +1,50 @@
+#==============================================================================================
+#
+#   wake - Telling a waiting loop that background work has news
+#
+#   DESCRIPTION:
+#       A `Waker` is how background work says "something changed" to whoever waits on it,
+#       without either side knowing the other: a UI loop, an event loop or a test. Work that
+#       runs on a thread of its own (a `process.Command`, a package's job) takes a waker,
+#       calls `wake()` from its thread whenever its state moves on, and the waiting side
+#       reads that state on its own thread once woken. Nothing is carried: the work keeps its
+#       results, as before, and a wake only says to look again. Wakes may come in bursts; the
+#       side that made the waker coalesces them (luce-ui's notifier runs its callback once
+#       per loop turn however many came).
+#
+#       The waiting side makes one from a function, its context and a finish that lets the
+#       context go when the last reference does (`waker`); luce-ui's `Notifier.waker()` is
+#       the usual maker. Work holds a clone of the reference while its thread may wake, and
+#       releases it after joining that thread, so a waker is never closed under a running
+#       thread: it has no `close`, and lives as long as anything references it.
+#
+#==============================================================================================
+
+import interop
+import memory
+
+## Something that wants to hear when background work has news (`waker`). `wake` may be
+## called from any thread, any number of times.
+pub struct Waker:
+    var call: func(void*) -> unit
+    var context: void*
+    var finish: func(void*) -> unit
+
+    ## Say that something changed: the maker's function runs here, on the calling thread.
+    pub func wake():
+        self.call(self.context)
+
+    func dispose():
+        self.finish(self.context)
+
+## The interop type of a Waker. Not closeable: a thread may still wake it while any
+## reference is held.
+pub let waker_type: interop.Type[Waker] = interop.Type[Waker]("Waker", Waker.dispose)
+
+## A waker whose `wake` calls `call(context)`, on whatever thread wakes it; `finish(context)`
+## runs once when its last reference is released. `call` must be safe on any thread.
+pub func waker(call: func(void*) -> unit, context: void*, finish: func(void*) -> unit) -> interop.Reference[Waker]!:
+    let made = new Waker(call = call, context = context, finish = finish) in memory.heap catch failure:
+        finish(context)
+        error(failure.code, failure.message)
+    return try interop.Reference[Waker].adopt(made, waker_type, memory.heap)
