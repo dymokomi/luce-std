@@ -1,5 +1,6 @@
 ## Exercise real child processes through the same executable on every host.
 import c
+import platform
 import files
 import io
 import os
@@ -8,6 +9,10 @@ import process
 import strings
 import thread
 import time
+
+extern func pipe(descriptors: i32*) -> i32
+extern func close(descriptor: i32) -> i32
+extern func fcntl(descriptor: i32, command: i32, ...) -> i32
 
 func wait_command(command: process.Command*) -> !:
     let started = time.now()
@@ -29,6 +34,11 @@ pub func main(arguments: str[]) -> i32!:
         if arguments[1] == "flood":
             while true:
                 _ = try output.write("1234567890".bytes)
+        if not platform.windows:
+            if arguments[1] == "descriptor" and arguments.length > 2:
+                # 9 when descriptor arguments[2] (open in the parent) reached this child
+                let descriptor = strings.parse_i64(arguments[2]) else return 2
+                return 9 if fcntl((i32)descriptor, 1) >= 0 else 0
         if arguments[1] == "unicode":
             _ = try output.write("éλ😀".bytes)
             return 0
@@ -37,6 +47,20 @@ pub func main(arguments: str[]) -> i32!:
     defer strings.release(running)
     let executable = try files.canonical((c.str)running)
     defer executable.release()
+    if not platform.windows:
+        # A pipe of this process stays out of its children, captured or not.
+        var held: i32[2]
+        assert(pipe((i32*)&held) == 0)
+        defer _ = close(held[0])
+        defer _ = close(held[1])
+        var number: u8[24]
+        # a copy ends in NUL, as an argument must
+        let written = try strings.copy(try strings.format(number, f"{held[1]}"))
+        defer strings.release(written)
+        let checked = try process.run((c.str)running, ["descriptor", (c.str)written])
+        defer checked.release()
+        assert(checked.value.exit_code == 0)
+        assert(try process.call((c.str)running, ["descriptor", (c.str)written]) == 0)
     var command = try process.Command(executable.value, ["stream"])
     defer command.close()
     let started = time.now()

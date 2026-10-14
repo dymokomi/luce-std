@@ -29,6 +29,8 @@ extern func kill(pid: i32, signal: i32) -> i32
 extern func c_read as "read"(descriptor: i32, buffer: void*, count: usize) -> isize
 extern func poll(descriptors: Poll*, count: u32, timeout: i32) -> i32
 extern func fcntl(descriptor: i32, command: i32, ...) -> i32
+extern func getdtablesize() -> i32
+extern func syscall(number: i64, ...) -> i64
 
 extern struct Poll:
     descriptor: i32
@@ -42,8 +44,31 @@ let set_flags: i32 = 4
 ## `O_NONBLOCK`: 4 on macOS, 2048 on Linux.
 let non_blocking: i32 = 4 if platform.macos else 2048
 let would_block: i32 = 35 if platform.macos else 11
+## Linux's close_range(2), which closes a range of descriptors in one call (5.9 and later).
+let close_range_call: i64 = 436
+## The most descriptors a child closes one by one when the system has no faster way.
+let most_descriptors: i32 = 65536
 ## The process could not be started or managed.
 pub let failed: ErrorCode = ErrorCode.package(8)
+
+## How far a child closes descriptors (`close_inherited`): the soft open-files limit,
+## at most `most_descriptors`. Read in the parent, before the fork.
+func descriptor_limit() -> i32:
+    let limit = getdtablesize()
+    return limit if limit > 3 and limit < most_descriptors else most_descriptors
+
+## In a forked child before exec: close every descriptor past the standard streams, so
+## the program inherits none of this process's files and pipes. Without this, a child
+## forked while another thread holds a pipe for its own child keeps that pipe's write end
+## open, and whoever reads the pipe waits for the end of output until this child exits.
+## Only close and syscall, which are async-signal-safe.
+func close_inherited(limit: i32):
+    if platform.linux and syscall(close_range_call, (i64)3, (i64)4294967295, (i64)0) == 0:
+        return
+    var descriptor: i32 = 3
+    while descriptor < limit:
+        _ = close(descriptor)
+        descriptor += 1
 
 ## A captured stream: bytes in the current allocator, grown as the program writes.
 struct Capture:
@@ -100,7 +125,8 @@ pub struct Completed:
 ## Run `program` with `arguments`, wait for it, and answer its exit status and what it
 ## wrote to its standard output and error. The result owns the two texts: Luce copies
 ## them; a Base caller reads `.value` and calls `release()`. Standard input is the
-## parent's. A capture failure terminates and reaps the child, then closes the pipes and
+## parent's, and no other descriptor of this process reaches it (on POSIX it closes the
+## rest before exec). A capture failure terminates and reaps the child, then closes the pipes and
 ## releases the captures; waiting never depends on output we stopped reading. The child
 ## only uses async-signal-safe operations between `fork` and `exec`,
 ## so a parent with other threads is safe (§15.3).
@@ -158,6 +184,7 @@ func run_controlled(program: c.str, arguments: const c.str[], directory: c.str, 
             _ = close(out_pipe[1])
             free(argv)
             error(failed, "run")
+        let limit = descriptor_limit()
         let pid = fork()
         if pid < 0:
             _ = close(out_pipe[0])
@@ -181,6 +208,7 @@ func run_controlled(program: c.str, arguments: const c.str[], directory: c.str, 
                 _exit(127)
             _ = close(out_pipe[1])
             _ = close(err_pipe[1])
+            close_inherited(limit)
             if ((str)directory).length > 0 and chdir(directory) != 0:
                 _exit(127)
             if selected.length > 0:
@@ -215,11 +243,13 @@ func run_controlled(program: c.str, arguments: const c.str[], directory: c.str, 
 
 ## `call` on POSIX: the child keeps this process's standard streams; `argv` is freed.
 func call_posix(program: c.str, argv: void*?[], directory: c.str, selected: (c.str?)[], slot: (c.str?)**) -> (i32, str, str)!:
+    let limit = descriptor_limit()
     let pid = fork()
     if pid < 0:
         free(argv)
         error(failed, "run")
     if pid == 0:
+        close_inherited(limit)
         if ((str)directory).length > 0 and chdir(directory) != 0:
             _exit(127)
         if selected.length > 0:
