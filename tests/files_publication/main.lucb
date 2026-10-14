@@ -21,6 +21,10 @@ func fill(data: u8[], identity: u8, generation: u8) -> usize:
     return length
 
 func publish(writer: Writer*) -> !:
+    # main skips on Windows; the checker keeps this function, so it leaves reference.c
+    # out of a Windows build itself
+    if platform.windows:
+        return
     let path = writer.path else trap("missing publication path")
     var output: u8[65536]
     for generation in 1..<65:
